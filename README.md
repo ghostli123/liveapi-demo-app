@@ -140,7 +140,7 @@ You can set up this app locally or via Cloud Shell.
 
     ```sh
     cd frontend
-    python3 -m http.server
+    python -m http.server
     ```
 
 1. Test the demo app:

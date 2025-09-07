@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vertex AI - Gemini Live (Branded Voice App)</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
+
+    <script type="importmap">
+    {
+      "imports": {
+        "@material/web/": "https://esm.run/@material/web/"
+      }
+    }
+    </script>
+    <script type="module">
+        import "@material/web/all.js";
+        import { styles as typescaleStyles } from "@material/web/typography/md-typescale-styles.js";
+
+        document.adoptedStyleSheets.push(typescaleStyles.styleSheet);
+    </script>
+
+    <script src="gemini-live-api.js"></script>
+    <script src="live-media-manager.js"></script>
+    <script src="cookieJar.js"></script>
+
+    <link rel="stylesheet" href="styles.css" />
+    <script defer src="script.js"></script>
+
+    <style>
+        /* --- General Styling & Variables from BrandedVoice.html --- */
+        :root {
+            --gcp-bg: #F8F9FA;
+            --gcp-surface: #FFFFFF;
+            --gcp-blue: #1A73E8;
+            --gcp-blue-hover: #1765CC;
+            --gcp-text-primary: #202124;
+            --gcp-text-secondary: #5F6368;
+            --gcp-border: #DADCE0;
+            --gcp-sidebar-bg: #F1F3F4;
+            --gcp-active-blue-bg: #E8F0FE;
+            --font-family: 'Roboto', sans-serif;
+        }
+
+        body {
+            margin: 0;
+            font-family: var(--font-family);
+            background-color: var(--gcp-bg);
+            color: var(--gcp-text-primary);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* --- Header --- */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 16px;
+            border-bottom: 1px solid var(--gcp-border);
+            background-color: var(--gcp-surface);
+            flex-shrink: 0;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .header-left .logo {
+            font-weight: 500;
+            font-size: 18px;
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .header-right .material-icons {
+            color: var(--gcp-text-secondary);
+        }
+
+        .user-avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background-color: #FDBAAB;
+        }
+
+        /* --- Main Container Layout --- */
+        .app-container {
+            display: flex;
+            flex-grow: 1;
+            overflow: hidden;
+        }
+
+        /* --- Left Sidebar --- */
+        .left-sidebar {
+            width: 240px;
+            background-color: var(--gcp-surface);
+            padding: 16px 8px;
+            border-right: 1px solid var(--gcp-border);
+            flex-shrink: 0;
+            overflow-y: auto;
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            padding: 8px 16px;
+            margin: 2px 0;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        .nav-item .material-icons {
+            margin-right: 20px;
+            font-size: 20px;
+            color: var(--gcp-text-secondary);
+        }
+
+        .nav-item.active {
+            background-color: var(--gcp-active-blue-bg);
+            color: var(--gcp-blue);
+            font-weight: 500;
+        }
+
+        .nav-item.active .material-icons {
+            color: var(--gcp-blue);
+        }
+
+        .nav-header {
+            font-size: 13px;
+            font-weight: 500;
+            padding: 16px 16px 8px;
+            color: var(--gcp-text-secondary);
+        }
+
+        /* --- Main Content Area --- */
+        .main-content {
+            flex-grow: 1;
+            padding: 24px 32px;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+        }
+
+        .main-header {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .main-header h1 {
+            font-size: 20px;
+            font-weight: 500;
+            margin: 0;
+        }
+
+        /* --- Right Sidebar --- */
+        .right-sidebar {
+            width: 360px;
+            background-color: var(--gcp-surface);
+            border-left: 1px solid var(--gcp-border);
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            flex-shrink: 0;
+            overflow-y: auto;
+        }
+
+        .config-section {
+            padding: 16px;
+            border: 1px solid var(--gcp-border);
+            border-radius: 8px;
+        }
+
+        .config-section h3 {
+            margin: 0 0 16px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .config-section md-outlined-text-field,
+        .config-section md-outlined-select {
+            width: 100%;
+            margin-bottom: 16px;
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 8px;
+            margin-top: 16px;
+        }
+
+        /* --- Collapsible sections from styles.css --- */
+        details>summary {
+            list-style: none;
+            cursor: pointer;
+        }
+
+        details>summary::-webkit-details-marker {
+            display: none;
+        }
+
+        details .details-content {
+            padding-top: 16px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- Header -->
+    <header class="header">
+        <div class="header-left">
+            <span class="material-icons">menu</span>
+            <div class="logo">Google Cloud</div>
+        </div>
+        <div class="header-right">
+            <span class="material-icons">help_outline</span>
+            <span class="material-icons">notifications</span>
+            <span class="material-icons">apps</span>
+            <div class="user-avatar"></div>
+        </div>
+    </header>
+
+    <!-- App Container -->
+    <div class="app-container">
+        <!-- Left Sidebar -->
+        <nav class="left-sidebar">
+            <div class="nav-item"><span class="material-icons">dashboard</span> Dashboard</div>
+            <div class="nav-item"><span class="material-icons">interests</span> Model Garden</div>
+            <div class="nav-header">Vertex AI Studio</div>
+            <div class="nav-item"><span class="material-icons">edit</span> Create prompt</div>
+            <div class="nav-item"><span class="material-icons">perm_media</span> Media Studio</div>
+            <div class="nav-item active"><span class="material-icons">sensors</span> Stream realtime</div>
+            <div class="nav-item"><span class="material-icons">collections_bookmark</span> Prompt gallery</div>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <div class="main-header">
+                <span class="material-icons">arrow_back</span>
+                <h1>Gemini Live</h1>
+            </div>
+
+            <div id="model-state">
+                <div id="disconnected" class="state"><span class="material-symbols-outlined">cloud_off</span><span
+                        class="icon-text">disconnected</span></div>
+                <div id="connecting" class="state" hidden><span
+                        class="material-symbols-outlined">hourglass_empty</span><span
+                        class="icon-text">connecting...</span></div>
+                <div id="connected" class="state" hidden><span class="material-symbols-outlined">cloud_done</span><span
+                        class="icon-text">connected</span></div>
+                <div id="speaking" class="state" hidden><span class="material-symbols-outlined">graphic_eq</span><span
+                        class="icon-text">model speaking</span></div>
+            </div>
+
+            <div id="video-preview-container" style="margin-top: 16px;">
+                <video id="video" autoplay playsinline muted></video>
+                <canvas id="canvas" style="display: none;"></canvas>
+            </div>
+
+            <div class="media-controls" style="margin-top: 16px;">
+                <md-outlined-select id="cameraSource" label="Camera"
+                    onchange="newCameraSelected()"></md-outlined-select>
+                <md-outlined-select id="audioSource" label="Microphone"
+                    onchange="newMicSelected()"></md-outlined-select>
+                <span id="micBtn"><md-filled-icon-button
+                        onclick="micBtnClick()"><md-icon>mic</md-icon></md-filled-icon-button></span>
+                <span id="micOffBtn" hidden><md-filled-icon-button
+                        onclick="micOffBtnClick()"><md-icon>mic_off</md-icon></md-filled-icon-button></span>
+                <span id="cameraBtn"><md-filled-icon-button
+                        onclick="cameraBtnClick()"><md-icon>videocam</md-icon></md-filled-icon-button></span>
+                <span id="cameraOffBtn" hidden><md-filled-icon-button
+                        onclick="cameraOffBtnClick()"><md-icon>videocam_off</md-icon></md-filled-icon-button></span>
+                <span id="screenBtn"><md-filled-icon-button
+                        onclick="screenShareBtnClick()"><md-icon>present_to_all</md-icon></md-filled-icon-button></span>
+            </div>
+
+            <div id="chat-container" style="margin-top: 16px; flex-grow: 1;">
+                <div id="text-chat" style="height: auto; flex-grow: 1;"></div>
+                <div class="text-input-area">
+                    <md-outlined-text-field id="text-message" label="Send a text message"></md-outlined-text-field>
+                    <md-icon-button onclick="newUserMessage()"><md-icon>send</md-icon></md-icon-button>
+                </div>
+            </div>
+
+        </main>
+
+        <!-- Right Sidebar (Configuration) -->
+        <aside class="right-sidebar">
+            <div class="config-section">
+                <h3>Connection</h3>
+                <md-outlined-text-field id="token" label="Access Token" type="password"></md-outlined-text-field>
+                <md-outlined-text-field id="project" label="Project ID"></md-outlined-text-field>
+                <md-outlined-select label="Environment" id="envApiHost">
+                    <md-select-option selected value="autopush">
+                        <div slot="headline">autopush</div>
+                    </md-select-option>
+                    <md-select-option value="staging">
+                        <div slot="headline">staging</div>
+                    </md-select-option>
+                    <md-select-option value="prod">
+                        <div slot="headline">prod</div>
+                    </md-select-option>
+                </md-outlined-select>
+                <div class="button-group">
+                    <md-filled-button onclick="connectBtnClick()">Connect</md-filled-button>
+                    <md-outlined-button onclick="disconnectBtnClick()">Disconnect</md-outlined-button>
+                </div>
+            </div>
+
+            <details class="config-section">
+                <summary>
+                    <h3>Model Behavior</h3>
+                </summary>
+                <div class="details-content">
+                    <p class="md-typescale-body-medium" style="margin-top: 0; margin-bottom: 16px;">Model response type
+                    </p>
+                    <form>
+                        <md-radio id="audio-radio" name="responseModality" value="AUDIO" checked></md-radio>
+                        <label for="audio-radio">Audio</label>
+                        <md-radio id="text-radio" name="responseModality" value="TEXT"
+                            style="margin-left: 24px;"></md-radio>
+                        <label for="text-radio">Text</label>
+                    </form>
+                    <br />
+                    <md-outlined-text-field id="systemInstructions" type="textarea" label="System Instructions"
+                        rows="3"></md-outlined-text-field>
+                </div>
+            </details>
+
+            <div class="config-section">
+                <h3>Outputs</h3>
+                <div class="form-grid">
+                    <md-outlined-select label="Voice Name" id="voiceName">
+                        <md-select-option selected value="puck">
+                            <div slot="headline">puck</div>
+                        </md-select-option>
+                        <md-select-option value="charon">
+                            <div slot="headline">charon</div>
+                        </md-select-option>
+                        <md-select-option value="kore">
+                            <div slot="headline">kore</div>
+                        </md-select-option>
+                        <md-select-option value="fenrir">
+                            <div slot="headline">fenrir</div>
+                        </md-select-option>
+                        <md-select-option value="aoede">
+                            <div slot="headline">aoede</div>
+                        </md-select-option>
+                        <md-select-option value="orus">
+                            <div slot="headline">orus</div>
+                        </md-select-option>
+                        <md-select-option value="zephyr">
+                            <div slot="headline">zephyr</div>
+                        </md-select-option>
+                        <md-select-option value="leda">
+                            <div slot="headline">leda</div>
+                        </md-select-option>
+                    </md-outlined-select>
+                    <md-outlined-select label="Voice Locale" id="voiceLocale">
+                        <md-select-option selected value="en-US">
+                            <div slot="headline">en-US</div>
+                        </md-select-option>
+                        <md-select-option value="de-DE">
+                            <div slot="headline">de-DE</div>
+                        </md-select-option>
+                        <md-select-option value="en-AU">
+                            <div slot="headline">en-AU</div>
+                        </md-select-option>
+                        <md-select-option value="en-GB">
+                            <div slot="headline">en-GB</div>
+                        </md-select-option>
+                    </md-outlined-select>
+                </div>
+            </div>
+
+            <details class="config-section">
+                <details class="config-section" hidden>
+                    <summary>
+                        <h3>Advanced Settings</h3>
+                    </summary>
+                    <div class="details-content">
+                        <b>Transcription</b><br />
+                        <div class="checkbox-row">
+                            <md-checkbox id="inputTranscript" touch-target="wrapper"></md-checkbox>
+                            <label for="inputTranscript">Input Audio Transcripts</label><br />
+                        </div>
+                        <div class="checkbox-row">
+                            <md-checkbox id="outputTranscript" touch-target="wrapper"></md-checkbox>
+                            <label for="outputTranscript">Output Audio Transcripts</label><br /><br />
+                        </div>
+
+                        <b>Session Resumption</b><br />
+                        <div class="checkbox-row">
+                            <md-checkbox id="resumption" touch-target="wrapper"></md-checkbox>
+                            <label for="resumption">Enable session resumption</label><br />
+                        </div>
+                        <md-outlined-text-field id="handle"
+                            label="Resumption Handle"></md-outlined-text-field><br /><br />
+
+                        <b>VAD & Proactivity</b><br />
+                        <div class="checkbox-row">
+                            <md-checkbox id="disableInterruption" touch-target="wrapper"></md-checkbox>
+                            <label for="disableInterruption">Disable Interruption</label><br />
+                        </div>
+                        <div class="checkbox-row">
+                            <md-checkbox id="disableDetection" touch-target="wrapper"></md-checkbox>
+                            <label for="disableDetection">Disable Audio Endpointing Detection</label><br />
+                        </div>
+                        <div class="checkbox-row">
+                            <md-checkbox id="proactiveVideo" touch-target="wrapper"></md-checkbox>
+                            <label for="proactiveVideo">Enable Proactive Video</label><br /><br />
+                        </div>
+
+                        <b class="settings-subtitle">Sampling Rate</b><br />
+                        <div class="form-grid" style="margin-bottom: 20px;">
+                            <md-outlined-text-field id="audioInterval" type="number" label="Audio Interval (ms)"
+                                value="1000"></md-outlined-text-field>
+                            <md-outlined-text-field id="videoInterval" type="number" label="Video Frame Interval (ms)"
+                                value="5000"></md-outlined-text-field>
+                        </div>
+
+                        <b class="settings-subtitle">Detection Sensitivity</b><br />
+                        <div class="form-grid">
+                            <md-outlined-select label="Start Sensitivity" id="startSensitivity">
+                                <md-select-option selected value="low">
+                                    <div slot="headline">low</div>
+                                </md-select-option>
+                                <md-select-option value="high">
+                                    <div slot="headline">high</div>
+                                </md-select-option>
+                            </md-outlined-select>
+                            <md-outlined-select label="End Sensitivity" id="endSensitivity">
+                                <md-select-option selected value="low">
+                                    <div slot="headline">low</div>
+                                </md-select-option>
+                                <md-select-option value="high">
+                                    <div slot="headline">high</div>
+                                </md-select-option>
+                            </md-outlined-select>
+                        </div>
+                    </div>
+    </div>
+    </aside>
+    </div>
+
+    <md-dialog id="dialog" close>
+        <div slot="content">
+            <span id="dialogMessage">A dialog that is opened by default.</span>
+        </div>
+    </md-dialog>
+
+</body>
+
+</html>

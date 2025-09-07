@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vertex AI - Gemini Live Mockup (Branded Voice)</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <style>
+        /* --- General Styling & Variables --- */
+        :root {
+            --gcp-bg: #F8F9FA;
+            --gcp-surface: #FFFFFF;
+            --gcp-blue: #1A73E8;
+            --gcp-blue-hover: #1765CC;
+            --gcp-text-primary: #202124;
+            --gcp-text-secondary: #5F6368;
+            --gcp-border: #DADCE0;
+            --gcp-sidebar-bg: #F1F3F4;
+            --gcp-active-blue-bg: #E8F0FE;
+            --font-family: 'Roboto', sans-serif;
+        }
+
+        body {
+            margin: 0;
+            font-family: var(--font-family);
+            background-color: var(--gcp-bg);
+            color: var(--gcp-text-primary);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* --- Header --- */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 16px;
+            border-bottom: 1px solid var(--gcp-border);
+            background-color: var(--gcp-surface);
+            flex-shrink: 0;
+        }
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+        .header-left .logo {
+            font-weight: 500;
+            font-size: 18px;
+        }
+        .search-bar {
+            display: flex;
+            align-items: center;
+            background-color: var(--gcp-bg);
+            padding: 8px 12px;
+            border-radius: 8px;
+            width: 400px;
+        }
+        .search-bar input {
+            border: none;
+            background: transparent;
+            outline: none;
+            width: 100%;
+            margin-left: 8px;
+        }
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+        .header-right .material-icons {
+            color: var(--gcp-text-secondary);
+        }
+        .user-avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background-color: #FDBAAB;
+        }
+
+        /* --- Main Container Layout --- */
+        .app-container {
+            display: flex;
+            flex-grow: 1;
+            overflow: hidden;
+        }
+
+        /* --- Left Sidebar --- */
+        .left-sidebar {
+            width: 240px;
+            background-color: var(--gcp-surface);
+            padding: 16px 8px;
+            border-right: 1px solid var(--gcp-border);
+            flex-shrink: 0;
+            overflow-y: auto;
+        }
+        .nav-item {
+            display: flex;
+            align-items: center;
+            padding: 8px 16px;
+            margin: 2px 0;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .nav-item .material-icons {
+            margin-right: 20px;
+            font-size: 20px;
+            color: var(--gcp-text-secondary);
+        }
+        .nav-item.active {
+            background-color: var(--gcp-active-blue-bg);
+            color: var(--gcp-blue);
+            font-weight: 500;
+        }
+        .nav-item.active .material-icons {
+            color: var(--gcp-blue);
+        }
+        .nav-header {
+            font-size: 13px;
+            font-weight: 500;
+            padding: 16px 16px 8px;
+            color: var(--gcp-text-secondary);
+        }
+        .nav-header .material-icons {
+            font-size: 16px; float: right;
+        }
+
+        /* --- Main Content Area --- */
+        .main-content {
+            flex-grow: 1;
+            padding: 24px 32px;
+            display: flex;
+            flex-direction: column;
+        }
+        .main-header {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .main-header h1 {
+            font-size: 20px;
+            font-weight: 500;
+            margin: 0;
+        }
+        .system-instructions {
+            background-color: var(--gcp-surface);
+            border: 1px solid var(--gcp-border);
+            border-radius: 8px;
+            padding: 16px;
+        }
+        .system-instructions textarea {
+            width: 100%;
+            border: none;
+            outline: none;
+            resize: none;
+            min-height: 60px;
+            font-family: var(--font-family);
+        }
+        .card-container {
+            display: flex;
+            gap: 16px;
+            margin: 24px 0;
+        }
+        .card {
+            flex: 1;
+            background-color: var(--gcp-surface);
+            border: 1px solid var(--gcp-border);
+            border-radius: 8px;
+            padding: 16px;
+        }
+        .card h3 { margin: 0 0 8px; font-size: 16px; display: flex; align-items: center; gap: 8px;}
+        .card p { margin: 0; font-size: 14px; color: var(--gcp-text-secondary); }
+        .main-content-footer {
+            margin-top: auto;
+            border-top: 1px solid var(--gcp-border);
+            padding-top: 16px;
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+        }
+        .start-session-btn {
+            background-color: var(--gcp-blue);
+            color: white;
+            border: none;
+            padding: 10px 24px;
+            border-radius: 4px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .start-session-btn:hover {
+            background-color: var(--gcp-blue-hover);
+        }
+
+        /* --- Right Sidebar --- */
+        .right-sidebar {
+            width: 320px;
+            background-color: var(--gcp-surface);
+            border-left: 1px solid var(--gcp-border);
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+            flex-shrink: 0;
+        }
+        .config-section {
+            padding: 16px;
+            border: 1px solid var(--gcp-border);
+            border-radius: 8px;
+        }
+        .config-section h3 {
+            margin: 0 0 16px;
+            font-size: 14px;
+            font-weight: 500;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .form-group label {
+            display: block;
+            font-size: 14px;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+        select, input[type="text"] {
+            width: 100%;
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid var(--gcp-border);
+            background-color: var(--gcp-surface);
+        }
+        .create-voice-link {
+            color: var(--gcp-blue);
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            margin-top: 12px;
+            display: inline-block;
+        }
+        .create-voice-link:hover { text-decoration: underline; }
+
+        /* --- Modal for Branded Voice Creation --- */
+        .modal-backdrop {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            display: none; /* Hidden by default */
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-content {
+            background-color: var(--gcp-surface);
+            padding: 24px;
+            border-radius: 8px;
+            width: 90%;
+            max-width: 600px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .modal-header h2 {
+            margin: 0;
+            font-size: 20px;
+        }
+        .close-button {
+            cursor: pointer;
+            background: none;
+            border: none;
+            font-size: 24px;
+            color: var(--gcp-text-secondary);
+        }
+        .modal-body .form-group {
+            margin-bottom: 20px;
+        }
+        .record-section {
+            background-color: var(--gcp-bg);
+            border: 1px solid var(--gcp-border);
+            border-radius: 8px;
+            padding: 16px;
+            margin-top: 16px;
+        }
+        .record-section p {
+            color: var(--gcp-text-secondary);
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        .record-controls {
+            margin-top: 16px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+        #recordButton {
+            background-color: var(--gcp-blue);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        #recordButton:disabled {
+            background-color: #E0E0E0;
+            cursor: not-allowed;
+            color: var(--gcp-text-secondary);
+        }
+        #recordStatus {
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--gcp-text-secondary);
+        }
+        .spinner {
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid var(--gcp-blue);
+            border-radius: 50%;
+            width: 16px;
+            height: 16px;
+            animation: spin 1s linear infinite;
+            display: none; /* Hidden by default */
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+    </style>
+</head>
+<body>
+
+    <!-- Header -->
+    <header class="header">
+        <div class="header-left">
+            <span class="material-icons">menu</span>
+            <div class="logo">Google Cloud</div>
+            <div class="search-bar">
+                <span class="material-icons">search</span>
+                <input type="text" placeholder="Search (/) for resources, docs, products, and more">
+            </div>
+        </div>
+        <div class="header-right">
+            <span class="material-icons">help_outline</span>
+            <span class="material-icons">notifications</span>
+            <span class="material-icons">apps</span>
+            <div class="user-avatar"></div>
+        </div>
+    </header>
+
+    <!-- App Container -->
+    <div class="app-container">
+        <!-- Left Sidebar -->
+        <nav class="left-sidebar">
+            <div class="nav-item"><span class="material-icons">dashboard</span> Dashboard</div>
+            <div class="nav-item"><span class="material-icons">interests</span> Model Garden</div>
+            <div class="nav-header">Vertex AI Studio <span class="material-icons">expand_less</span></div>
+            <div class="nav-item"><span class="material-icons">edit</span> Create prompt</div>
+            <div class="nav-item"><span class="material-icons">perm_media</span> Media Studio</div>
+            <div class="nav-item active"><span class="material-icons">sensors</span> Stream realtime</div>
+            <div class="nav-item"><span class="material-icons">collections_bookmark</span> Prompt gallery</div>
+             <!-- ... other nav items ... -->
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <div class="main-header">
+                <span class="material-icons">arrow_back</span>
+                <h1>Gemini Live</h1>
+            </div>
+            <div class="system-instructions">
+                <label>System instructions <span class="material-icons" style="font-size: 16px; color: var(--gcp-text-secondary);">help_outline</span></label>
+                <textarea placeholder="Give the model context to understand the task and provide tailored responses"></textarea>
+            </div>
+
+            <div class="card-container">
+                <div class="card">
+                    <h3><span class="material-icons" style="color:#A142F4;">mic</span> Talk to Gemini</h3>
+                    <p>Start a real-time conversation using your microphone.</p>
+                </div>
+                <div class="card">
+                    <h3><span class="material-icons" style="color:#A142F4;">flip_camera_android</span> Show Gemini</h3>
+                    <p>Use your webcam to share what you're looking at and get real-time feedback.</p>
+                </div>
+                <div class="card">
+                    <h3><span class="material-icons" style="color:#A142F4;">screen_share</span> Share your screen</h3>
+                    <p>Share your screen to show Gemini what you're working on.</p>
+                </div>
+            </div>
+            
+            <p style="text-align: center; color: var(--gcp-text-secondary);">Click "Start Session" to start enable streaming</p>
+
+            <div class="main-content-footer">
+                <button class="start-session-btn" onclick="alert('Session started with ' + document.getElementById('voice-dropdown').selectedOptions[0].text + ' voice.')">Start Session</button>
+            </div>
+        </main>
+
+        <!-- Right Sidebar (Configuration) -->
+        <aside class="right-sidebar">
+            <div class="config-section">
+                <h3>Model</h3>
+                <p>gemini-live-2.5-flash...</p>
+            </div>
+
+            <div class="config-section">
+                <h3>Outputs</h3>
+                <div class="form-group">
+                    <label for="voice-dropdown">Voice</label>
+                    <select id="voice-dropdown">
+                        <option value="zephyr">zephyr</option>
+                        <option value="google-1">Google Voice 1</option>
+                        <option value="google-2">Google Voice 2</option>
+                    </select>
+                    <div class="create-voice-link" id="createVoiceBtn">
+                        + Create a new branded voice
+                    </div>
+                </div>
+            </div>
+
+            <div class="config-section">
+                 <h3>Tools</h3>
+                 <!-- ... other tools ... -->
+            </div>
+        </aside>
+    </div>
+
+
+    <!-- Branded Voice Creation Modal -->
+    <div id="brandedVoiceModal" class="modal-backdrop">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Create a new branded voice</h2>
+                <button class="close-button" id="closeModalBtn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <!-- Step 2: Name the voice -->
+                <div class="form-group">
+                    <label for="newVoiceName">Reference voice name</label>
+                    <input type="text" id="newVoiceName" placeholder="e.g., My custom branded voice">
+                </div>
+
+                <!-- Step 3: Record reference audio -->
+                <div class="form-group">
+                    <label>Record reference audio</label>
+                    <div class="record-section">
+                        Read the following text aloud clearly. A recording of at least 10 seconds is required.
+                        <p>
+                            <i>“If this is true then those who tend to think creatively really are somehow different. She will likely jump for joy and want to skip straight to the honeymoon. The sugar syrup should create very fine strands of sugar that drape over the handles. But really in the grand scheme of things, this information is insignificant. I let the positive overrule the negative.”</i>
+                        </p>
+                        <div class="record-controls">
+                            <button id="recordButton">
+                                <span class="material-icons">mic</span>
+                                Record reference voice
+                            </button>
+                            <div class="spinner" id="processingSpinner"></div>
+                            <span id="recordStatus"></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <script>
+        // --- DOM Element References ---
+        const createVoiceBtn = document.getElementById('createVoiceBtn');
+        const modal = document.getElementById('brandedVoiceModal');
+        const closeModalBtn = document.getElementById('closeModalBtn');
+        const newVoiceNameInput = document.getElementById('newVoiceName');
+        const recordButton = document.getElementById('recordButton');
+        const recordStatus = document.getElementById('recordStatus');
+        const processingSpinner = document.getElementById('processingSpinner');
+        const voiceDropdown = document.getElementById('voice-dropdown');
+
+        // --- Event Listeners ---
+        createVoiceBtn.addEventListener('click', openModal);
+        closeModalBtn.addEventListener('click', closeModal);
+        window.addEventListener('click', (event) => {
+            if (event.target === modal) {
+                closeModal();
+            }
+        });
+        recordButton.addEventListener('click', handleRecordClick);
+
+        // --- Functions ---
+        
+        /**
+         * Step 1: User clicks "create a new branded voice"
+         * This function opens the modal.
+         */
+        function openModal() {
+            modal.style.display = 'flex';
+            // Reset modal state
+            newVoiceNameInput.value = '';
+            recordButton.disabled = false;
+            recordButton.innerHTML = '<span class="material-icons">mic</span> Record reference voice';
+            recordStatus.textContent = '';
+            processingSpinner.style.display = 'none';
+        }
+
+        function closeModal() {
+            modal.style.display = 'none';
+        }
+
+        /**
+         * Step 3: User clicks the "record" button
+         * This function simulates the recording and processing flow.
+         */
+        function handleRecordClick() {
+            // Step 2 validation
+            const voiceName = newVoiceNameInput.value.trim();
+            if (voiceName === '') {
+                alert('Please enter a name for the reference voice.');
+                newVoiceNameInput.focus();
+                return;
+            }
+
+            recordButton.disabled = true;
+            let countdown = 12; // Simulating a >10 second recording
+            recordStatus.textContent = `Recording... ${countdown}s remaining`;
+
+            const recordInterval = setInterval(() => {
+                countdown--;
+                recordStatus.textContent = `Recording... ${countdown}s remaining`;
+                if (countdown <= 0) {
+                    clearInterval(recordInterval);
+                    recordStatus.textContent = 'Recording complete. Processing...';
+                    recordButton.innerHTML = 'Processing...';
+                    processingSpinner.style.display = 'block';
+                    simulateProcessing(voiceName);
+                }
+            }, 1000);
+        }
+
+        /**
+         * Step 4: Simulate backend processing
+         * This function simulates the audio tokenization and adds the voice to the dropdown.
+         */
+        function simulateProcessing(voiceName) {
+            setTimeout(() => {
+                // Step 4 & 5: Add to dropdown and select it
+                const newOption = document.createElement('option');
+                const optionValue = voiceName.toLowerCase().replace(/\s/g, '-');
+                newOption.value = optionValue;
+                newOption.textContent = voiceName;
+                newOption.selected = true; // Select the new voice automatically
+                
+                voiceDropdown.appendChild(newOption);
+
+                alert(`New branded voice "${voiceName}" has been created and selected!`);
+                
+                closeModal(); // Close the modal after successful creation
+            }, 3000); // Simulate 3 seconds of processing
+        }
+
+    </script>
+</body>
+</html>
