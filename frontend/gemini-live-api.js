@@ -32,7 +32,7 @@ class GeminiLiveResponseMessage {
             if (data?.serverContent?.outputTranscription?.text) {
                 this.data = data?.serverContent?.outputTranscription?.text;
             } else if (data?.serverContent?.outputTranscription?.finished) {
-                this.data = "Finished: "+data?.serverContent?.outputTranscription?.finished
+                this.data = "Finished: " + data?.serverContent?.outputTranscription?.finished
             }
         } else if (this.endOfTurn) {
             this.data = "END OF TURN";
@@ -80,6 +80,7 @@ class GeminiLiveAPI {
         this.voiceName = "";
         this.voiceLocale = "";
         this.enableSessionResumption = false;
+        this.customVoiceSample = "";
         this.resumptionHandle = "";
         this.disableDetection = false;
         this.disableInterruption = false;
@@ -113,6 +114,10 @@ class GeminiLiveAPI {
     setVoice(name, locale) {
         this.voiceName = name;
         this.voiceLocale = locale;
+    }
+
+    setCustomVoice(base64Wav) {
+        this.customVoiceSample = base64Wav;
     }
 
     setResumption(enable, handle) {
@@ -191,9 +196,13 @@ class GeminiLiveAPI {
                 generation_config: {
                     response_modalities: this.responseModalities,
                     speech_config: {
-                        voice_config: {
-                            prebuilt_voice_config: {voice_name: this.voiceName},
-                        },
+                        voice_config: this.customVoiceSample ?
+                            { custom_voice_config: { custom_voice_sample: this.customVoiceSample } } :
+                            {
+                                prebuilt_voice_config: {
+                                    voice_name: this.voiceName
+                                }
+                            },
                         language_code: this.voiceLocale
                     }
                 },

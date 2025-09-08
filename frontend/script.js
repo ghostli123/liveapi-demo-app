@@ -51,6 +51,8 @@ const disableDetection = document.getElementById("disableDetection");
 const startSensitivity = document.getElementById("startSensitivity");
 const endSensitivity = document.getElementById("endSensitivity");
 
+const audioFileInput = document.getElementById("audioFileInput");
+const fileNameDisplay = document.getElementById("fileName");
 const proactiveVideo = document.getElementById("proactiveVideo");
 const audioInterval = document.getElementById("audioInterval");
 const videoInterval = document.getElementById("videoInterval");
@@ -62,6 +64,21 @@ geminiLiveApi.onErrorMessage = (message) => {
     showDialogWithMessage(message);
     setAppStatus("disconnected");
 };
+
+let customVoiceBase64 = "";
+audioFileInput.addEventListener('change', (event) => {
+    const file = event.target.files[0];
+    if (file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            // The result includes the data URL header, so we split it.
+            // e.g., "data:audio/wav;base64,UklGRiYAAABXQVZFZm10IBAAAA..." -> "UklGRiYAAABXQVZFZm10IBAAAA..."
+            customVoiceBase64 = e.target.result.split(',')[1];
+            fileNameDisplay.textContent = `File: ${file.name}`;
+        };
+        reader.readAsDataURL(file);
+    }
+});
 
 function getSelectedResponseModality() {
     const radioButtons = document.querySelectorAll(
@@ -104,7 +121,8 @@ function connectBtnClick() {
     geminiLiveApi.setResumption(enableResumption.checked, resumptionHandle.value);
     geminiLiveApi.setVoice(voiceName.value, voiceLocale.value);
     geminiLiveApi.setVad(disableInterruption.checked, disableDetection.checked,
-        startSensitivity.value, endSensitivity.value
+        geminiLiveApi.setCustomVoice(customVoiceBase64);
+    startSensitivity.value, endSensitivity.value
     );
     geminiLiveApi.setProactiveVideo(proactiveVideo.checked);
 
@@ -268,6 +286,9 @@ function disconnectBtnClick() {
     setAppStatus("disconnected");
     geminiLiveApi.disconnect();
     stopAudioInput();
+    customVoiceBase64 = "";
+    audioFileInput.value = ""; // Reset file input
+    fileNameDisplay.textContent = "";
 }
 
 function showDialogWithMessage(messageText) {
