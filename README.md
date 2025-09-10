@@ -40,8 +40,7 @@ You can set up this app locally or via Cloud Shell.
     cd generative-ai/gemini/multimodal-live-api/websocket-demo-app
     ```
 
-1. Create a new virtual environment and activate it:
-
+1. Create a new virtual environment and activate it. The code is tested under `Python 3.9.6`.
     ```sh
     python3 -m venv env
     source env/bin/activate
