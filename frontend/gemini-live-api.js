@@ -182,12 +182,12 @@ class GeminiLiveAPI {
     }
 
     sendInitialSetupMessages() {
+        console.log("start setting up")
         const serviceSetupMessage = {
             bearer_token: this.accessToken,
             service_url: this.serviceUrl,
         };
         this.sendMessage(serviceSetupMessage);
-
         const sessionSetupMessage = {
             setup: {
                 model: this.modelUri,
@@ -208,6 +208,7 @@ class GeminiLiveAPI {
                 },
             },
         };
+        console.log(sessionSetupMessage)
 
         if (this.systemInstructions && this.systemInstructions.trim()) {
             sessionSetupMessage.setup.system_instruction = {

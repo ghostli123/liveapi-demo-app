@@ -66,12 +66,13 @@ geminiLiveApi.onErrorMessage = (message) => {
 };
 
 let customVoiceBase64 = "";
-console.log("----")
 audioFileInput.addEventListener('change', (event) => {
     const file = event.target.files[0];
+
     if (file) {
         const reader = new FileReader();
         reader.onload = (e) => {
+            console.log(e.target.result)
             // The result includes the data URL header, so we split it.
             // e.g., "data:audio/wav;base64,UklGRiYAAABXQVZFZm10IBAAAA..." -> "UklGRiYAAABXQVZFZm10IBAAAA..."
             customVoiceBase64 = e.target.result.split(',')[1];
