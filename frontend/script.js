@@ -15,8 +15,8 @@ const PROJECT_ID = "visionai-testing-stable";
 const MODEL = "gemini-live-2.5-flash-preview-native-audio-09-09"
 // const MODEL = "gemini-2.5-flash-preview-native-audio-dialog";
 // const API_HOST = "us-central1-aiplatform.googleapis.com";
-const API_HOST = "us-central1-autopush-aiplatform.sandbox.googleapis.com";
-// const API_HOST = "us-central1-staging-aiplatform.sandbox.googleapis.com";
+// const API_HOST = "us-central1-autopush-aiplatform.sandbox.googleapis.com";
+const API_HOST = "us-central1-staging-aiplatform.sandbox.googleapis.com";
 const accessTokenInput = document.getElementById("token");
 const projectInput = document.getElementById("project");
 const systemInstructionsInput = document.getElementById("systemInstructions");
@@ -66,6 +66,7 @@ geminiLiveApi.onErrorMessage = (message) => {
 };
 
 let customVoiceBase64 = "";
+console.log("----")
 audioFileInput.addEventListener('change', (event) => {
     const file = event.target.files[0];
     if (file) {
@@ -111,6 +112,7 @@ function getApiHost() {
 
 function connectBtnClick() {
     setAppStatus("connecting");
+    console.log("Connecting...")
 
     geminiLiveApi.responseModalities = getSelectedResponseModality();
     if (getSystemInstructions() !== "") {
@@ -120,10 +122,12 @@ function connectBtnClick() {
     geminiLiveApi.setTranscript(inputTranscript.checked, outputTranscript.checked);
     geminiLiveApi.setResumption(enableResumption.checked, resumptionHandle.value);
     geminiLiveApi.setVoice(voiceName.value, voiceLocale.value);
-    geminiLiveApi.setVad(disableInterruption.checked, disableDetection.checked,
-        geminiLiveApi.setCustomVoice(customVoiceBase64);
-    startSensitivity.value, endSensitivity.value
+    geminiLiveApi.setVad(disableInterruption.checked, 
+        disableDetection.checked,
+        startSensitivity.value, 
+        endSensitivity.value
     );
+    geminiLiveApi.setCustomVoice(customVoiceBase64);
     geminiLiveApi.setProactiveVideo(proactiveVideo.checked);
 
 
