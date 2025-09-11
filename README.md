@@ -40,8 +40,7 @@ You can set up this app locally or via Cloud Shell.
     cd generative-ai/gemini/multimodal-live-api/websocket-demo-app
     ```
 
-1. Create a new virtual environment and activate it:
-
+1. Create a new virtual environment and activate it. The code is tested under `Python 3.9.6`.
     ```sh
     python3 -m venv env
     source env/bin/activate
@@ -71,7 +70,10 @@ You can set up this app locally or via Cloud Shell.
     python -m http.server
     ```
 
-1. Point your browser to the demo app UI based on the output of the terminal. (e.g., it may be `http://localhost:8000`, or it may use a different port.)
+1. Point your browser to the demo app UI based on the output of the terminal. (e.g., it may be `http://localhost:8000`, or it may use a different port. Make sure you go to the page through `http://localhost:<port>`
+instead of using the the pop-up message's `http://[::]:8000/`, the latter will direct you to a restricted 
+page without sufficient permissions to start microphone/camera, which further leads to silent exceptions
+in the web page.) **In addition, make sure your browser doesn't cache data for localhost. On Mac, Cmd+Option+I and go to the `Network` tab and then check the box of "Disable Cache".**
 
 1. Get your Google Cloud access token:
    Run the following command in a terminal with gcloud installed to set your project, and to retrieve your access token.
