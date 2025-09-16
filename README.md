@@ -94,6 +94,11 @@ in the web page.) **In addition, make sure your browser doesn't cache data for l
 
     - After entering your Access Token and Model ID, press the connect button to connect your web app. Now you should be able to interact with Gemini 2.0 with the Multimodal Live API.
 
+    - **Caution**: to enable `branded voice` by uploading a `.wav` file, make sure you upload the file when the app is at `Disconnected` state, and then click
+    the `connect` button. This restriction is because our code instantite the client only when the `Connect` button is clicked, during which it sends LiveAPI a setup message with the sample voice. 
+    This is also true if you want to record you own voice as "branded voice".
+
+
 1. To interact with the app, you can do the following:
 
     - Text input: You can write a text prompt to send to the model by entering your message in the box and pressing the send arrow. The model will then respond via audio (turn up your volume!).

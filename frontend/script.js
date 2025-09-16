@@ -16,7 +16,7 @@ const MODEL = "gemini-live-2.5-flash-preview-native-audio-09-09"
 // const MODEL = "gemini-2.5-flash-preview-native-audio-dialog";
 // const API_HOST = "us-central1-aiplatform.googleapis.com";
 // const API_HOST = "us-central1-autopush-aiplatform.sandbox.googleapis.com";
-const API_HOST = "us-central1-staging-aiplatform.sandbox.googleapis.com";
+const API_HOST = "us-central1-autopush-aiplatform.sandbox.googleapis.com";
 const accessTokenInput = document.getElementById("token");
 const projectInput = document.getElementById("project");
 const systemInstructionsInput = document.getElementById("systemInstructions");
@@ -372,4 +372,119 @@ function setAppStatus(status) {
             break;
         default:
     }
+}
+
+// --- DOM Element References ---
+const createVoiceBtn = document.getElementById('createVoiceBtn');
+const modal = document.getElementById('brandedVoiceModal');
+const closeModalBtn = document.getElementById('closeModalBtn');
+const newVoiceNameInput = document.getElementById('newVoiceName');
+const recordButton = document.getElementById('recordButton');
+const recordStatus = document.getElementById('recordStatus');
+const processingSpinner = document.getElementById('processingSpinner');
+const voiceDropdown = document.getElementById('voice-dropdown');
+
+// --- Event Listeners ---
+createVoiceBtn.addEventListener('click', openModal);
+closeModalBtn.addEventListener('click', closeModal);
+window.addEventListener('click', (event) => {
+  if (event.target === modal) {
+    closeModal();
+  }
+});
+recordButton.addEventListener('click', handleRecordClick);
+
+// --- Functions ---
+function closeModal() {
+  modal.style.display = 'none';
+}
+
+// --- State for Recording ---
+let mediaRecorder;
+let audioChunks = [];
+let isRecording = false;
+let recordingStartTime;
+
+async function handleRecordClick() {
+  const voiceName = newVoiceNameInput.value.trim();
+  if (voiceName === '') {
+    alert('Please enter a name for the reference voice.');
+    newVoiceNameInput.focus();
+    return;
+  }
+
+  if (isRecording) {
+    // Stop recording
+    const duration = (new Date() - recordingStartTime) / 1000;
+    if (duration < 10) {
+        alert('A recording of at least 10 seconds is required.');
+        // Don't stop, let user continue recording
+        return;
+    }
+
+    mediaRecorder.stop();
+    recordButton.disabled = true;
+    recordStatus.textContent = 'Processing...';
+    processingSpinner.style.display = 'block';
+    recordButton.innerHTML = 'Processing...';
+    isRecording = false;
+  } else {
+    // Start recording
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Try to record as WAV, but fall back to browser default if not supported
+      const mimeType = MediaRecorder.isTypeSupported('audio/wav') ? 'audio/wav' : 'audio/webm';
+      mediaRecorder = new MediaRecorder(stream, { mimeType });
+
+      mediaRecorder.ondataavailable = event => {
+        audioChunks.push(event.data);
+      };
+
+      mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(audioChunks, { type: mimeType });
+        const reader = new FileReader();
+        reader.readAsDataURL(audioBlob);
+        reader.onloadend = () => {
+          const base64String = reader.result.split(',')[1];
+          
+          customVoiceBase64 = base64String;
+          if (geminiLiveApi) {
+            geminiLiveApi.setCustomVoice(base64String);
+          }
+
+          const newOption = document.createElement('option');
+          const optionValue = voiceName.toLowerCase().replace(/\s/g, '-');
+          newOption.value = optionValue;
+          newOption.textContent = voiceName;
+          newOption.selected = true;
+          voiceDropdown.appendChild(newOption);
+
+          alert(`New branded voice "${voiceName}" has been created and selected!`);
+          closeModal();
+          audioChunks = [];
+        };
+      };
+
+      mediaRecorder.start();
+      recordingStartTime = new Date();
+      isRecording = true;
+      recordButton.innerHTML = '<span class="material-icons">stop</span> Stop Recording';
+      recordStatus.textContent = 'Recording... (10s minimum)';
+
+    } catch (error) {
+      console.error('Error accessing microphone:', error);
+      alert('Could not access microphone. Please check permissions.');
+    }
+  }
+}
+
+function openModal() {
+  modal.style.display = 'flex';
+  newVoiceNameInput.value = '';
+  recordButton.disabled = false;
+  recordButton.innerHTML = '<span class="material-icons">mic</span> Record reference voice';
+  recordStatus.textContent = '';
+  processingSpinner.style.display = 'none';
+  isRecording = false;
+  audioChunks = [];
 }

@@ -183,6 +183,7 @@ class GeminiLiveAPI {
 
     sendInitialSetupMessages() {
         console.log("start setting up")
+        console.log("Setting up voice sample:" + this.customVoiceSample)
         const serviceSetupMessage = {
             bearer_token: this.accessToken,
             service_url: this.serviceUrl,
