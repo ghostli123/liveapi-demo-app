@@ -152,6 +152,10 @@ class GeminiLiveAPI {
     onReceiveMessage(messageEvent) {
         console.log("Message received: ", messageEvent);
         const messageData = JSON.parse(messageEvent.data);
+        if (messageData.error) {
+            this.onErrorMessage(messageData.error.message);
+            return;
+        }
         const message = new GeminiLiveResponseMessage(messageData);
         console.log("onReceiveMessageCallBack this ", this);
         this.onReceiveResponse(message);
@@ -164,12 +168,17 @@ class GeminiLiveAPI {
 
         this.webSocket.onclose = (event) => {
             console.log("websocket closed: ", event);
-            this.onErrorMessage("Connection closed");
+            let reason = event.reason;
+            if (!reason) {
+                reason = "Connection closed without a specific reason.";
+            }
+            // The backend now forwards the detailed reason from the service.
+            this.onErrorMessage(`Connection error: ${reason} (Code: ${event.code})`);
         };
 
         this.webSocket.onerror = (event) => {
             console.log("websocket error: ", event);
-            this.onErrorMessage("Connection error");
+            this.onErrorMessage("A connection error occurred. Check the console for details.");
         };
 
         this.webSocket.onopen = (event) => {

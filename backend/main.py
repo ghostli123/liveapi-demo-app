@@ -3,6 +3,7 @@ import json
 import ssl      # LARRY <-- Import the ssl module
 import certifi  # LARRY <-- Import the certifi module
 
+import websockets.exceptions
 import websockets
 from websockets.legacy.protocol import WebSocketCommonProtocol
 from websockets.legacy.server import WebSocketServerProtocol
@@ -27,16 +28,34 @@ async def proxy_task(
         client_websocket: The WebSocket connection from which to receive messages.
         server_websocket: The WebSocket connection to which to send messages.
     """
+    # This task will end when the client_websocket connection is closed.
     async for message in client_websocket:
-        try:
-            data = json.loads(message)
-            if DEBUG:
-                print("proxying: ", data)
-            await server_websocket.send(json.dumps(data))
-        except Exception as e:
-            print(f"Error processing message: {e}")
+        if DEBUG:
+            print("proxying: ", message)
+        await server_websocket.send(message)
 
-    await server_websocket.close()
+
+async def proxy(client_websocket, server_websocket):
+    """
+    Manages the bidirectional message forwarding and handles connection closures.
+    """
+    try:
+        # Create two tasks for forwarding messages in both directions
+        client_to_server_task = asyncio.create_task(
+            proxy_task(client_websocket, server_websocket)
+        )
+        server_to_client_task = asyncio.create_task(
+            proxy_task(server_websocket, client_websocket)
+        )
+        # Wait for either task to complete (which happens on connection close)
+        await asyncio.gather(client_to_server_task, server_to_client_task)
+    except websockets.exceptions.ConnectionClosed as e:
+        print(f"Connection closed: code = {e.code}, reason = {e.reason}")
+        # When one connection closes, ensure the other is closed with the same code and reason.
+        if not client_websocket.closed:
+            await client_websocket.close(e.code, e.reason)
+        if not server_websocket.closed:
+            await server_websocket.close(e.code, e.reason)
 
 
 async def create_proxy(
@@ -64,13 +83,8 @@ async def create_proxy(
     async with websockets.connect(
         SERVICE_URL, additional_headers=headers, ssl=ssl_context  # LARRY <-- Pass the secure SSL context here
     ) as server_websocket:
-        client_to_server_task = asyncio.create_task(
-            proxy_task(client_websocket, server_websocket)
-        )
-        server_to_client_task = asyncio.create_task(
-            proxy_task(server_websocket, client_websocket)
-        )
-        await asyncio.gather(client_to_server_task, server_to_client_task)
+        # Start the bidirectional proxy
+        await proxy(client_websocket, server_websocket)
 
 
 async def handle_client(client_websocket: WebSocketServerProtocol) -> None:
@@ -83,16 +97,20 @@ async def handle_client(client_websocket: WebSocketServerProtocol) -> None:
     """
     print("New connection...")
     # Wait for the first message from the client
-    auth_message = await asyncio.wait_for(client_websocket.recv(), timeout=5.0)
-    auth_data = json.loads(auth_message)
-
-    if "bearer_token" in auth_data:
-        bearer_token = auth_data["bearer_token"]
-    else:
-        print("Error: Bearer token not found in the first message.")
-        await client_websocket.close(code=1008, reason="Bearer token missing")
+    try:
+        auth_message = await asyncio.wait_for(client_websocket.recv(), timeout=5.0)
+        auth_data = json.loads(auth_message)
+    
+        if "bearer_token" in auth_data:
+            bearer_token = auth_data["bearer_token"]
+        else:
+            print("Error: Bearer token not found in the first message.")
+            await client_websocket.close(code=1008, reason="Bearer token missing")
+            return
+    except Exception as e:
+        print(f"Error during authentication: {e}")
+        await client_websocket.close(code=1011, reason=f"Authentication error: {e}")
         return
-
     await create_proxy(client_websocket, bearer_token)
 
 
