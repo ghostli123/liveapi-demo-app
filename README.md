@@ -96,6 +96,7 @@ in the web page.) **In addition, make sure your browser doesn't cache data for l
 
     - **Caution**: to enable `branded voice` by uploading a `.wav` file, make sure you upload the file when the app is at `Disconnected` state, and then click
     the `connect` button. This restriction is because our code instantite the client only when the `Connect` button is clicked, during which it sends LiveAPI a setup message with the sample voice. 
+    This is also true if you want to record you own voice as "branded voice".
 
 
 1. To interact with the app, you can do the following:
