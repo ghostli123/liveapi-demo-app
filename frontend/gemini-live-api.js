@@ -87,6 +87,8 @@ class GeminiLiveAPI {
         this.startSensitivity = "";
         this.endSensitivity = "";
         this.enableProactiveVideo = false;
+        this.enableS2ST = false; 
+        this.s2stTargetLanguage = "";
 
         console.log("Created Gemini Live API object: ", this);
     }
@@ -134,6 +136,12 @@ class GeminiLiveAPI {
 
     setProactiveVideo(enable) {
         this.enableProactiveVideo = enable;
+    }
+
+    setS2ST(enable, language) {
+        console.log(`Setting S2ST to: ${enable}, Target Language: ${language}`);
+        this.enableS2ST = enable;
+        this.s2stTargetLanguage = language;
     }
 
     connect(accessToken) {
@@ -257,6 +265,11 @@ class GeminiLiveAPI {
             sessionSetupMessage.setup.proactivity = {
                 proactive_video: true,
             };
+        }
+
+        if (this.enableS2ST) {
+            sessionSetupMessage.setup.enable_speech_to_speech_translation = true;
+            sessionSetupMessage.setup.generation_config.speech_config.language_code = this.s2stTargetLanguage;
         }
 
         console.log("setup message: " + sessionSetupMessage);

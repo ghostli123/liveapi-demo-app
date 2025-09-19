@@ -524,6 +524,43 @@
         </div>
       </div>
 
+      <div class="config-section">
+        <h3>Translation</h3>
+        <div class="checkbox-row">
+          <md-checkbox 
+            id="enableS2ST" 
+            touch-target="wrapper"
+            onchange="document.getElementById('s2stTargetLanguage').disabled = !this.checked">
+          </md-checkbox>
+          <label for="enableS2ST">Enable Speech-to-Speech Translation</label>
+        </div>
+        
+        <md-outlined-select label="S2ST Target Language" id="s2stTargetLanguage" disabled>
+          <md-select-option selected value="ar"><div slot="headline">Arabic (ar)</div></md-select-option>
+          <md-select-option value="cmn"><div slot="headline">Mandarin (cmn)</div></md-select-option>
+          <md-select-option value="de"><div slot="headline">German (de)</div></md-select-option>
+          <md-select-option value="en"><div slot="headline">English (en)</div></md-select-option>
+          <md-select-option value="es"><div slot="headline">Spanish (es)</div></md-select-option>
+          <md-select-option value="fa"><div slot="headline">Persian (fa)</div></md-select-option>
+          <md-select-option value="fr"><div slot="headline">French (fr)</div></md-select-option>
+          <md-select-option value="hi"><div slot="headline">Hindi (hi)</div></md-select-option>
+          <md-select-option value="id"><div slot="headline">Indonesian (id)</div></md-select-option>
+          <md-select-option value="it"><div slot="headline">Italian (it)</div></md-select-option>
+          <md-select-option value="ja"><div slot="headline">Japanese (ja)</div></md-select-option>
+          <md-select-option value="ko"><div slot="headline">Korean (ko)</div></md-select-option>
+          <md-select-option value="nl"><div slot="headline">Dutch (nl)</div></md-select-option>
+          <md-select-option value="pl"><div slot="headline">Polish (pl)</div></md-select-option>
+          <md-select-option value="pt"><div slot="headline">Portuguese (pt)</div></md-select-option>
+          <md-select-option value="ro"><div slot="headline">Romanian (ro)</div></md-select-option>
+          <md-select-option value="ru"><div slot="headline">Russian (ru)</div></md-select-option>
+          <md-select-option value="th"><div slot="headline">Thai (th)</div></md-select-option>
+          <md-select-option value="tr"><div slot="headline">Turkish (tr)</div></md-select-option>
+          <md-select-option value="uk"><div slot="headline">Ukrainian (uk)</div></md-select-option>
+          <md-select-option value="vi"><div slot="headline">Vietnamese (vi)</div></md-select-option>
+          <md-select-option value="yue"><div slot="headline">Cantonese (yue)</div></md-select-option>
+        </md-outlined-select>
+
+      </div>
       <details class="config-section" hidden>
         <details class="config-section" hidden>
           <summary>
