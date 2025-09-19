@@ -56,6 +56,8 @@ const fileNameDisplay = document.getElementById("fileName");
 const proactiveVideo = document.getElementById("proactiveVideo");
 const audioInterval = document.getElementById("audioInterval");
 const videoInterval = document.getElementById("videoInterval");
+const enableS2STInput = document.getElementById("enableS2ST");
+const s2stTargetLanguageInput = document.getElementById("s2stTargetLanguage");
 
 
 const geminiLiveApi = new GeminiLiveAPI(PROXY_URL, PROJECT_ID, MODEL, API_HOST);
@@ -131,6 +133,7 @@ function connectBtnClick() {
     );
     geminiLiveApi.setCustomVoice(customVoiceBase64);
     geminiLiveApi.setProactiveVideo(proactiveVideo.checked);
+    geminiLiveApi.setS2ST(enableS2STInput.checked, s2stTargetLanguageInput.value);
 
 
     geminiLiveApi.onConnectionStarted = () => {
