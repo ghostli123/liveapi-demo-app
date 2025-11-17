@@ -206,7 +206,7 @@ class GeminiLiveAPI {
                     response_modalities: this.responseModalities,
                     speech_config: {
                         voice_config: this.customVoiceSample ?
-                            { custom_voice_config: { custom_voice_sample: this.customVoiceSample } } :
+                            { replicated_voice_config: { voice_sample_audio: this.customVoiceSample, mime_type: 'audio/pcm;rate=24000'} } :
                             {
                                 prebuilt_voice_config: {
                                     voice_name: this.voiceName
