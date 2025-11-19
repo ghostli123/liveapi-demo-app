@@ -448,8 +448,8 @@ async function handleRecordClick() {
       mediaRecorder.onstop = async () => {
         const audioBlob = new Blob(audioChunks, { type: mimeType });
         console.log("Conversion start")
-        // Resample the audio to 16kHz
-        const targetSampleRate = 16000;
+        // Resample the audio to 24kHz
+        const targetSampleRate = 24000;
         const audioContext = new (window.AudioContext || window.webkitAudioContext)();
         const decodedBuffer = await audioContext.decodeAudioData(await audioBlob.arrayBuffer());
         const offlineContext = new OfflineAudioContext(decodedBuffer.numberOfChannels, decodedBuffer.duration * targetSampleRate, targetSampleRate);
