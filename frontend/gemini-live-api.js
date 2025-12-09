@@ -6,9 +6,13 @@ class GeminiLiveResponseMessage {
         this.interrupt = data?.serverContent?.interrupted;
 
         const parts = data?.serverContent?.modelTurn?.parts;
+        const tool_calls = data?.toolCall?.functionCalls;
 
         if (data?.setupComplete) {
             this.type = "SETUP COMPLETE";
+        } else if (tool_calls) {
+            this.data = tool_calls;
+            this.type = "FUNCTION_CALL";
         } else if (data?.voiceActivityDetectionSignal) {
             this.type = "VAD_SIGNAL";
         } else if (parts?.length && parts[0].text) {
@@ -45,12 +49,14 @@ class GeminiLiveResponseMessage {
 }
 
 class GeminiLiveAPI {
-    constructor(proxyUrl, projectId, model, apiHost) {
+    constructor(proxyUrl, fcUrl, projectId, model, apiHost) {
         this.proxyUrl = proxyUrl;
+        this.fcUrl = fcUrl;
 
         this.projectId = projectId;
         this.model = model;
         this.modelUri = `projects/${this.projectId}/locations/us-central1/publishers/google/models/${this.model}`;
+        // this.modelUri = `${this.model}`;
         console.log("Model URI:", this.modelUri);
 
         this.responseModalities = ["AUDIO"];
@@ -87,8 +93,9 @@ class GeminiLiveAPI {
         this.startSensitivity = "";
         this.endSensitivity = "";
         this.enableProactiveVideo = false;
-        this.enableS2ST = false; 
+        this.enableS2ST = false;
         this.s2stTargetLanguage = "";
+        this.functionCallDefinition = null;
 
         console.log("Created Gemini Live API object: ", this);
     }
@@ -96,6 +103,7 @@ class GeminiLiveAPI {
     setProjectId(projectId) {
         this.projectId = projectId;
         this.modelUri = `projects/${this.projectId}/locations/us-central1/publishers/google/models/${this.model}`;
+        // this.modelUri = `${this.model}`;
     }
 
     setApiHost(apiHost) {
@@ -116,6 +124,10 @@ class GeminiLiveAPI {
     setVoice(name, locale) {
         this.voiceName = name;
         this.voiceLocale = locale;
+    }
+
+    setFunctionCall(fcDefinition) {
+        this.functionCallDefinition = fcDefinition;
     }
 
     setCustomVoice(base64Wav) {
@@ -145,8 +157,25 @@ class GeminiLiveAPI {
     }
 
     connect(accessToken) {
-        this.setAccessToken(accessToken);
-        this.setupWebSocketToService();
+        // this.setAccessToken(accessToken);
+        this.setupFuncDeclarationToService().then(() => {
+            this.setupWebSocketToService();
+        });
+    }
+
+    setupFuncDeclarationToService() {
+        if (this.functionCallDefinition) {
+            const funcDeclarationMessage = {
+                objective: 'fc_definition',
+                functionDefinition: this.functionCallDefinition
+            }
+            return this.sendPostRequest(funcDeclarationMessage).catch(error => {
+                console.error("Error in setupFuncDeclarationToService:", error);
+                this.onErrorMessage("Error setting up function declaration.");
+            });
+        }
+        // If there's no function definition, return a resolved promise so .then() can still be used.
+        return Promise.resolve();
     }
 
     disconnect() {
@@ -192,11 +221,6 @@ class GeminiLiveAPI {
     sendInitialSetupMessages() {
         console.log("start setting up")
         console.log("Setting up voice sample:" + this.customVoiceSample)
-        const serviceSetupMessage = {
-            bearer_token: this.accessToken,
-            service_url: this.serviceUrl,
-        };
-        this.sendMessage(serviceSetupMessage);
         const sessionSetupMessage = {
             setup: {
                 model: this.modelUri,
@@ -206,7 +230,7 @@ class GeminiLiveAPI {
                     response_modalities: this.responseModalities,
                     speech_config: {
                         voice_config: this.customVoiceSample ?
-                            { replicated_voice_config: { voice_sample_audio: this.customVoiceSample, mime_type: 'audio/pcm;rate=24000'} } :
+                            { replicated_voice_config: { voice_sample_audio: this.customVoiceSample, mime_type: 'audio/pcm;rate=24000' } } :
                             {
                                 prebuilt_voice_config: {
                                     voice_name: this.voiceName
@@ -215,6 +239,8 @@ class GeminiLiveAPI {
                         language_code: this.voiceLocale
                     }
                 },
+                tools: [{ functionDeclarations: this.functionCallDefinition }],
+
             },
         };
         console.log(sessionSetupMessage)
@@ -329,6 +355,30 @@ class GeminiLiveAPI {
 
     sendImageMessage(base64Image, mime_type = "image/jpeg") {
         this.sendRealtimeInputMessage(base64Image, mime_type);
+    }
+
+    async sendPostRequest(data) {
+        try {
+            const response = await fetch(this.fcUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(data),
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const received_data = await response.json();
+            console.log('Received data:', received_data);
+            return received_data;
+        } catch (error) {
+            console.error('Error sending POST request:', error);
+            this.onErrorMessage(`Error sending POST request: ${error.message}`);
+            return null;
+        }
     }
 }
 
