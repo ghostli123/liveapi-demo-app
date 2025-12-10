@@ -415,9 +415,9 @@
     <aside class="right-sidebar">
       <div class="config-section">
         <h3>Connection</h3>
-        <md-outlined-text-field id="token" label="Access Token" type="password" value=""></md-outlined-text-field>
         <md-outlined-text-field id="project" label="Project ID"
           value="visionai-testing-stable"></md-outlined-text-field>
+        <md-outlined-text-field id="location" label="Location" value="us-central1"></md-outlined-text-field>
         <md-outlined-select label="Environment" id="envApiHost">
           <md-select-option selected value="autopush">
             <div slot="headline">autopush</div>
@@ -429,9 +429,14 @@
             <div slot="headline">prod</div>
           </md-select-option>
         </md-outlined-select>
+        <md-outlined-select label="Model" id="liveApiModel">
+          <md-select-option selected value="gemini-live-2.5-flash-native-audio-exp">
+            <div slot="headline">gemini-live-2.5-flash-native-audio-exp</div>
+          </md-select-option>
+        </md-outlined-select>
         <div class="button-group">
-          <md-filled-button onclick="connectBtnClick()">Connect</md-filled-button>
-          <md-outlined-button onclick="disconnectBtnClick()">Disconnect</md-outlined-button>
+          <md-filled-button onclick="connectBtnClick()" id="connectBtn">Connect</md-filled-button>
+          <md-outlined-button onclick="disconnectBtnClick()" id="disconnectBtn">Disconnect</md-outlined-button>
         </div>
       </div>
 
@@ -522,58 +527,118 @@
           <span id="fileName"
             style="font-size: 12px; color: var(--gcp-text-secondary); margin-top: 8px; display: block;"></span>
         </div>
+
+      </div>
+
+      <div class="config-section">
+        <h3>Function call</h3>
+        <div class="form-group">
+          <label style="display: block; font-size: 12px; margin-bottom: 8px; ">Function call definitions
+            in OpenAI format. Should be a json file.</label>
+          <div class="button-group">
+            <input type="file" id="fcFileInput" accept=".json" style="display: none;">
+            <md-outlined-button onclick="document.getElementById('fcFileInput').click()">Upload .json file
+            </md-outlined-button>
+          </div>
+
+          <span id="fcFileName"
+            style="font-size: 12px; color: var(--gcp-text-secondary); margin-top: 8px; display: block;"></span>
+        </div>
+
       </div>
 
       <div class="config-section">
         <h3>Translation</h3>
         <div class="checkbox-row">
-          <md-checkbox 
-            id="enableS2ST" 
-            touch-target="wrapper"
+          <md-checkbox id="enableS2ST" touch-target="wrapper"
             onchange="document.getElementById('s2stTargetLanguage').disabled = !this.checked">
           </md-checkbox>
           <label for="enableS2ST">Enable Speech-to-Speech Translation</label>
         </div>
-        
+
         <md-outlined-select label="S2ST Target Language" id="s2stTargetLanguage" disabled>
-          <md-select-option selected value="ar"><div slot="headline">Arabic (ar)</div></md-select-option>
-          <md-select-option value="cmn"><div slot="headline">Mandarin (cmn)</div></md-select-option>
-          <md-select-option value="de"><div slot="headline">German (de)</div></md-select-option>
-          <md-select-option value="en"><div slot="headline">English (en)</div></md-select-option>
-          <md-select-option value="es"><div slot="headline">Spanish (es)</div></md-select-option>
-          <md-select-option value="fa"><div slot="headline">Persian (fa)</div></md-select-option>
-          <md-select-option value="fr"><div slot="headline">French (fr)</div></md-select-option>
-          <md-select-option value="hi"><div slot="headline">Hindi (hi)</div></md-select-option>
-          <md-select-option value="id"><div slot="headline">Indonesian (id)</div></md-select-option>
-          <md-select-option value="it"><div slot="headline">Italian (it)</div></md-select-option>
-          <md-select-option value="ja"><div slot="headline">Japanese (ja)</div></md-select-option>
-          <md-select-option value="ko"><div slot="headline">Korean (ko)</div></md-select-option>
-          <md-select-option value="nl"><div slot="headline">Dutch (nl)</div></md-select-option>
-          <md-select-option value="pl"><div slot="headline">Polish (pl)</div></md-select-option>
-          <md-select-option value="pt"><div slot="headline">Portuguese (pt)</div></md-select-option>
-          <md-select-option value="ro"><div slot="headline">Romanian (ro)</div></md-select-option>
-          <md-select-option value="ru"><div slot="headline">Russian (ru)</div></md-select-option>
-          <md-select-option value="th"><div slot="headline">Thai (th)</div></md-select-option>
-          <md-select-option value="tr"><div slot="headline">Turkish (tr)</div></md-select-option>
-          <md-select-option value="uk"><div slot="headline">Ukrainian (uk)</div></md-select-option>
-          <md-select-option value="vi"><div slot="headline">Vietnamese (vi)</div></md-select-option>
-          <md-select-option value="yue"><div slot="headline">Cantonese (yue)</div></md-select-option>
+          <md-select-option selected value="ar">
+            <div slot="headline">Arabic (ar)</div>
+          </md-select-option>
+          <md-select-option value="cmn">
+            <div slot="headline">Mandarin (cmn)</div>
+          </md-select-option>
+          <md-select-option value="de">
+            <div slot="headline">German (de)</div>
+          </md-select-option>
+          <md-select-option value="en">
+            <div slot="headline">English (en)</div>
+          </md-select-option>
+          <md-select-option value="es">
+            <div slot="headline">Spanish (es)</div>
+          </md-select-option>
+          <md-select-option value="fa">
+            <div slot="headline">Persian (fa)</div>
+          </md-select-option>
+          <md-select-option value="fr">
+            <div slot="headline">French (fr)</div>
+          </md-select-option>
+          <md-select-option value="hi">
+            <div slot="headline">Hindi (hi)</div>
+          </md-select-option>
+          <md-select-option value="id">
+            <div slot="headline">Indonesian (id)</div>
+          </md-select-option>
+          <md-select-option value="it">
+            <div slot="headline">Italian (it)</div>
+          </md-select-option>
+          <md-select-option value="ja">
+            <div slot="headline">Japanese (ja)</div>
+          </md-select-option>
+          <md-select-option value="ko">
+            <div slot="headline">Korean (ko)</div>
+          </md-select-option>
+          <md-select-option value="nl">
+            <div slot="headline">Dutch (nl)</div>
+          </md-select-option>
+          <md-select-option value="pl">
+            <div slot="headline">Polish (pl)</div>
+          </md-select-option>
+          <md-select-option value="pt">
+            <div slot="headline">Portuguese (pt)</div>
+          </md-select-option>
+          <md-select-option value="ro">
+            <div slot="headline">Romanian (ro)</div>
+          </md-select-option>
+          <md-select-option value="ru">
+            <div slot="headline">Russian (ru)</div>
+          </md-select-option>
+          <md-select-option value="th">
+            <div slot="headline">Thai (th)</div>
+          </md-select-option>
+          <md-select-option value="tr">
+            <div slot="headline">Turkish (tr)</div>
+          </md-select-option>
+          <md-select-option value="uk">
+            <div slot="headline">Ukrainian (uk)</div>
+          </md-select-option>
+          <md-select-option value="vi">
+            <div slot="headline">Vietnamese (vi)</div>
+          </md-select-option>
+          <md-select-option value="yue">
+            <div slot="headline">Cantonese (yue)</div>
+          </md-select-option>
         </md-outlined-select>
 
       </div>
-      <details class="config-section" hidden>
-        <details class="config-section" hidden>
+      <details class="config-section">
+        <details class="config-section">
           <summary>
             <h3>Advanced Settings</h3>
           </summary>
           <div class="details-content">
             <b>Transcription</b><br />
             <div class="checkbox-row">
-              <md-checkbox id="inputTranscript" touch-target="wrapper"></md-checkbox>
+              <md-checkbox id="inputTranscript" touch-target="wrapper" checked></md-checkbox>
               <label for="inputTranscript">Input Audio Transcripts</label><br />
             </div>
             <div class="checkbox-row">
-              <md-checkbox id="outputTranscript" touch-target="wrapper"></md-checkbox>
+              <md-checkbox id="outputTranscript" touch-target="wrapper" checked></md-checkbox>
               <label for="outputTranscript">Output Audio Transcripts</label><br /><br />
             </div>
 

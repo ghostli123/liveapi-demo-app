@@ -1,2 +1,5 @@
 websockets==14.2
 certifi
+google-genai
+python-dotenv
+aiohttp-cors
