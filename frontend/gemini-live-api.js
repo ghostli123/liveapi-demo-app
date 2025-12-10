@@ -6,9 +6,13 @@ class GeminiLiveResponseMessage {
         this.interrupt = data?.serverContent?.interrupted;
 
         const parts = data?.serverContent?.modelTurn?.parts;
+        const tool_calls = data?.toolCall?.functionCalls;
 
         if (data?.setupComplete) {
             this.type = "SETUP COMPLETE";
+        } else if (tool_calls) {
+            this.data = tool_calls;
+            this.type = "FUNCTION_CALL";
         } else if (data?.voiceActivityDetectionSignal) {
             this.type = "VAD_SIGNAL";
         } else if (parts?.length && parts[0].text) {
@@ -25,14 +29,16 @@ class GeminiLiveResponseMessage {
             if (data?.serverContent?.inputTranscription?.text) {
                 this.data = data?.serverContent?.inputTranscription?.text;
             } else if (data?.serverContent?.inputTranscription?.finished) {
-                this.data = data?.serverContent?.inputTranscription?.finished
+                this.data = data?.serverContent?.inputTranscription?.finished;
             }
         } else if (data?.serverContent?.outputTranscription) {
             this.type = "OUTPUT_TRANSCRIPTION";
             if (data?.serverContent?.outputTranscription?.text) {
                 this.data = data?.serverContent?.outputTranscription?.text;
             } else if (data?.serverContent?.outputTranscription?.finished) {
-                this.data = "Finished: " + data?.serverContent?.outputTranscription?.finished
+                this.data =
+                    "Finished: " +
+                    data?.serverContent?.outputTranscription?.finished;
             }
         } else if (this.endOfTurn) {
             this.data = "END OF TURN";
@@ -45,20 +51,20 @@ class GeminiLiveResponseMessage {
 }
 
 class GeminiLiveAPI {
-    constructor(proxyUrl, projectId, model, apiHost) {
+    constructor(proxyUrl, controlUrl, frUrl) {
         this.proxyUrl = proxyUrl;
+        this.controlUrl = controlUrl;
+        this.frUrl = frUrl;
 
-        this.projectId = projectId;
-        this.model = model;
-        this.modelUri = `projects/${this.projectId}/locations/us-central1/publishers/google/models/${this.model}`;
-        console.log("Model URI:", this.modelUri);
+        this.projectId = null;
+        this.model = null;
+
+        this.environment = null;
 
         this.responseModalities = ["AUDIO"];
         this.systemInstructions = "";
 
-        this.apiHost = apiHost;
-        // this.serviceUrl = `wss://${this.apiHost}/ws/google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent`;
-        this.serviceUrl = `wss://${this.apiHost}/ws/google.cloud.aiplatform.internal.LlmBidiService/BidiGenerateContent`;
+        this.apiHost = null;
 
         this.onReceiveResponse = (message) => {
             console.log("Default message received callback", message);
@@ -72,8 +78,8 @@ class GeminiLiveAPI {
             alert(message);
         };
 
-        this.accessToken = "";
         this.websocket = null;
+        this.location = null;
 
         this.enableInputTranscript = false;
         this.enableOutputTranscript = false;
@@ -87,24 +93,38 @@ class GeminiLiveAPI {
         this.startSensitivity = "";
         this.endSensitivity = "";
         this.enableProactiveVideo = false;
-        this.enableS2ST = false; 
+        this.enableS2ST = false;
         this.s2stTargetLanguage = "";
+        this.functionCallDefinition = null;
 
         console.log("Created Gemini Live API object: ", this);
     }
 
+    setLocation(location) {
+        this.location = location;
+        this.setApiHost(this.environment);
+    }
     setProjectId(projectId) {
         this.projectId = projectId;
-        this.modelUri = `projects/${this.projectId}/locations/us-central1/publishers/google/models/${this.model}`;
+    }
+    setModel(model) {
+        this.model = model;
     }
 
-    setApiHost(apiHost) {
-        this.apiHost = apiHost;
-    }
-
-    setAccessToken(newAccessToken) {
-        console.log("setting access token: ", newAccessToken);
-        this.accessToken = newAccessToken;
+    setApiHost(environment) {
+        this.environment = environment;
+        if (this.environment === "autopush") {
+            this.apiHost = `${this.location}-autopush-aiplatform.sandbox.googleapis.com`;
+        } else if (this.environment === "staging") {
+            this.apiHost = `${this.location}-staging-aiplatform.sandbox.googleapis.com`;
+        } else if (this.environment === "prod") {
+            this.apiHost = `${this.location}-aiplatform.googleapis.com`;
+        } else {
+            console.error(
+                `Unknown environment: ${this.environment}. Using production API host.`
+            );
+            this.apiHost = `${this.location}-aiplatform.googleapis.com`; // Default to production
+        }
     }
 
     setTranscript(input, output) {
@@ -116,6 +136,10 @@ class GeminiLiveAPI {
     setVoice(name, locale) {
         this.voiceName = name;
         this.voiceLocale = locale;
+    }
+
+    setFunctionCall(fcDefinition) {
+        this.functionCallDefinition = fcDefinition;
     }
 
     setCustomVoice(base64Wav) {
@@ -144,13 +168,75 @@ class GeminiLiveAPI {
         this.s2stTargetLanguage = language;
     }
 
-    connect(accessToken) {
-        this.setAccessToken(accessToken);
-        this.setupWebSocketToService();
+    connect() {
+        console.log("connect(): Triggering initBackendService...");
+        this.initBackendService()
+            .then(() => {
+                console.log(
+                    "connect(): initBackendService successful. Triggering setupFuncDeclarationToService..."
+                );
+                return this.setupFuncDeclarationToService();
+            })
+            .then(() => {
+                console.log(
+                    "connect(): setupFuncDeclarationToService successful. Triggering setupWebSocketToService after 100ms."
+                );
+                setTimeout(() => this.setupWebSocketToService(), 100);
+            })
+            .catch((error) =>
+                console.error("connect(): Promise chain failed.", error)
+            );
+    }
+
+    initBackendService() {
+        const postRequestBody = {
+            command: "connect",
+            project_id: this.projectId,
+            location: this.location,
+            host: this.apiHost,
+        };
+        return this.sendPostRequest(this.controlUrl, postRequestBody).catch(
+            (error) => {
+                console.error("Error in initBackendService:", error);
+                this.onErrorMessage("Error initializing backend service.");
+                // Re-throw the error to stop the promise chain
+                throw error;
+            }
+        );
+    }
+
+    setupFuncDeclarationToService() {
+        if (this.functionCallDefinition) {
+            const funcDeclarationMessage = {
+                objective: "fc_definition",
+                functionDefinition: this.functionCallDefinition,
+            };
+            return this.sendPostRequest(
+                this.frUrl,
+                funcDeclarationMessage
+            ).catch((error) => {
+                console.error("Error in setupFuncDeclarationToService:", error);
+                this.onErrorMessage("Error setting up function declaration.");
+                // Re-throw the error to stop the promise chain
+                throw error;
+            });
+        }
+        // If there's no function definition, return a resolved promise so .then() can still be used.
+        return Promise.resolve();
     }
 
     disconnect() {
         this.webSocket.close();
+
+        const postRequestBody = {
+            command: "disconnect",
+        };
+        return this.sendPostRequest(this.controlUrl, postRequestBody).catch(
+            (error) => {
+                console.error("Error in cancelling backend services:", error);
+                this.onErrorMessage("Error cancelling backend services.");
+            }
+        );
     }
 
     sendMessage(message) {
@@ -190,34 +276,38 @@ class GeminiLiveAPI {
     }
 
     sendInitialSetupMessages() {
-        console.log("start setting up")
-        console.log("Setting up voice sample:" + this.customVoiceSample)
-        const serviceSetupMessage = {
-            bearer_token: this.accessToken,
-            service_url: this.serviceUrl,
-        };
-        this.sendMessage(serviceSetupMessage);
+        console.log("start setting up");
+        console.log("Setting up voice sample:" + this.customVoiceSample);
+
+        const modelUri = `projects/${this.projectId}/locations/${this.location}/publishers/google/models/${this.model}`;
         const sessionSetupMessage = {
             setup: {
-                model: this.modelUri,
+                model: modelUri,
                 realtime_input_config: {},
                 explicit_vad_signal: true,
                 generation_config: {
                     response_modalities: this.responseModalities,
                     speech_config: {
-                        voice_config: this.customVoiceSample ?
-                            { replicated_voice_config: { voice_sample_audio: this.customVoiceSample, mime_type: 'audio/pcm;rate=24000'} } :
-                            {
-                                prebuilt_voice_config: {
-                                    voice_name: this.voiceName
-                                }
-                            },
-                        language_code: this.voiceLocale
-                    }
+                        voice_config: this.customVoiceSample
+                            ? {
+                                  replicated_voice_config: {
+                                      voice_sample_audio:
+                                          this.customVoiceSample,
+                                      mime_type: "audio/pcm;rate=24000",
+                                  },
+                              }
+                            : {
+                                  prebuilt_voice_config: {
+                                      voice_name: this.voiceName,
+                                  },
+                              },
+                        language_code: this.voiceLocale,
+                    },
                 },
+                tools: [{ functionDeclarations: this.functionCallDefinition }],
             },
         };
-        console.log(sessionSetupMessage)
+        console.log(sessionSetupMessage);
 
         if (this.systemInstructions && this.systemInstructions.trim()) {
             sessionSetupMessage.setup.system_instruction = {
@@ -233,11 +323,12 @@ class GeminiLiveAPI {
         }
         if (this.enableSessionResumption) {
             sessionSetupMessage.setup.session_resumption = {
-                handle: this.resumptionHandle
+                handle: this.resumptionHandle,
             };
         }
 
-        sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection = {}
+        sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection =
+            {};
         if (this.disableDetection) {
             sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.disabled = true;
         }
@@ -269,7 +360,8 @@ class GeminiLiveAPI {
 
         if (this.enableS2ST) {
             sessionSetupMessage.setup.enable_speech_to_speech_translation = true;
-            sessionSetupMessage.setup.generation_config.speech_config.language_code = this.s2stTargetLanguage;
+            sessionSetupMessage.setup.generation_config.speech_config.language_code =
+                this.s2stTargetLanguage;
         }
 
         console.log("setup message: " + sessionSetupMessage);
@@ -329,6 +421,30 @@ class GeminiLiveAPI {
 
     sendImageMessage(base64Image, mime_type = "image/jpeg") {
         this.sendRealtimeInputMessage(base64Image, mime_type);
+    }
+
+    async sendPostRequest(url, data) {
+        try {
+            const response = await fetch(url, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify(data),
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const received_data = await response.json();
+            console.log("Received data:", received_data);
+            return received_data;
+        } catch (error) {
+            console.error("Error sending POST request:", error);
+            this.onErrorMessage(`Error sending POST request: ${error.message}`);
+            return null;
+        }
     }
 }
 

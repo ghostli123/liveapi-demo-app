@@ -1,0 +1,142 @@
+[
+    {
+        "name": "create_appointment",
+        "description": "If you need to create an appointment for a client, once you have enough parameter information, immediately invoke the create_appointment tool.",
+        "parameters": {
+            "description": "Parameters for creating a new appointment.",
+            "properties": {
+                "client_name": {
+                    "description": "Required. The name of the client, you should make sure the client name is spelled correctly.",
+                    "title": "Client Name",
+                    "type": "string"
+                },
+                "client_id": {
+                    "description": "Required. The id of the client, case sensitive. you should make sure the id is spelled correctly. there could be symbols such as dash, underscore, etc. in the client id, make sure you do not miss any.",
+                    "title": "Client Id",
+                    "type": "string"
+                },
+                "appointment_type": {
+                    "description": "Required. The type of the appointment.",
+                    "title": "Appointment Type",
+                    "type": "string"
+                },
+                "appointment_time": {
+                    "description": "Appointment time.",
+                    "properties": {
+                        "hour": {
+                            "description": "The hour of the appointment. from 0 to 23.",
+                            "title": "Hour",
+                            "type": "integer"
+                        },
+                        "minute": {
+                            "description": "The minute of the appointment. from 0 to 59.",
+                            "title": "Minute",
+                            "type": "integer"
+                        },
+                        "second": {
+                            "description": "The second of the appointment. from 0 to 59.",
+                            "title": "Second",
+                            "type": "integer"
+                        }
+                    },
+                    "required": [
+                        "hour",
+                        "minute",
+                        "second"
+                    ],
+                    "title": "TimeParameters",
+                    "type": "object"
+                },
+                "appointment_date": {
+                    "description": "Appointment date.",
+                    "properties": {
+                        "year": {
+                            "description": "The year of the appointment.",
+                            "title": "Year",
+                            "type": "integer"
+                        },
+                        "month": {
+                            "description": "The month of the appointment. from 1 to 12.",
+                            "title": "Month",
+                            "type": "integer"
+                        },
+                        "day": {
+                            "description": "The day of the appointment.",
+                            "title": "Day",
+                            "type": "integer"
+                        }
+                    },
+                    "required": [
+                        "year",
+                        "month",
+                        "day"
+                    ],
+                    "title": "DateParameters",
+                    "type": "object"
+                },
+                "appointment_duration": {
+                    "description": "Appointment duration.",
+                    "properties": {
+                        "days": {
+                            "description": "The days of the appointment.",
+                            "title": "Days",
+                            "type": "integer"
+                        },
+                        "hours": {
+                            "description": "The hours of the appointment.",
+                            "title": "Hours",
+                            "type": "integer"
+                        },
+                        "minutes": {
+                            "description": "The minutes of the appointment.",
+                            "title": "Minutes",
+                            "type": "integer"
+                        },
+                        "seconds": {
+                            "description": "The seconds of the appointment.",
+                            "title": "Seconds",
+                            "type": "integer"
+                        }
+                    },
+                    "required": [
+                        "days",
+                        "hours",
+                        "minutes",
+                        "seconds"
+                    ],
+                    "title": "DurationParameters",
+                    "type": "object"
+                },
+                "appointment_location": {
+                    "description": "Required. The location of the appointment.",
+                    "title": "Appointment Location",
+                    "type": "string"
+                },
+                "appointment_additional_info": {
+                    "anyOf": [
+                        {
+                            "type": "string"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null,
+                    "description": "Optional. Additional information of the appointment.",
+                    "title": "Appointment Additional Info"
+                }
+            },
+            "required": [
+                "client_name",
+                "client_id",
+                "appointment_type",
+                "appointment_time",
+                "appointment_date",
+                "appointment_duration",
+                "appointment_location"
+            ],
+            "title": "CreateAppointmentFunctionParameters",
+            "type": "object"
+        }
+    }
+]
