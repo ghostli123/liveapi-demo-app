@@ -415,11 +415,10 @@
     <aside class="right-sidebar">
       <div class="config-section">
         <h3>Connection</h3>
-        <md-outlined-text-field id="token" label="Access Token" type="password" value=""
-          disabled></md-outlined-text-field>
-        <md-outlined-text-field id="project" label="Project ID" value="visionai-testing-stable"
-          disabled></md-outlined-text-field>
-        <md-outlined-select label="Environment" id="envApiHost" disabled>
+        <md-outlined-text-field id="project" label="Project ID"
+          value="visionai-testing-stable"></md-outlined-text-field>
+        <md-outlined-text-field id="location" label="Location" value="us-central1"></md-outlined-text-field>
+        <md-outlined-select label="Environment" id="envApiHost">
           <md-select-option selected value="autopush">
             <div slot="headline">autopush</div>
           </md-select-option>
@@ -430,9 +429,14 @@
             <div slot="headline">prod</div>
           </md-select-option>
         </md-outlined-select>
+        <md-outlined-select label="Model" id="liveApiModel">
+          <md-select-option selected value="gemini-live-2.5-flash-native-audio-exp">
+            <div slot="headline">gemini-live-2.5-flash-native-audio-exp</div>
+          </md-select-option>
+        </md-outlined-select>
         <div class="button-group">
-          <md-filled-button onclick="connectBtnClick()">Connect</md-filled-button>
-          <md-outlined-button onclick="disconnectBtnClick()">Disconnect</md-outlined-button>
+          <md-filled-button onclick="connectBtnClick()" id="connectBtn">Connect</md-filled-button>
+          <md-outlined-button onclick="disconnectBtnClick()" id="disconnectBtn">Disconnect</md-outlined-button>
         </div>
       </div>
 
