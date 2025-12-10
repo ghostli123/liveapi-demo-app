@@ -6,25 +6,16 @@ window.addEventListener("load", (event) => {
 });
 
 const PROXY_URL = "ws://localhost:8080";
-const FR_SERVICE = "http://localhost:8081/api/post_endpoint"
-// const PROXY_URL = "/ws";
-const PROJECT_ID = "visionai-testing-stable";
-// const MODEL = "gemini-2.0-flash-exp";
-// const MODEL = "gemini-2.0-flash-live-preview-04-09";
-// const MODEL = "gemini-2.5-flash-preview-native-audio";
-// const MODEL = "gemini-live-2.5-flash-preview-native-audio";
-// const MODEL = "gemini-live-2.5-flash-preview-native-audio-09-09"
-const MODEL = "gemini-live-2.5-flash-native-audio-exp"
-// const MODEL = "gemini-2.5-flash-preview-native-audio-dialog";
-// const API_HOST = "us-central1-aiplatform.googleapis.com";
-// const API_HOST = "us-central1-autopush-aiplatform.sandbox.googleapis.com";
-const API_HOST = "us-central1-autopush-aiplatform.sandbox.googleapis.com";
-const accessTokenInput = document.getElementById("token");
+const FR_SERVICE_URL = "http://localhost:8081/api/post_endpoint";
+const CONTROL_URL = "http://localhost:8081/api/control";
+const PROJECT_ID = null;
+const API_HOST = null;
 const projectInput = document.getElementById("project");
+const locationInput = document.getElementById("location");
 const systemInstructionsInput = document.getElementById("systemInstructions");
 
-CookieJar.init("token");
 CookieJar.init("project");
+CookieJar.init("location");
 CookieJar.init("systemInstructions");
 
 const disconnected = document.getElementById("disconnected");
@@ -42,6 +33,7 @@ const cameraSelect = document.getElementById("cameraSource");
 const micSelect = document.getElementById("audioSource");
 
 const envApiHost = document.getElementById("envApiHost");
+const liveApiModel = document.getElementById("liveApiModel");
 const inputTranscript = document.getElementById("inputTranscript");
 const outputTranscript = document.getElementById("outputTranscript");
 const enableResumption = document.getElementById("resumption");
@@ -65,8 +57,7 @@ const videoInterval = document.getElementById("videoInterval");
 const enableS2STInput = document.getElementById("enableS2ST");
 const s2stTargetLanguageInput = document.getElementById("s2stTargetLanguage");
 
-
-const geminiLiveApi = new GeminiLiveAPI(PROXY_URL, FR_SERVICE, PROJECT_ID, MODEL, API_HOST);
+const geminiLiveApi = new GeminiLiveAPI(PROXY_URL, CONTROL_URL, FR_SERVICE_URL);
 
 geminiLiveApi.onErrorMessage = (message) => {
     showDialogWithMessage(message);
@@ -74,16 +65,16 @@ geminiLiveApi.onErrorMessage = (message) => {
 };
 
 let customVoiceBase64 = "";
-audioFileInput.addEventListener('change', (event) => {
+audioFileInput.addEventListener("change", (event) => {
     const file = event.target.files[0];
 
     if (file) {
         const reader = new FileReader();
         reader.onload = (e) => {
-            console.log(e.target.result)
+            console.log(e.target.result);
             // The result includes the data URL header, so we split it.
             // e.g., "data:audio/wav;base64,UklGRiYAAABXQVZFZm10IBAAAA..." -> "UklGRiYAAABXQVZFZm10IBAAAA..."
-            customVoiceBase64 = e.target.result.split(',')[1];
+            customVoiceBase64 = e.target.result.split(",")[1];
             fileNameDisplay.textContent = `File: ${file.name}`;
         };
         reader.readAsDataURL(file);
@@ -92,7 +83,7 @@ audioFileInput.addEventListener('change', (event) => {
 });
 
 functionCallDefinition = null;
-fcFileInput.addEventListener('change', (event) => {
+fcFileInput.addEventListener("change", (event) => {
     const file = event.target.files[0];
 
     if (file) {
@@ -100,7 +91,10 @@ fcFileInput.addEventListener('change', (event) => {
         reader.onload = (e) => {
             try {
                 functionCallDefinition = JSON.parse(e.target.result);
-                console.log("Function call definition loaded:", functionCallDefinition);
+                console.log(
+                    "Function call definition loaded:",
+                    functionCallDefinition
+                );
                 fcFileNameDisplay.textContent = `File: ${file.name}`;
             } catch (error) {
                 alert(`Error parsing JSON file: ${error.message}`);
@@ -113,7 +107,7 @@ fcFileInput.addEventListener('change', (event) => {
 
 function getSelectedResponseModality() {
     const radioButtons = document.querySelectorAll(
-        'md-radio[name="responseModality"]',
+        'md-radio[name="responseModality"]'
     );
 
     let selectedValue;
@@ -130,38 +124,37 @@ function getSystemInstructions() {
     return systemInstructionsInput.value;
 }
 
-function getApiHost() {
-    if (envApiHost.value === 'autopush') {
-        return 'us-central1-autopush-aiplatform.sandbox.googleapis.com'
-    }
-    if (envApiHost.value === 'staging') {
-        return 'us-central1-staging-aiplatform.sandbox.googleapis.com'
-    }
-    return 'us-central1-aiplatform.googleapis.com'
-}
-
 function connectBtnClick() {
     setAppStatus("connecting");
-    console.log("Connecting...")
+    console.log("Connecting...");
 
     geminiLiveApi.responseModalities = getSelectedResponseModality();
     if (getSystemInstructions() !== "") {
         geminiLiveApi.systemInstructions = getSystemInstructions();
     }
-    geminiLiveApi.setApiHost(getApiHost());
-    geminiLiveApi.setTranscript(inputTranscript.checked, outputTranscript.checked);
-    geminiLiveApi.setResumption(enableResumption.checked, resumptionHandle.value);
+    geminiLiveApi.setModel(liveApiModel.value);
+    geminiLiveApi.setTranscript(
+        inputTranscript.checked,
+        outputTranscript.checked
+    );
+    geminiLiveApi.setResumption(
+        enableResumption.checked,
+        resumptionHandle.value
+    );
     geminiLiveApi.setVoice(voiceName.value, voiceLocale.value);
-    geminiLiveApi.setVad(disableInterruption.checked,
+    geminiLiveApi.setVad(
+        disableInterruption.checked,
         disableDetection.checked,
         startSensitivity.value,
         endSensitivity.value
     );
     geminiLiveApi.setCustomVoice(customVoiceBase64);
-    geminiLiveApi.setFunctionCall(functionCallDefinition)
+    geminiLiveApi.setFunctionCall(functionCallDefinition);
     geminiLiveApi.setProactiveVideo(proactiveVideo.checked);
-    geminiLiveApi.setS2ST(enableS2STInput.checked, s2stTargetLanguageInput.value);
-
+    geminiLiveApi.setS2ST(
+        enableS2STInput.checked,
+        s2stTargetLanguageInput.value
+    );
 
     geminiLiveApi.onConnectionStarted = () => {
         setAppStatus("connected");
@@ -169,8 +162,10 @@ function connectBtnClick() {
     };
 
     geminiLiveApi.setProjectId(projectInput.value);
-    geminiLiveApi.connect(accessTokenInput.value);
+    geminiLiveApi.setLocation(locationInput.value);
+    geminiLiveApi.setApiHost(envApiHost.value);
 
+    geminiLiveApi.connect();
 }
 
 const liveAudioOutputManager = new LiveAudioOutputManager();
@@ -206,38 +201,52 @@ geminiLiveApi.onReceiveResponse = (messageResponse) => {
         newModelMessage("Function Call: " + JSON.stringify(functionCalls));
 
         // Process function calls sequentially using promise chaining without making the parent function async.
-        const allResponsesPromise = functionCalls.reduce((promiseChain, funcCall) => {
-            return promiseChain.then(allResponses => {
-                const postData = {
-                    objective: 'fr_generate',
-                    functionName: funcCall.name,
-                    functionArgs: funcCall.args
-                };
+        const allResponsesPromise = functionCalls.reduce(
+            (promiseChain, funcCall) => {
+                return promiseChain.then((allResponses) => {
+                    const postData = {
+                        objective: "fr_generate",
+                        functionName: funcCall.name,
+                        functionArgs: funcCall.args,
+                    };
 
-                // sendPostRequest returns a promise. We chain it.
-                return geminiLiveApi.sendPostRequest(postData).then(result => {
-                    // Add the new response to our list of all responses
-                    allResponses.push({
-                        id: funcCall.id,
-                        name: funcCall.name,
-                        response: { result: result, scheduling: "WHEN_IDLE" },
-                    });
-                    return allResponses;
+                    // sendPostRequest returns a promise. We chain it.
+                    return geminiLiveApi
+                        .sendPostRequest(geminiLiveApi.frUrl, postData)
+                        .then((result) => {
+                            // Add the new response to our list of all responses
+                            allResponses.push({
+                                id: funcCall.id,
+                                name: funcCall.name,
+                                response: {
+                                    result: result,
+                                    scheduling: "WHEN_IDLE",
+                                },
+                            });
+                            return allResponses;
+                        });
                 });
-            });
-        }, Promise.resolve([])); // Start with a resolved promise with an empty array.
+            },
+            Promise.resolve([])
+        ); // Start with a resolved promise with an empty array.
 
         // After all post requests have completed sequentially...
-        allResponsesPromise.then(fcResponseList => {
-            // ...send the collected responses back to Gemini.
-            const responseDict = {toolResponse:{
-                functionResponses: fcResponseList
-            }};
-            geminiLiveApi.sendMessage(responseDict);
-        }).catch(error => {
-            console.error("Error processing function calls:", error);
-            newModelMessage("Error processing function calls: " + error.message);
-        });
+        allResponsesPromise
+            .then((fcResponseList) => {
+                // ...send the collected responses back to Gemini.
+                const responseDict = {
+                    toolResponse: {
+                        functionResponses: fcResponseList,
+                    },
+                };
+                geminiLiveApi.sendMessage(responseDict);
+            })
+            .catch((error) => {
+                console.error("Error processing function calls:", error);
+                newModelMessage(
+                    "Error processing function calls: " + error.message
+                );
+            });
     }
 };
 
@@ -357,12 +366,14 @@ function newMicSelected() {
 }
 
 function disconnectBtnClick() {
-    setAppStatus("disconnected");
     geminiLiveApi.disconnect();
     stopAudioInput();
     customVoiceBase64 = "";
+    functionCallDefinition = null;
     audioFileInput.value = ""; // Reset file input
     fileNameDisplay.textContent = "";
+    fcFileNameDisplay.textContent = "";
+    setAppStatus("disconnected");
 }
 
 function showDialogWithMessage(messageText) {
@@ -420,6 +431,9 @@ async function setAvailableMicrophoneOptions() {
     setMaterialSelect(mics, audioSelect);
 }
 
+const connectBtn = document.getElementById("connectBtn");
+const disconnectBtn = document.getElementById("disconnectBtn");
+
 function setAppStatus(status) {
     disconnected.hidden = true;
     connecting.hidden = true;
@@ -429,12 +443,18 @@ function setAppStatus(status) {
     switch (status) {
         case "disconnected":
             disconnected.hidden = false;
+            connectBtn.disabled = false;
+            disconnectBtn.disabled = true;
             break;
         case "connecting":
             connecting.hidden = false;
+            connectBtn.disabled = true;
+            disconnectBtn.disabled = true;
             break;
         case "connected":
             connected.hidden = false;
+            connectBtn.disabled = true;
+            disconnectBtn.disabled = false;
             break;
         case "speaking":
             speaking.hidden = false;
@@ -444,28 +464,28 @@ function setAppStatus(status) {
 }
 
 // --- DOM Element References ---
-const createVoiceBtn = document.getElementById('createVoiceBtn');
-const modal = document.getElementById('brandedVoiceModal');
-const closeModalBtn = document.getElementById('closeModalBtn');
-const newVoiceNameInput = document.getElementById('newVoiceName');
-const recordButton = document.getElementById('recordButton');
-const recordStatus = document.getElementById('recordStatus');
-const processingSpinner = document.getElementById('processingSpinner');
-const voiceDropdown = document.getElementById('voice-dropdown');
+const createVoiceBtn = document.getElementById("createVoiceBtn");
+const modal = document.getElementById("brandedVoiceModal");
+const closeModalBtn = document.getElementById("closeModalBtn");
+const newVoiceNameInput = document.getElementById("newVoiceName");
+const recordButton = document.getElementById("recordButton");
+const recordStatus = document.getElementById("recordStatus");
+const processingSpinner = document.getElementById("processingSpinner");
+const voiceDropdown = document.getElementById("voice-dropdown");
 
 // --- Event Listeners ---
-createVoiceBtn.addEventListener('click', openModal);
-closeModalBtn.addEventListener('click', closeModal);
-window.addEventListener('click', (event) => {
+createVoiceBtn.addEventListener("click", openModal);
+closeModalBtn.addEventListener("click", closeModal);
+window.addEventListener("click", (event) => {
     if (event.target === modal) {
         closeModal();
     }
 });
-recordButton.addEventListener('click', handleRecordClick);
+recordButton.addEventListener("click", handleRecordClick);
 
 // --- Functions ---
 function closeModal() {
-    modal.style.display = 'none';
+    modal.style.display = "none";
 }
 
 // --- State for Recording ---
@@ -476,8 +496,8 @@ let recordingStartTime;
 
 async function handleRecordClick() {
     const voiceName = newVoiceNameInput.value.trim();
-    if (voiceName === '') {
-        alert('Please enter a name for the reference voice.');
+    if (voiceName === "") {
+        alert("Please enter a name for the reference voice.");
         newVoiceNameInput.focus();
         return;
     }
@@ -486,37 +506,48 @@ async function handleRecordClick() {
         // Stop recording
         const duration = (new Date() - recordingStartTime) / 1000;
         if (duration < 10) {
-            alert('A recording of at least 10 seconds is required.');
+            alert("A recording of at least 10 seconds is required.");
             // Don't stop, let user continue recording
             return;
         }
 
         mediaRecorder.stop();
         recordButton.disabled = true;
-        recordStatus.textContent = 'Processing...';
-        processingSpinner.style.display = 'block';
-        recordButton.innerHTML = 'Processing...';
+        recordStatus.textContent = "Processing...";
+        processingSpinner.style.display = "block";
+        recordButton.innerHTML = "Processing...";
         isRecording = false;
     } else {
         // Start recording
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: true,
+            });
             // Try to record as WAV, but fall back to browser default if not supported
-            const mimeType = MediaRecorder.isTypeSupported('audio/wav') ? 'audio/wav' : 'audio/webm';
+            const mimeType = MediaRecorder.isTypeSupported("audio/wav")
+                ? "audio/wav"
+                : "audio/webm";
             mediaRecorder = new MediaRecorder(stream, { mimeType });
 
-            mediaRecorder.ondataavailable = event => {
+            mediaRecorder.ondataavailable = (event) => {
                 audioChunks.push(event.data);
             };
 
             mediaRecorder.onstop = async () => {
                 const audioBlob = new Blob(audioChunks, { type: mimeType });
-                console.log("Conversion start")
+                console.log("Conversion start");
                 // Resample the audio to 24kHz
                 const targetSampleRate = 24000;
-                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                const decodedBuffer = await audioContext.decodeAudioData(await audioBlob.arrayBuffer());
-                const offlineContext = new OfflineAudioContext(decodedBuffer.numberOfChannels, decodedBuffer.duration * targetSampleRate, targetSampleRate);
+                const audioContext = new (window.AudioContext ||
+                    window.webkitAudioContext)();
+                const decodedBuffer = await audioContext.decodeAudioData(
+                    await audioBlob.arrayBuffer()
+                );
+                const offlineContext = new OfflineAudioContext(
+                    decodedBuffer.numberOfChannels,
+                    decodedBuffer.duration * targetSampleRate,
+                    targetSampleRate
+                );
                 const source = offlineContext.createBufferSource();
                 source.buffer = decodedBuffer;
                 source.connect(offlineContext.destination);
@@ -525,25 +556,29 @@ async function handleRecordClick() {
 
                 // Convert the resampled buffer to a WAV blob
                 const wavBlob = bufferToWave(resampledBuffer);
-                console.log("Conversion done")
+                console.log("Conversion done");
                 // downloadBlob(wavBlob, 'resampled_audio_16k.wav');
                 // console.log("Downloading the audio...")
 
                 const reader = new FileReader();
                 reader.readAsDataURL(wavBlob);
                 reader.onloadend = () => {
-                    const base64String = reader.result.split(',')[1];
+                    const base64String = reader.result.split(",")[1];
 
                     customVoiceBase64 = base64String;
 
-                    const newOption = document.createElement('option');
-                    const optionValue = voiceName.toLowerCase().replace(/\s/g, '-');
+                    const newOption = document.createElement("option");
+                    const optionValue = voiceName
+                        .toLowerCase()
+                        .replace(/\s/g, "-");
                     newOption.value = optionValue;
                     newOption.textContent = voiceName;
                     newOption.selected = true;
                     voiceDropdown.appendChild(newOption);
 
-                    alert(`New branded voice "${voiceName}" has been created and selected!`);
+                    alert(
+                        `New branded voice "${voiceName}" has been created and selected!`
+                    );
                     closeModal();
                     audioChunks = [];
                 };
@@ -552,12 +587,12 @@ async function handleRecordClick() {
             mediaRecorder.start();
             recordingStartTime = new Date();
             isRecording = true;
-            recordButton.innerHTML = '<span class="material-icons">stop</span> Stop Recording';
-            recordStatus.textContent = 'Recording... (10s minimum)';
-
+            recordButton.innerHTML =
+                '<span class="material-icons">stop</span> Stop Recording';
+            recordStatus.textContent = "Recording... (10s minimum)";
         } catch (error) {
-            console.error('Error accessing microphone:', error);
-            alert('Could not access microphone. Please check permissions.');
+            console.error("Error accessing microphone:", error);
+            alert("Could not access microphone. Please check permissions.");
         }
     }
 }
@@ -620,20 +655,21 @@ function bufferToWave(abuffer) {
 }
 
 function openModal() {
-    modal.style.display = 'flex';
-    newVoiceNameInput.value = '';
+    modal.style.display = "flex";
+    newVoiceNameInput.value = "";
     recordButton.disabled = false;
-    recordButton.innerHTML = '<span class="material-icons">mic</span> Record reference voice';
-    recordStatus.textContent = '';
-    processingSpinner.style.display = 'none';
+    recordButton.innerHTML =
+        '<span class="material-icons">mic</span> Record reference voice';
+    recordStatus.textContent = "";
+    processingSpinner.style.display = "none";
     isRecording = false;
     audioChunks = [];
 }
 
 function downloadBlob(blob, filename) {
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.style.display = 'none';
+    const a = document.createElement("a");
+    a.style.display = "none";
     a.href = url;
     a.download = filename;
     document.body.appendChild(a);
