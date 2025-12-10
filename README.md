@@ -35,12 +35,7 @@ You can set up this app locally or via Cloud Shell.
 
 1. Clone the repository and cd into the correct directory
 
-    ```sh
-    git clone https://github.com/GoogleCloudPlatform/generative-ai.git
-    cd generative-ai/gemini/multimodal-live-api/websocket-demo-app
-    ```
-
-1. Create a new virtual environment and activate it. The code is tested under `Python 3.9.6`.
+1. Create a new virtual environment and activate it. The code is tested under `Python 3.9.6` and `Python 3.11`.
 
     ```sh
     python3 -m venv env
@@ -53,22 +48,13 @@ You can set up this app locally or via Cloud Shell.
     pip install -r backend/requirements.txt
     ```
 
-1. Get your Google Cloud access token:
-   Run the following command in a terminal with gcloud installed to set your project, and to retrieve your access token.
+1. Set google project on your local device:
+   Run the following command in a terminal with gcloud installed to set your project.
 
     ```sh
     gcloud components update
     gcloud components install beta
     gcloud config set project YOUR-PROJECT-ID
-    gcloud auth print-access-token
-    ```
-
-1. Create a `.env` file in `backend/` with following configurations.
-
-    ```sh
-    BEARER_TOKEN="YourAccessToken"
-    PROJECT_ID="ProjectId"
-    LOCATION="Location"
     ```
 
 1. Start the Python WebSocket server:
@@ -81,7 +67,7 @@ You can set up this app locally or via Cloud Shell.
 
     - Navigate to `script.js` on line 8, `const PROXY_URL = "wss://[THE_URL_YOU_COPIED_WITHOUT_HTTP]";` and replace `PROXY_URL` value with `ws://localhost:8000`. It should look like: `const PROXY_URL = "ws://localhost:8000";`. Note the absence of the second "s" in "wss" as "ws" indicates a non-secure WebSocket connection.
     - Navigate to `script.js` on line 9, `const FR_SERVICE` it should look like `const FR_SERVICE = "http://localhost:8081/api/post_endpoint`. Make sure the port is the same as displayed while starting WebSocket server.
-    - Right below on line 10, update `PROJECT_ID` with your Google Cloud project ID.
+    - Navigate to `script.js` on line 10, `const CONTROL_URL`, it should look like `const CONTROL_URL = "http://localhost:8081/api/control";`. Make sure the port is the same as displayed while starting WebSocket server.
     - Save the changes you've made to `script.js`
     - Now make sure to open a **separate** terminal window from the backend to run this command (keep the backend server running in the first terminal).
 
@@ -96,6 +82,8 @@ You can set up this app locally or via Cloud Shell.
    in the web page.) **In addition, make sure your browser doesn't cache data for localhost. On Mac, Cmd+Option+I and go to the `Network` tab and then check the box of "Disable Cache".**
 
 1. Connect and interact with the demo:
+
+    - You should type your project ID and location into the corresponding fields, select the LiveAPI model and environment you want to test.
 
     - Press the connect button to connect your web app. Now you should be able to interact with the Multimodal Live API.
 
