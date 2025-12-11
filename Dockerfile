@@ -1,20 +1,29 @@
-FROM nginx:alpine
+# Use an official Python runtime as a parent image
+# 
+FROM python:3.9
 
-# install Python 3 and pip
-RUN apk add --no-cache python3 py3-pip supervisor
+# Set the working directory in the container
+WORKDIR /app
 
-# copy the front end 
-COPY frontend/. /usr/share/nginx/html
+# Copy the dependency file and install dependencies
+# Assuming you have a requirements.txt, add any libraries needed by main.py
+# If you don't have one, you can skip this part
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# copy backend
-COPY backend/. /app
+# Copy the rest of your application code
+# This includes main.py and your static frontend files (index.html, css, js, etc.)
+COPY . .
 
-# install supervisord
-RUN pip3 install --no-cache-dir --break-system-packages -r app/requirements.txt
+# Cloud Run injects the port it expects traffic on via the PORT environment variable.
+# The default is 8080. We need to tell the frontend server to listen on this port.
+# Python's http.server binds to port 8000 by default. To make it use the 
+# Cloud Run-provided port, we need a small wrapper script.
+ENV PORT 8080
 
-COPY supervisord.conf /etc/supervisor/supervisord.conf
-COPY nginx.conf /etc/nginx/nginx.conf
+# Expose the port (mostly for documentation/local testing)
+EXPOSE 8080
 
-EXPOSE 8000
-
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]
+# Set the startup command to run the multi-process script
+# We will create start.sh to manage both processes
+CMD ["/bin/bash", "./start.sh"]
