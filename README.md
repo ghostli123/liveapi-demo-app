@@ -180,8 +180,10 @@ You can set up this app locally or via Cloud Shell.
 1. Execute in terminal
 
     ```sh
-    gcloud run deploy your-service-name \
+    gcloud run deploy service_name \
     --image gcr.io/project_id/service_id \
     --region us-central1 \
-    --set-env-vars="INTERNAL_WS_PORT=8080,INTERNAL_POST_PORT=8081"
+    --set-env-vars="INTERNAL_WS_PORT=8082,INTERNAL_POST_PORT=8081" \
+    --concurrency=10 \
+    --session-affinity
     ```

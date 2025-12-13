@@ -5,7 +5,7 @@ window.addEventListener("load", (event) => {
     setAvailableMicrophoneOptions();
 });
 
-const PROXY_URL = "ws://localhost:8080";
+const PROXY_URL = "ws://localhost:8082";
 const FR_SERVICE_URL = "http://localhost:8081/api/post_endpoint";
 const CONTROL_URL = "http://localhost:8081/api/control";
 const PROJECT_ID = null;
@@ -14,8 +14,8 @@ const projectInput = document.getElementById("project");
 const locationInput = document.getElementById("location");
 const systemInstructionsInput = document.getElementById("systemInstructions");
 
-CookieJar.init("project");
-CookieJar.init("location");
+// CookieJar.init("project");
+// CookieJar.init("location");
 CookieJar.init("systemInstructions");
 
 const disconnected = document.getElementById("disconnected");
@@ -128,7 +128,7 @@ function connectBtnClick() {
     setAppStatus("connecting");
     console.log("Connecting...");
 
-    geminiLiveApi.responseModalities = getSelectedResponseModality();
+    geminiLiveApi.responseModalities = [getSelectedResponseModality()];
     if (getSystemInstructions() !== "") {
         geminiLiveApi.systemInstructions = getSystemInstructions();
     }
@@ -156,16 +156,16 @@ function connectBtnClick() {
         s2stTargetLanguageInput.value
     );
 
-    geminiLiveApi.onConnectionStarted = () => {
-        setAppStatus("connected");
-        // startAudioInput();
-    };
-
     geminiLiveApi.setProjectId(projectInput.value);
     geminiLiveApi.setLocation(locationInput.value);
     geminiLiveApi.setApiHost(envApiHost.value);
 
     geminiLiveApi.connect();
+
+    geminiLiveApi.onConnectionStarted = () => {
+        setAppStatus("connected");
+        // startAudioInput();
+    };
 }
 
 const liveAudioOutputManager = new LiveAudioOutputManager();
