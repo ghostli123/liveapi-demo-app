@@ -1,31 +1,31 @@
 import asyncio
 import json
-import ssl  # LARRY <-- Import the ssl module
-import certifi  # LARRY <-- Import the certifi module
 from aiohttp import web
 import aiohttp_cors
+from absl import app
 from google import genai
 import google.genai.chats
-
-import google.auth
-import google.auth.transport.requests
-
+from typing import Any
+from absl import flags
+from absl import logging
 import websockets
-from websockets.legacy.protocol import WebSocketCommonProtocol
-from websockets.legacy.server import WebSocketServerProtocol
+import urllib.parse
+
+from websockets import ServerConnection
+
+import session_management
+import websocket_handler
+import os
+
+DEBUG = True
+
+SERVICE_URL = "wss://{host}/ws/google.cloud.aiplatform.internal.LlmBidiService/BidiGenerateContent"
+
+WEBSOCKET_PORT = 8082
+POST_REQUEST_PORT = 8081
 
 
-SERVICE_URL: str | None = None
-
-DEBUG = False
-
-BEARER_TOKEN = None
 FR_SIMULATOR_MODEL = "gemini-2.5-pro"
-
-# Global variable to hold the persistent chat session
-GEMINI_CHAT_SESSION: google.genai.chats.AsyncChat | None = None
-WEBSOCKET_SERVER_TASK: asyncio.Task | None = None
-
 
 FR_SIMULATOR_PROMPT = """
 You're a function response simulator, your job is to provide a simulated function response, you'll be provided with all function names and their descriptions.
@@ -37,92 +37,65 @@ If there are any issues with the arguments, such as type is incorrect, required 
 
 """
 
+SESSION_MANAGER = session_management.SessionManager()
 
-async def proxy_task(
-    client_websocket: WebSocketCommonProtocol, server_websocket: WebSocketCommonProtocol
-) -> None:
-    """
-    Forwards messages from one WebSocket connection to another.
-
-    Args:
-        client_websocket: The WebSocket connection from which to receive messages.
-        server_websocket: The WebSocket connection to which to send messages.
-    """
-    async for message in client_websocket:
-
-        try:
-            data = json.loads(message)
-            # print(json.dumps(data, indent=2))
-            if DEBUG:
-                print("proxying: ", data)
-            await server_websocket.send(json.dumps(data))
-        except Exception as e:
-            print(f"Error processing message: {e}")
-
-    await server_websocket.close()
+PROJECT_ID = flags.DEFINE_string("project_id", None, "Google Cloud Project ID.")
+LOCATION = flags.DEFINE_string("location", None, "Google Cloud Location.")
 
 
-async def create_proxy(
-    client_websocket: WebSocketCommonProtocol, bearer_token: str
-) -> None:
-    """
-    Establishes a WebSocket connection to the server and creates two tasks for
-    bidirectional message forwarding between the client and the server.
-
-    Args:
-        client_websocket: The WebSocket connection of the client.
-        bearer_token: The bearer token for authentication with the server.
-    """
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {bearer_token}",
-    }
-
-    # LARRY
-    # This creates a secure context using certifi's trusted certificates.
-    # It ensures Python can verify Google's SSL certificate.
-    ssl_context = ssl.create_default_context(cafile=certifi.where())
-
-    async with websockets.connect(
-        SERVICE_URL,
-        additional_headers=headers,
-        ssl=ssl_context,  # LARRY <-- Pass the secure SSL context here
-    ) as server_websocket:
-        client_to_server_task = asyncio.create_task(
-            proxy_task(client_websocket, server_websocket)
-        )
-        server_to_client_task = asyncio.create_task(
-            proxy_task(server_websocket, client_websocket)
-        )
-        await asyncio.gather(client_to_server_task, server_to_client_task)
-
-
-async def handle_client(client_websocket: WebSocketServerProtocol) -> None:
+async def handle_client(
+    client_websocket: ServerConnection,
+) -> websocket_handler.WebsocketHandler:
     """
     Handles a new client connection, expecting the first message to contain a bearer token.
     Establishes a proxy connection to the server upon successful authentication.
 
     Args:
         client_websocket: The WebSocket connection of the client.
+        path: The request path of the client connection.
     """
-    print("New connection...")
 
-    if not BEARER_TOKEN:
-        print("Error: Bearer token not found in the .env file.")
-        await client_websocket.close(code=1008, reason="Bearer token missing")
+    path = client_websocket.request.path
+
+    query_params = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
+    session_id = query_params.get("session_id", [None])[0]
+
+    logging.info("Getting client websocket with sessionid %s", session_id)
+
+    # 2. Check if this session actually exists in our memory
+    session_handler: session_management.SessionHandlers | None = (
+        await SESSION_MANAGER.search_item(session_id)
+    )
+
+    if not session_handler:
+        logging.error(
+            "Connection rejected: No config record for session %s", session_id
+        )
+        await client_websocket.close(code=1008, reason="No config record for session.")
         return
 
-    await create_proxy(client_websocket, BEARER_TOKEN)
+    liveapi_service_url = SERVICE_URL.format(host=session_handler.ws_host)
+    try:
+        print("client websocket", client_websocket)
+        wb_handler = websocket_handler.WebsocketHandler(
+            liveapi_service_url, session_id, client_websocket, debug_mode=DEBUG
+        )
+
+        await wb_handler.start_websocket()
+        session_handler.websocket_handler = wb_handler
+    except Exception:
+        logging.exception(f"Error starting websocket.")
 
 
 async def websocket_server_service():
     """
-    Starts the WebSocket server and listens for incoming client connections.
+    Starts the WebSocket server ONCE.
+    It will stay running to handle all incoming users.
     """
-    async with websockets.serve(handle_client, "localhost", 8080):
-        print("Running local insecure websocket server localhost:8080...")
-        # Run forever
+    # Change "localhost" to "0.0.0.0" to allow external cloud connections
+    async with websockets.serve(handle_client, "0.0.0.0", WEBSOCKET_PORT):
+        logging.info("WebSocket server is listening on port %s...", WEBSOCKET_PORT)
+        # This keeps the server running indefinitely
         await asyncio.Future()
 
 
@@ -131,22 +104,27 @@ async def handle_fr_post_request(request):
     Handles incoming POST requests, forwards the content to the Gemini chat session,
     and returns the model's response.
     """
-    global GEMINI_CHAT_SESSION
-    if not GEMINI_CHAT_SESSION:
-        print("Error: Chat session not initialized")
-        return web.json_response({"error": "Chat session not initialized"}, status=503)
 
     try:
-        data = await request.json()
+        request_body: dict[str, Any] = await request.json()
         # The entire body is the query for the function call simulation
+        session_id = request_body.get("session_id")
+        chat_session: session_management.SessionHandlers | None = (
+            await SESSION_MANAGER.search_item(session_id)
+        )
+        if not chat_session:
+            return web.json_response(
+                {"error": "Chat session not initialized"}, status=503
+            )
 
-        query_object = data.pop("objective")
-        print("query object", query_object)
-        query = json.dumps(data)
-        print(f"Received query for Gemini: '{query}'")
+        fr_chat_session = chat_session.fr_session
+        query_object = request_body.pop("objective")
+        logging.debug("query object:\n%s", query_object)
+
+        query = json.dumps(request_body)
+        logging.debug("Received query for Gemini:\n%s", query)
 
         if query_object == "fr_generate":
-
             current_content = [
                 genai.types.Part(
                     text="Now generate function response this function call."
@@ -161,28 +139,30 @@ async def handle_fr_post_request(request):
         else:
             raise Exception(f"Unknown query objective type {query_object}")
 
-        response = await GEMINI_CHAT_SESSION.send_message(current_content)
-        print(f"Sending back frontend with response: '{response.text}'")
+        response = await fr_chat_session.send_message(current_content)
+        logging.debug("Sending back frontend with response:\n%s", response.text)
         return web.json_response({"response": response.text})
     except Exception as e:
-        print(f"Error processing POST request: {e}")
+        logging.exception(f"Error processing POST request")
         return web.json_response({"error": str(e)}, status=500)
 
 
-async def initialize_gemini_chat_session(project_id, location):
+def initialize_gemini_chat_session() -> google.genai.chats.AsyncChat:
     """Initializes the global Gemini chat session."""
 
-    print("Initializing Gemini chat session...")
-    global GEMINI_CHAT_SESSION
-    client = genai.Client(vertexai=True, project=project_id, location=location)
-    GEMINI_CHAT_SESSION = client.aio.chats.create(
+    logging.info("Initializing Gemini chat session...")
+    client = genai.Client(
+        vertexai=True, project=PROJECT_ID.value, location=LOCATION.value
+    )
+    current_gemini_chat_session: google.genai.chats.AsyncChat = client.aio.chats.create(
         model=FR_SIMULATOR_MODEL,
         config=genai.types.GenerateContentConfig(
             system_instruction=FR_SIMULATOR_PROMPT,
         ),
         history=[],
     )
-    print("Gemini chat session initialized successfully.")
+    logging.info("Gemini chat session initialized successfully.")
+    return current_gemini_chat_session
 
 
 async def handle_control_request(request):
@@ -198,62 +178,56 @@ async def handle_control_request(request):
     }
 
     """
-    global WEBSOCKET_SERVER_TASK, GEMINI_CHAT_SESSION, SERVICE_URL, BEARER_TOKEN
     try:
-        data = await request.json()
-        command = data.get("command")
+        request_body: dict[str, Any] = await request.json()
+        command = request_body.get("command")
+        logging.debug("control request:\n%s", json.dumps(request_body, indent=2))
+        session_id = request_body.get("session_id")
+
+        session_handler: session_management.SessionHandlers | None = (
+            await SESSION_MANAGER.search_item(session_id)
+        )
 
         if command == "connect":
-            project_id = data.get("project_id")
-            location = data.get("location")
-            host = data.get("host")
-            print(json.dumps(data, indent=2))
+            host = request_body.get("host")
 
-            if WEBSOCKET_SERVER_TASK and not WEBSOCKET_SERVER_TASK.done():
-                print("WebSocket server is already running.")
+            if session_handler and session_handler.websocket_handler:
+                logging.warning("WebSocket server is already running.")
                 return web.json_response(
-                    {"status": "WebSocket server is already running."}
+                    {
+                        "error": "WebSocket server is already running, you should disconnect first."
+                    },
+                    status=409,
                 )
 
-            await initialize_gemini_chat_session(project_id, location)
-            # 1. Get credentials using Application Default Credentials
-            # ADC automatically finds credentials in your environment (Service Account, gcloud, etc.)
-            credentials, project = google.auth.default(
-                scopes=["https://www.googleapis.com/auth/cloud-platform"],
-                # Use the scope your API requires
+            gemini_chat_session = await asyncio.to_thread(
+                initialize_gemini_chat_session
+            )
+            session_handler = session_management.SessionHandlers(
+                session_id=session_id, ws_host=host, fr_session=gemini_chat_session
             )
 
-            # 2. Refresh the token if necessary (usually handled automatically, but good practice)
-            if not credentials.valid:
-                credentials.refresh(google.auth.transport.requests.Request())
+            await SESSION_MANAGER.add_item(session_id, session_handler)
+            logging.info("Starting session service via control request...")
 
-            # 3. The access token is available in the 'token' attribute
-            BEARER_TOKEN = credentials.token
-
-            SERVICE_URL = f"wss://{host}/ws/google.cloud.aiplatform.internal.LlmBidiService/BidiGenerateContent"
-
-            print("Starting WebSocket server via control request...")
-            WEBSOCKET_SERVER_TASK = asyncio.create_task(websocket_server_service())
-            return web.json_response({"status": "WebSocket server started."})
+            return web.json_response(
+                {
+                    "status": "WebSocket server started.",
+                    "project_id": PROJECT_ID.value,
+                    "location": LOCATION.value,
+                }
+            )
 
         elif command == "disconnect":
-            if not WEBSOCKET_SERVER_TASK or WEBSOCKET_SERVER_TASK.done():
-                print("WebSocket server is not running.")
+            wb_handler = session_handler.websocket_handler if session_handler else None
+            if not wb_handler:
+                logging.info("WebSocket server is not running.")
                 return web.json_response({"status": "WebSocket server is not running."})
 
-            print("Stopping WebSocket server and clearing cache...")
-            WEBSOCKET_SERVER_TASK.cancel()
-            try:
-                await WEBSOCKET_SERVER_TASK
-            except asyncio.CancelledError:
-                print("WebSocket server task cancelled successfully.")
+            logging.info("Stopping WebSocket server and clearing cache...")
 
-            WEBSOCKET_SERVER_TASK = None
-            GEMINI_CHAT_SESSION = None  # Clearing cache
-            SERVICE_URL = None
-            BEARER_TOKEN = None
-
-            print("Cache cleared.")
+            await SESSION_MANAGER.delete_item(session_id)
+            logging.info("Cache cleared.")
 
             return web.json_response(
                 {"status": "WebSocket server stopped and cache cleared."}
@@ -298,23 +272,29 @@ async def http_server_service():
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "localhost", 8081)
+    site = web.TCPSite(runner, "localhost", POST_REQUEST_PORT)
     await site.start()
-    print("Running local HTTP server on localhost:8081...")
+    print("Running local HTTP server on localhost:%s...", POST_REQUEST_PORT)
     await asyncio.Future()
 
 
 async def main() -> None:
     """Runs the HTTP server and initializes services."""
-    # The Gemini Chat Session is now initialized on-demand via the /api/control endpoint
-    # when a "connect" command is received.
+    if DEBUG:
+        logging.set_verbosity(logging.DEBUG)
+    else:
+        logging.set_verbosity(logging.INFO)
 
-    # The WebSocket server will now be started on-demand via the /api/control endpoint
-    # instead of at startup.
-    # We only start the http_server_service here.
+    # Run both the HTTP and WebSocket servers concurrently.
+    logging.info(
+        "Initializing for project %s, location %s", PROJECT_ID.value, LOCATION.value
+    )
+    await asyncio.gather(http_server_service(), websocket_server_service())
 
-    await http_server_service()
+
+def main_wrapper(argv):
+    asyncio.run(main())
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    app.run(main_wrapper)

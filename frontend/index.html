@@ -402,7 +402,7 @@
       </div>
 
       <div id="chat-container" style="margin-top: 16px; flex-grow: 1;">
-        <div id="text-chat" style="height: auto; flex-grow: 1;"></div>
+        <div id="text-chat" style="height: auto; flex-grow: 1; max-height: 100px; overflow-y: auto;"></div>
         <div class="text-input-area">
           <md-outlined-text-field id="text-message" label="Send a text message"></md-outlined-text-field>
           <md-icon-button onclick="newUserMessage()"><md-icon>send</md-icon></md-icon-button>
@@ -415,9 +415,9 @@
     <aside class="right-sidebar">
       <div class="config-section">
         <h3>Connection</h3>
-        <md-outlined-text-field id="project" label="Project ID"
+        <md-outlined-text-field id="project" label="Project ID" hidden
           value="visionai-testing-stable"></md-outlined-text-field>
-        <md-outlined-text-field id="location" label="Location" value="us-central1"></md-outlined-text-field>
+        <md-outlined-text-field id="location" label="Location" value="us-central1" hidden></md-outlined-text-field>
         <md-outlined-select label="Environment" id="envApiHost">
           <md-select-option selected value="autopush">
             <div slot="headline">autopush</div>
@@ -440,7 +440,7 @@
         </div>
       </div>
 
-      <details class="config-section" hidden>
+      <details class="config-section">
         <summary>
           <h3>Model Behavior</h3>
         </summary>
@@ -459,7 +459,7 @@
         </div>
       </details>
 
-      <div class="config-section" hidden>
+      <div class="config-section">
         <h3>Outputs</h3>
         <div class="form-grid">
           <md-outlined-select label="Voice Name" id="voiceName">
@@ -666,9 +666,9 @@
             <b class="settings-subtitle">Sampling Rate</b><br />
             <div class="form-grid" style="margin-bottom: 20px;">
               <md-outlined-text-field id="audioInterval" type="number" label="Audio Interval (ms)"
-                value="1000"></md-outlined-text-field>
+                value="200"></md-outlined-text-field>
               <md-outlined-text-field id="videoInterval" type="number" label="Video Frame Interval (ms)"
-                value="5000"></md-outlined-text-field>
+                value="400"></md-outlined-text-field>
             </div>
 
             <b class="settings-subtitle">Detection Sensitivity</b><br />
