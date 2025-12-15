@@ -2,7 +2,7 @@ import asyncio
 from typing import Dict, Optional
 import pydantic
 from websocket_handler import WebsocketHandler
-
+from absl import logging
 import google.genai.chats
 
 
@@ -54,8 +54,10 @@ class SessionManager:
             session_id: The unique identifier for the session.
             data: The data to be associated with the session.
         """
+        logging.info("Adding session %s", session_id)
         async with self._lock:
             self._sessions[session_id] = data
+        logging.info("Session %s added", session_id)
 
     async def delete_item(self, session_id: str) -> None:
         """
@@ -64,6 +66,7 @@ class SessionManager:
         Args:
             session_id: The unique identifier for the session to delete.
         """
+        logging.info("Deleting session %s", session_id)
         session_data: SessionBaseModel | None = None
         async with self._lock:
             if session_id in self._sessions:
@@ -72,6 +75,7 @@ class SessionManager:
         if session_data:
             await session_data.del_session()
             del session_data
+        logging.info("Session %s deleted", session_id)
 
     async def search_item(self, session_id: str) -> Optional[SessionBaseModel]:
         """
