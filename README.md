@@ -85,20 +85,27 @@ You can set up this app locally or via Cloud Shell.
 
 ### Setup in Cloud Run
 
-1. Clone the repository and cd into the correct directory
+1.  Clone the repository and `cd` into the correct directory.
 
-1. Execute in terminal
-
+2.  Make sure you have set your default project and are logged in:
     ```sh
-    gcloud builds submit --tag gcr.io/project_id/service_id .
+    gcloud config set project YOUR_PROJECT_ID
+    gcloud auth login
     ```
 
-1. Execute in terminal
+3.  **Update gcloud components**: Ensure your `gcloud` tool is up-to-date to recognize all deployment flags.
 
     ```sh
-    gcloud run deploy service_name \
-    --image gcr.io/project_id/service_id \
+    gcloud components update
+    ```
+
+3.  Execute the following command in your terminal. This single command will build your container image from the source code and deploy it to Cloud Run. Replace `service-name` with your desired service name (e.g., `live-api-demo`).
+
+    ```sh
+    gcloud run deploy chndu-cloudrun-test-v1 \
+    --source . \
     --region us-central1 \
     --concurrency=10 \
     --session-affinity
     ```
+
