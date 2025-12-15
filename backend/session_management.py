@@ -8,12 +8,6 @@ import google.genai.chats
 
 class SessionBaseModel:
 
-    async def del_session(self):
-        raise NotImplementedError("Function not implemented")
-
-
-class SessionHandlers(SessionBaseModel):
-
     def __init__(
         self,
         session_id: str,

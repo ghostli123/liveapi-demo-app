@@ -5,9 +5,14 @@ window.addEventListener("load", (event) => {
     setAvailableMicrophoneOptions();
 });
 
-const PROXY_URL = "ws://localhost:8082";
-const FR_SERVICE_URL = "http://localhost:8081/api/post_endpoint";
-const CONTROL_URL = "http://localhost:8081/api/control";
+const isHttps = window.location.protocol === "https:";
+const wsProtocol = isHttps ? "wss:" : "ws:";
+const host = window.location.host;
+
+const PROXY_URL = `${wsProtocol}//${host}/ws`;
+const CONTROL_URL = `/api/control`;
+const FR_SERVICE_URL = `/api/post_endpoint`;
+
 const PROJECT_ID = null;
 const API_HOST = null;
 const projectInput = document.getElementById("project");
