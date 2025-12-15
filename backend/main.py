@@ -96,6 +96,9 @@ async def aiohttp_websocket_handler(request: web.Request) -> web.WebSocketRespon
         logging.exception("Error in bridged websocket handler")
     finally:
         logging.info("WebSocket connection cleanup for session %s", session_id)
+        # Always clean up the session to prevent memory leaks if the client
+        # disconnects without sending a 'disconnect' command.
+        await SESSION_MANAGER.delete_item(session_id)
 
     return ws
 

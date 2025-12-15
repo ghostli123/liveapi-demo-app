@@ -19,4 +19,4 @@ ENV LOCATION "us-central1"
 WORKDIR /app/backend
 
 # Use the PORT environment variable provided by Cloud Run
-CMD ["python", "main.py" "--project_id=${PROJECT_ID}" "--location=${LOCATION}"]
+CMD python main.py --project_id=$PROJECT_ID --location=$LOCATION
