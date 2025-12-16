@@ -415,9 +415,7 @@
     <aside class="right-sidebar">
       <div class="config-section">
         <h3>Connection</h3>
-        <md-outlined-text-field id="project" label="Project ID" hidden
-          value="visionai-testing-stable"></md-outlined-text-field>
-        <md-outlined-text-field id="location" label="Location" value="us-central1" hidden></md-outlined-text-field>
+        <md-outlined-text-field id="location" label="Location" value="us-central1"></md-outlined-text-field>
         <md-outlined-select label="Environment" id="envApiHost">
           <md-select-option selected value="autopush">
             <div slot="headline">autopush</div>
@@ -461,48 +459,46 @@
 
       <div class="config-section">
         <h3>Outputs</h3>
-        <div class="form-grid">
-          <md-outlined-select label="Voice Name" id="voiceName">
-            <md-select-option selected value="puck">
-              <div slot="headline">puck</div>
-            </md-select-option>
-            <md-select-option value="charon">
-              <div slot="headline">charon</div>
-            </md-select-option>
-            <md-select-option value="kore">
-              <div slot="headline">kore</div>
-            </md-select-option>
-            <md-select-option value="fenrir">
-              <div slot="headline">fenrir</div>
-            </md-select-option>
-            <md-select-option value="aoede">
-              <div slot="headline">aoede</div>
-            </md-select-option>
-            <md-select-option value="orus">
-              <div slot="headline">orus</div>
-            </md-select-option>
-            <md-select-option value="zephyr">
-              <div slot="headline">zephyr</div>
-            </md-select-option>
-            <md-select-option value="leda">
-              <div slot="headline">leda</div>
-            </md-select-option>
-          </md-outlined-select>
-          <md-outlined-select label="Voice Locale" id="voiceLocale">
-            <md-select-option selected value="en-US">
-              <div slot="headline">en-US</div>
-            </md-select-option>
-            <md-select-option value="de-DE">
-              <div slot="headline">de-DE</div>
-            </md-select-option>
-            <md-select-option value="en-AU">
-              <div slot="headline">en-AU</div>
-            </md-select-option>
-            <md-select-option value="en-GB">
-              <div slot="headline">en-GB</div>
-            </md-select-option>
-          </md-outlined-select>
-        </div>
+        <md-outlined-select label="Voice Name" id="voiceName">
+          <md-select-option selected value="puck">
+            <div slot="headline">puck</div>
+          </md-select-option>
+          <md-select-option value="charon">
+            <div slot="headline">charon</div>
+          </md-select-option>
+          <md-select-option value="kore">
+            <div slot="headline">kore</div>
+          </md-select-option>
+          <md-select-option value="fenrir">
+            <div slot="headline">fenrir</div>
+          </md-select-option>
+          <md-select-option value="aoede">
+            <div slot="headline">aoede</div>
+          </md-select-option>
+          <md-select-option value="orus">
+            <div slot="headline">orus</div>
+          </md-select-option>
+          <md-select-option value="zephyr">
+            <div slot="headline">zephyr</div>
+          </md-select-option>
+          <md-select-option value="leda">
+            <div slot="headline">leda</div>
+          </md-select-option>
+        </md-outlined-select>
+        <md-outlined-select label="Voice Locale" id="voiceLocale">
+          <md-select-option selected value="en-US">
+            <div slot="headline">en-US</div>
+          </md-select-option>
+          <md-select-option value="de-DE">
+            <div slot="headline">de-DE</div>
+          </md-select-option>
+          <md-select-option value="en-AU">
+            <div slot="headline">en-AU</div>
+          </md-select-option>
+          <md-select-option value="en-GB">
+            <div slot="headline">en-GB</div>
+          </md-select-option>
+        </md-outlined-select>
       </div>
 
       <div class="config-section">
@@ -672,24 +668,22 @@
             </div>
 
             <b class="settings-subtitle">Detection Sensitivity</b><br />
-            <div class="form-grid">
-              <md-outlined-select label="Start Sensitivity" id="startSensitivity">
-                <md-select-option selected value="low">
-                  <div slot="headline">low</div>
-                </md-select-option>
-                <md-select-option value="high">
-                  <div slot="headline">high</div>
-                </md-select-option>
-              </md-outlined-select>
-              <md-outlined-select label="End Sensitivity" id="endSensitivity">
-                <md-select-option selected value="low">
-                  <div slot="headline">low</div>
-                </md-select-option>
-                <md-select-option value="high">
-                  <div slot="headline">high</div>
-                </md-select-option>
-              </md-outlined-select>
-            </div>
+            <md-outlined-select label="Start Sensitivity" id="startSensitivity">
+              <md-select-option selected value="low">
+                <div slot="headline">low</div>
+              </md-select-option>
+              <md-select-option value="high">
+                <div slot="headline">high</div>
+              </md-select-option>
+            </md-outlined-select>
+            <md-outlined-select label="End Sensitivity" id="endSensitivity">
+              <md-select-option selected value="low">
+                <div slot="headline">low</div>
+              </md-select-option>
+              <md-select-option value="high">
+                <div slot="headline">high</div>
+              </md-select-option>
+            </md-outlined-select>
           </div>
   </div>
   </aside>

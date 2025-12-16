@@ -13,15 +13,11 @@ const PROXY_URL = `${wsProtocol}//${host}/ws`;
 const CONTROL_URL = `/api/control`;
 const FR_SERVICE_URL = `/api/post_endpoint`;
 
-const PROJECT_ID = null;
-const API_HOST = null;
-const projectInput = document.getElementById("project");
-const locationInput = document.getElementById("location");
 const systemInstructionsInput = document.getElementById("systemInstructions");
+const locationInput = document.getElementById("location");
 
-// CookieJar.init("project");
-// CookieJar.init("location");
 CookieJar.init("systemInstructions");
+CookieJar.init("location");
 
 const disconnected = document.getElementById("disconnected");
 const connecting = document.getElementById("connecting");
@@ -160,8 +156,6 @@ function connectBtnClick() {
         enableS2STInput.checked,
         s2stTargetLanguageInput.value
     );
-
-    geminiLiveApi.setProjectId(projectInput.value);
     geminiLiveApi.setLocation(locationInput.value);
     geminiLiveApi.setApiHost(envApiHost.value);
 

@@ -94,17 +94,18 @@ class WebsocketHandler:
             logging.info("server to client connection established.")
             # Wait for either of the proxy tasks to complete (which happens on connection close).
             # The `async with` block will handle closing the server_websocket.
-            gather_results = await asyncio.gather(
-                self.client_to_server_task,
-                self.server_to_client_task,
-                return_exceptions=True,
+
+            _, pending = await asyncio.wait(
+                [self.client_to_server_task, self.server_to_client_task],
+                return_when=asyncio.FIRST_COMPLETED,
             )
             logging.info("Both task ended, connection closed.")
-            for idx, result in gather_results:
-                if isinstance(result, Exception):
-                    logging.exception("service %s end with exception %s", idx, result)
-                else:
-                    logging.info("service %s end with result %s", idx, result)
+            for task in pending:
+                task.cancel()
+
+            logging.info(
+                "One proxy task finished, cancelling pending tasks and closing connections."
+            )
 
     async def start_websocket(self) -> None:
         """
