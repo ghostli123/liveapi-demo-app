@@ -28,7 +28,6 @@ SESSION_MANAGER = session_management.SessionManager()
 
 # Flags
 PROJECT_ID = flags.DEFINE_string("project_id", None, "Google Cloud Project ID.")
-LOCATION = flags.DEFINE_string("location", None, "Google Cloud Location.")
 
 # --- ADAPTER CLASS ---
 
@@ -160,35 +159,38 @@ async def handle_control_request(request: web.Request):
         session_handler = await SESSION_MANAGER.search_item(session_id)
 
         if command == "connect":
-            host = request_body.get("host")
+            location = request_body.get("location")
+            endpoint = request_body.get("endpoint")
+
+            ws_host = f"{location}-{endpoint}"
+
             if session_handler and session_handler.websocket_handler:
                 return web.json_response({"error": "Already running"}, status=409)
 
             gemini_chat_session = await asyncio.to_thread(
-                initialize_gemini_chat_session
+                initialize_gemini_chat_session, location
             )
             session_handler = session_management.SessionBaseModel(
-                session_id=session_id, ws_host=host, fr_session=gemini_chat_session
+                session_id=session_id, ws_host=ws_host, fr_session=gemini_chat_session
             )
             await SESSION_MANAGER.add_item(session_id, session_handler)
-            return web.json_response({"status": "Session initialized"})
-
-        elif command == "disconnect":
-            await SESSION_MANAGER.delete_item(session_id)
-            return web.json_response({"status": "Session stopped"})
+            return web.json_response(
+                {
+                    "status": "Session initialized.",
+                    "project_id": PROJECT_ID.value,
+                }
+            )
 
         return web.json_response({"error": "Invalid command"}, status=400)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
 
-def initialize_gemini_chat_session() -> google.genai.chats.AsyncChat:
+def initialize_gemini_chat_session(location: str) -> google.genai.chats.AsyncChat:
     logging.info(
-        f"Initializing Gemini chat session with project {PROJECT_ID.value}, location {LOCATION.value}..."
+        f"Initializing Gemini chat session with project {PROJECT_ID.value}, location {location}..."
     )
-    client = genai.Client(
-        vertexai=True, project=PROJECT_ID.value, location=LOCATION.value
-    )
+    client = genai.Client(vertexai=True, project=PROJECT_ID.value, location=location)
     return client.aio.chats.create(
         model=FR_SIMULATOR_MODEL,
         config=genai.types.GenerateContentConfig(
