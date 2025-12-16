@@ -60,12 +60,12 @@ class GeminiLiveAPI {
         this.projectId = null;
         this.model = null;
 
-        this.environment = null;
+        this.environment = "prod";
 
         this.responseModalities = ["AUDIO"];
         this.systemInstructions = "";
 
-        this.apiHost = null;
+        this.endPoint = null;
 
         this.onReceiveResponse = (message) => {
             console.log("Default message received callback", message);
@@ -115,16 +115,16 @@ class GeminiLiveAPI {
     setApiHost(environment) {
         this.environment = environment;
         if (this.environment === "autopush") {
-            this.apiHost = `${this.location}-autopush-aiplatform.sandbox.googleapis.com`;
+            this.endPoint = `autopush-aiplatform.sandbox.googleapis.com`;
         } else if (this.environment === "staging") {
-            this.apiHost = `${this.location}-staging-aiplatform.sandbox.googleapis.com`;
+            this.endPoint = `staging-aiplatform.sandbox.googleapis.com`;
         } else if (this.environment === "prod") {
-            this.apiHost = `${this.location}-aiplatform.googleapis.com`;
+            this.endPoint = `aiplatform.googleapis.com`;
         } else {
             console.error(
                 `Unknown environment: ${this.environment}. Using production API host.`
             );
-            this.apiHost = `${this.location}-aiplatform.googleapis.com`; // Default to production
+            this.endPoint = `aiplatform.googleapis.com`; // Default to production
         }
     }
 
@@ -193,14 +193,14 @@ class GeminiLiveAPI {
         const postRequestBody = {
             command: "connect",
             session_id: this.sessionId,
-            host: this.apiHost,
+            endpoint: this.endPoint,
+            location: this.location,
         };
         return this.sendPostRequest(this.controlUrl, postRequestBody)
             .then((response) => {
                 if (response) {
-                    if (response.project_id && response.location) {
+                    if (response.project_id) {
                         this.setProjectId(response.project_id);
-                        this.setLocation(response.location);
                     }
                 }
             })
@@ -234,17 +234,6 @@ class GeminiLiveAPI {
 
     disconnect() {
         this.webSocket.close();
-
-        const postRequestBody = {
-            command: "disconnect",
-            session_id: this.sessionId,
-        };
-        return this.sendPostRequest(this.controlUrl, postRequestBody).catch(
-            (error) => {
-                console.error("Error in cancelling backend services:", error);
-                this.onErrorMessage("Error cancelling backend services.");
-            }
-        );
     }
 
     sendMessage(message) {
