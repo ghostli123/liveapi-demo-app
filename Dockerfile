@@ -14,9 +14,11 @@ COPY . .
 ENV PROJECT_ID "visionai-testing-stable"
 ENV LOCATION "us-central1"
 
+
+
 # 3. Cloud Run needs to run the backend
 # We switch to backend so main.py can find its local imports easily
 WORKDIR /app/backend
 
 # Use the PORT environment variable provided by Cloud Run
-CMD python main.py --project_id=$PROJECT_ID --location=$LOCATION
+CMD python main.py --project_id=$PROJECT_ID

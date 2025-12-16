@@ -164,6 +164,10 @@ async def handle_control_request(request: web.Request):
 
             ws_host = f"{location}-{endpoint}"
 
+            logging.info(
+                "Websocket host for session %s is set to: %s", session_id, ws_host
+            )
+
             if session_handler and session_handler.websocket_handler:
                 return web.json_response({"error": "Already running"}, status=409)
 

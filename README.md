@@ -60,7 +60,7 @@ You can set up this app locally or via Cloud Shell.
 1. Start the service:
 
     ```sh
-    python3 backend/main.py --project_id=$PROJECT_ID --location=$LOCATION --alsologtostderr 
+    python3 backend/main.py --project_id=$PROJECT_ID --alsologtostderr 
     ```
 
 1. Open your browser and navigate to `localhost:8080`.
