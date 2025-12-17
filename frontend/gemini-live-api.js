@@ -56,15 +56,16 @@ class GeminiLiveAPI {
         this.controlUrl = controlUrl;
         this.frUrl = frUrl;
 
+        this.sessionId = crypto.randomUUID();
         this.projectId = null;
         this.model = null;
 
-        this.environment = null;
+        this.environment = "prod";
 
         this.responseModalities = ["AUDIO"];
         this.systemInstructions = "";
 
-        this.apiHost = null;
+        this.endPoint = null;
 
         this.onReceiveResponse = (message) => {
             console.log("Default message received callback", message);
@@ -114,16 +115,16 @@ class GeminiLiveAPI {
     setApiHost(environment) {
         this.environment = environment;
         if (this.environment === "autopush") {
-            this.apiHost = `${this.location}-autopush-aiplatform.sandbox.googleapis.com`;
+            this.endPoint = `autopush-aiplatform.sandbox.googleapis.com`;
         } else if (this.environment === "staging") {
-            this.apiHost = `${this.location}-staging-aiplatform.sandbox.googleapis.com`;
+            this.endPoint = `staging-aiplatform.sandbox.googleapis.com`;
         } else if (this.environment === "prod") {
-            this.apiHost = `${this.location}-aiplatform.googleapis.com`;
+            this.endPoint = `aiplatform.googleapis.com`;
         } else {
             console.error(
                 `Unknown environment: ${this.environment}. Using production API host.`
             );
-            this.apiHost = `${this.location}-aiplatform.googleapis.com`; // Default to production
+            this.endPoint = `aiplatform.googleapis.com`; // Default to production
         }
     }
 
@@ -179,9 +180,9 @@ class GeminiLiveAPI {
             })
             .then(() => {
                 console.log(
-                    "connect(): setupFuncDeclarationToService successful. Triggering setupWebSocketToService after 100ms."
+                    "connect(): setupFuncDeclarationToService successful. Triggering setupWebSocketToService."
                 );
-                setTimeout(() => this.setupWebSocketToService(), 100);
+                this.setupWebSocketToService();
             })
             .catch((error) =>
                 console.error("connect(): Promise chain failed.", error)
@@ -191,24 +192,30 @@ class GeminiLiveAPI {
     initBackendService() {
         const postRequestBody = {
             command: "connect",
-            project_id: this.projectId,
+            session_id: this.sessionId,
+            endpoint: this.endPoint,
             location: this.location,
-            host: this.apiHost,
         };
-        return this.sendPostRequest(this.controlUrl, postRequestBody).catch(
-            (error) => {
+        return this.sendPostRequest(this.controlUrl, postRequestBody)
+            .then((response) => {
+                if (response) {
+                    if (response.project_id) {
+                        this.setProjectId(response.project_id);
+                    }
+                }
+            })
+            .catch((error) => {
                 console.error("Error in initBackendService:", error);
                 this.onErrorMessage("Error initializing backend service.");
-                // Re-throw the error to stop the promise chain
-                throw error;
-            }
-        );
+                throw error; // Re-throw the error to stop the promise chain
+            });
     }
 
     setupFuncDeclarationToService() {
         if (this.functionCallDefinition) {
             const funcDeclarationMessage = {
                 objective: "fc_definition",
+                session_id: this.sessionId,
                 functionDefinition: this.functionCallDefinition,
             };
             return this.sendPostRequest(
@@ -227,16 +234,6 @@ class GeminiLiveAPI {
 
     disconnect() {
         this.webSocket.close();
-
-        const postRequestBody = {
-            command: "disconnect",
-        };
-        return this.sendPostRequest(this.controlUrl, postRequestBody).catch(
-            (error) => {
-                console.error("Error in cancelling backend services:", error);
-                this.onErrorMessage("Error cancelling backend services.");
-            }
-        );
     }
 
     sendMessage(message) {
@@ -254,7 +251,9 @@ class GeminiLiveAPI {
     setupWebSocketToService() {
         console.log("connecting: ", this.proxyUrl);
 
-        this.webSocket = new WebSocket(this.proxyUrl);
+        const wsUrl = new URL(this.proxyUrl);
+        wsUrl.searchParams.append("session_id", this.sessionId);
+        this.webSocket = new WebSocket(wsUrl);
 
         this.webSocket.onclose = (event) => {
             console.log("websocket closed: ", event);
@@ -304,9 +303,13 @@ class GeminiLiveAPI {
                         language_code: this.voiceLocale,
                     },
                 },
-                tools: [{ functionDeclarations: this.functionCallDefinition }],
             },
         };
+        if (this.functionCallDefinition) {
+            sessionSetupMessage.setup.tools = [
+                { functionDeclarations: this.functionCallDefinition },
+            ];
+        }
         console.log(sessionSetupMessage);
 
         if (this.systemInstructions && this.systemInstructions.trim()) {
@@ -443,7 +446,7 @@ class GeminiLiveAPI {
         } catch (error) {
             console.error("Error sending POST request:", error);
             this.onErrorMessage(`Error sending POST request: ${error.message}`);
-            return null;
+            throw error; // Re-throw the error to reject the promise
         }
     }
 }

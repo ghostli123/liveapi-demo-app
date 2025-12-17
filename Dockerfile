@@ -1,20 +1,24 @@
-FROM nginx:alpine
+FROM python:3.11
 
-# install Python 3 and pip
-RUN apk add --no-cache python3 py3-pip supervisor
+# Set the working directory inside the container
+WORKDIR /app
 
-# copy the front end 
-COPY frontend/. /usr/share/nginx/html
+# 1. Install dependencies first (for better caching)
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# copy backend
-COPY backend/. /app
+# 2. Copy the actual code and assets
+# This copies everything from your local liveapi-demo-app into /app
+COPY . .
 
-# install supervisord
-RUN pip3 install --no-cache-dir --break-system-packages -r app/requirements.txt
+ENV PROJECT_ID "visionai-testing-stable"
+ENV LOCATION "us-central1"
 
-COPY supervisord.conf /etc/supervisor/supervisord.conf
-COPY nginx.conf /etc/nginx/nginx.conf
 
-EXPOSE 8000
 
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]
+# 3. Cloud Run needs to run the backend
+# We switch to backend so main.py can find its local imports easily
+WORKDIR /app/backend
+
+# Use the PORT environment variable provided by Cloud Run
+CMD python main.py --project_id=$PROJECT_ID

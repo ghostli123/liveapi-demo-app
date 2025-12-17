@@ -38,10 +38,10 @@ class LiveAudioOutputManager {
 
         this.audioInputContext = new (window.AudioContext ||
             window.webkitAudioContext)({ sampleRate: 24000 });
-        await this.audioInputContext.audioWorklet.addModule("pcm-processor.js");
+        await this.audioInputContext.audioWorklet.addModule("frontend/pcm-processor.js");;
         this.workletNode = new AudioWorkletNode(
             this.audioInputContext,
-            "pcm-processor",
+            "pcm-processor"
         );
         this.workletNode.connect(this.audioInputContext.destination);
 
@@ -112,10 +112,13 @@ class LiveAudioInputManager {
         this.stream = await navigator.mediaDevices.getUserMedia(constraints);
 
         const source = this.audioContext.createMediaStreamSource(this.stream);
-        await this.audioContext.audioWorklet.addModule('input-processor.js');
+        await this.audioContext.audioWorklet.addModule("frontend/input-processor.js");;
 
         // Create an AudioWorkletNode.
-        this.processor = new AudioWorkletNode(this.audioContext, 'input-processor');
+        this.processor = new AudioWorkletNode(
+            this.audioContext,
+            "input-processor"
+        );
 
         // Listen for messages (the PCM data) from the worklet.
         this.processor.port.onmessage = (event) => {
@@ -125,7 +128,10 @@ class LiveAudioInputManager {
         // Connect the microphone source to the worklet.
         source.connect(this.processor);
 
-        this.interval = setInterval(this.recordChunk.bind(this), this.intervalMs);
+        this.interval = setInterval(
+            this.recordChunk.bind(this),
+            this.intervalMs
+        );
     }
 
     newAudioRecording(b64AudioData) {
@@ -141,7 +147,7 @@ class LiveAudioInputManager {
         });
 
         const uint8Array = new Uint8Array(buffer);
-        let binaryString = '';
+        let binaryString = "";
         const chunkSize = 8192; // Process in 8KB chunks
         for (let i = 0; i < uint8Array.length; i += chunkSize) {
             const chunk = uint8Array.subarray(i, i + chunkSize);
@@ -207,16 +213,23 @@ class LiveVideoManager {
         }
         try {
             const constraints = {
-                video: { deviceId: this.deviceId ? { exact: this.deviceId } : undefined }
+                video: {
+                    deviceId: this.deviceId
+                        ? { exact: this.deviceId }
+                        : undefined,
+                },
                 // video: {
                 //     width: { max: 640 },
                 //     height: { max: 480 },
                 // },
             };
-            this.stream =
-                await navigator.mediaDevices.getUserMedia(constraints);
+            this.stream = await navigator.mediaDevices.getUserMedia(
+                constraints
+            );
             this.previewVideoElement.srcObject = this.stream;
-            this.interval = setInterval(() => { this.newFrame() }, this.intervalMs);
+            this.interval = setInterval(() => {
+                this.newFrame();
+            }, this.intervalMs);
         } catch (err) {
             console.error("Error accessing the webcam: ", err);
         }
@@ -264,7 +277,7 @@ class LiveVideoManager {
             0,
             0,
             this.previewCanvasElement.width,
-            this.previewCanvasElement.height,
+            this.previewCanvasElement.height
         );
         const imageData = this.previewCanvasElement
             .toDataURL("image/jpeg")
@@ -309,7 +322,10 @@ class LiveScreenManager {
             this.stream = await navigator.mediaDevices.getDisplayMedia();
             this.previewVideoElement.srcObject = this.stream;
 
-            this.interval = setInterval(this.newFrame.bind(this), this.intervalMs);
+            this.interval = setInterval(
+                this.newFrame.bind(this),
+                this.intervalMs
+            );
         } catch (err) {
             console.error("Error accessing the webcam: ", err);
         }
@@ -343,7 +359,7 @@ class LiveScreenManager {
             0,
             0,
             this.previewCanvasElement.width,
-            this.previewCanvasElement.height,
+            this.previewCanvasElement.height
         );
         const imageData = this.previewCanvasElement
             .toDataURL("image/jpeg")

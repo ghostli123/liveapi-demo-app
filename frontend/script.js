@@ -5,18 +5,19 @@ window.addEventListener("load", (event) => {
     setAvailableMicrophoneOptions();
 });
 
-const PROXY_URL = "ws://localhost:8080";
-const FR_SERVICE_URL = "http://localhost:8081/api/post_endpoint";
-const CONTROL_URL = "http://localhost:8081/api/control";
-const PROJECT_ID = null;
-const API_HOST = null;
-const projectInput = document.getElementById("project");
-const locationInput = document.getElementById("location");
-const systemInstructionsInput = document.getElementById("systemInstructions");
+const isHttps = window.location.protocol === "https:";
+const wsProtocol = isHttps ? "wss:" : "ws:";
+const host = window.location.host;
 
-CookieJar.init("project");
-CookieJar.init("location");
+const PROXY_URL = `${wsProtocol}//${host}/ws`;
+const CONTROL_URL = `/api/control`;
+const FR_SERVICE_URL = `/api/post_endpoint`;
+
+const systemInstructionsInput = document.getElementById("systemInstructions");
+const locationInput = document.getElementById("location");
+
 CookieJar.init("systemInstructions");
+CookieJar.init("location");
 
 const disconnected = document.getElementById("disconnected");
 const connecting = document.getElementById("connecting");
@@ -128,7 +129,7 @@ function connectBtnClick() {
     setAppStatus("connecting");
     console.log("Connecting...");
 
-    geminiLiveApi.responseModalities = getSelectedResponseModality();
+    geminiLiveApi.responseModalities = [getSelectedResponseModality()];
     if (getSystemInstructions() !== "") {
         geminiLiveApi.systemInstructions = getSystemInstructions();
     }
@@ -155,17 +156,15 @@ function connectBtnClick() {
         enableS2STInput.checked,
         s2stTargetLanguageInput.value
     );
+    geminiLiveApi.setLocation(locationInput.value);
+    geminiLiveApi.setApiHost(envApiHost.value);
+
+    geminiLiveApi.connect();
 
     geminiLiveApi.onConnectionStarted = () => {
         setAppStatus("connected");
         // startAudioInput();
     };
-
-    geminiLiveApi.setProjectId(projectInput.value);
-    geminiLiveApi.setLocation(locationInput.value);
-    geminiLiveApi.setApiHost(envApiHost.value);
-
-    geminiLiveApi.connect();
 }
 
 const liveAudioOutputManager = new LiveAudioOutputManager();
