@@ -21,7 +21,13 @@ DEBUG = False
 SERVICE_URL = "wss://{host}/ws/google.cloud.aiplatform.internal.LlmBidiService/BidiGenerateContent"
 FR_SIMULATOR_MODEL = "gemini-2.5-pro"
 FR_SIMULATOR_PROMPT = """
-You're a function response simulator, your job is to provide a simulated function response...
+You're a function response simulator, your job is to provide a simulated function response, you'll be provided with all function names and their descriptions.
+
+Then you'll be given a function name to be triggered and input arguments. You should generate a function response based your understanding of the function.
+
+If a function response should follow a specific format, it will be described in the function description. If you cannot find any function response format, just return a string that you think best fit the function response.
+If there are any issues with the arguments, such as type is incorrect, required arguments not provided, in these kind of cases, you should return a string like raise Exception.
+
 """
 
 SESSION_MANAGER = session_management.SessionManager()
