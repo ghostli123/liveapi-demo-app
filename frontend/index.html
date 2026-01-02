@@ -389,15 +389,15 @@
       <div class="media-controls" style="margin-top: 16px;">
         <md-outlined-select id="cameraSource" label="Camera" onchange="newCameraSelected()"></md-outlined-select>
         <md-outlined-select id="audioSource" label="Microphone" onchange="newMicSelected()"></md-outlined-select>
-        <span id="micBtn"><md-filled-icon-button
+        <span id="micBtn" hidden><md-filled-icon-button 
             onclick="micBtnClick()"><md-icon>mic</md-icon></md-filled-icon-button></span>
-        <span id="micOffBtn" hidden><md-filled-icon-button
+        <span id="micOffBtn" ><md-filled-icon-button disabled
             onclick="micOffBtnClick()"><md-icon>mic_off</md-icon></md-filled-icon-button></span>
-        <span id="cameraBtn"><md-filled-icon-button
+        <span id="cameraBtn" hidden><md-filled-icon-button 
             onclick="cameraBtnClick()"><md-icon>videocam</md-icon></md-filled-icon-button></span>
-        <span id="cameraOffBtn" hidden><md-filled-icon-button
+        <span id="cameraOffBtn" ><md-filled-icon-button disabled
             onclick="cameraOffBtnClick()"><md-icon>videocam_off</md-icon></md-filled-icon-button></span>
-        <span id="screenBtn"><md-filled-icon-button
+        <span id="screenBtn"><md-filled-icon-button  disabled
             onclick="screenShareBtnClick()"><md-icon>present_to_all</md-icon></md-filled-icon-button></span>
       </div>
 

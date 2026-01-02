@@ -63,6 +63,14 @@ const geminiLiveApi = new GeminiLiveAPI(PROXY_URL, CONTROL_URL, FR_SERVICE_URL);
 geminiLiveApi.onErrorMessage = (message) => {
     showDialogWithMessage(message);
     setAppStatus("disconnected");
+    stopAudioInput();
+    micBtn.hidden = true;
+    micOffBtn.hidden = false;
+    micOffBtn.querySelector('md-filled-icon-button').disabled = true;
+    cameraBtn.hidden = true;
+    cameraOffBtn.hidden = false;
+    cameraOffBtn.querySelector('md-filled-icon-button').disabled = true;
+    screenBtn.querySelector('md-filled-icon-button').disabled = true;
 };
 
 let customVoiceBase64 = "";
@@ -162,7 +170,11 @@ function connectBtnClick() {
     geminiLiveApi.connect();
 
     geminiLiveApi.onConnectionStarted = () => {
+        micOffBtn.querySelector('md-filled-icon-button').disabled = false;
+        cameraOffBtn.querySelector('md-filled-icon-button').disabled = false;
+        screenBtn.querySelector('md-filled-icon-button').disabled = false;
         setAppStatus("connected");
+
         // startAudioInput();
     };
 }
