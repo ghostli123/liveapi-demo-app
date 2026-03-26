@@ -291,8 +291,6 @@ class GeminiLiveAPI {
         const sessionSetupMessage = {
             setup: {
                 model: modelUri,
-                realtime_input_config: {},
-                explicit_vad_signal: true,
                 generation_config: {
                     response_modalities: this.responseModalities,
                     speech_config: {
@@ -339,13 +337,16 @@ class GeminiLiveAPI {
             };
         }
 
-        sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection =
-            {};
-        if (this.disableDetection) {
-            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.disabled = true;
-        }
-        if (this.disableInterruption) {
-            sessionSetupMessage.setup.realtime_input_config.activity_handling = 2;
+        if (this.disableDetection || this.disableInterruption || this.startSensitivity !== "" || this.endSensitivity !== "") {
+            sessionSetupMessage.setup.realtime_input_config = {
+                automatic_activity_detection: {}
+            };
+            if (this.disableDetection) {
+                sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.disabled = true;
+            }
+            if (this.disableInterruption) {
+                sessionSetupMessage.setup.realtime_input_config.activity_handling = 2;
+            }
         }
 
         if (this.startSensitivity === "") {
