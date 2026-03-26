@@ -97,6 +97,55 @@
     }
 
     /* --- Main Container Layout --- */
+    /* --- Avatar Mode Layout --- */
+    #video-preview-container .avatar-output-container {
+      display: none; /* Hidden by default */
+    }
+
+    #video-preview-container.avatar-mode .avatar-output-container {
+      display: flex; /* Shown in avatar mode */
+    }
+
+    #video-preview-container:not(.avatar-mode) .input-container {
+      flex: 1;
+      max-width: 600px; /* Centered and bounded in default mode */
+      margin: 0 auto;
+    }
+
+    #video-preview-container {
+      display: flex;
+      gap: 24px;
+      margin-top: 16px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    #video-preview-container > div {
+      flex: 1;
+      min-width: 300px;
+      background-color: #000;
+      border-radius: 8px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      color: white;
+    }
+
+    #video-preview-container h3 {
+      margin-top: 0;
+      font-size: 14px;
+      font-weight: 500;
+      color: #ccc;
+    }
+
+    video, #avatar-output {
+      width: 100%;
+      max-width: 100%;
+      border-radius: 4px;
+      background-color: #222;
+    }
+
     .app-container {
       display: flex;
       flex-grow: 1;
@@ -381,9 +430,16 @@
             class="icon-text">model speaking</span></div>
       </div>
 
-      <div id="video-preview-container" style="margin-top: 16px;">
-        <video id="video" autoplay playsinline muted></video>
-        <canvas id="canvas" style="display: none;"></canvas>
+      <div id="video-preview-container" class="avatar-mode">
+        <div class="input-container">
+          <h3>Input (Camera/Screen)</h3>
+          <video id="video" autoplay playsinline muted></video>
+          <canvas id="canvas" style="display: none;"></canvas>
+        </div>
+        <div class="avatar-output-container">
+          <h3>Avatar Output</h3>
+          <img id="avatar-output" alt="Avatar Output" />
+        </div>
       </div>
 
       <div class="media-controls" style="margin-top: 16px;">
@@ -428,8 +484,14 @@
           </md-select-option>
         </md-outlined-select>
         <md-outlined-select label="Model" id="liveApiModel">
-          <md-select-option selected value="gemini-live-2.5-flash-native-audio-exp">
-            <div slot="headline">gemini-live-2.5-flash-native-audio-exp</div>
+          <md-select-option value="gemini-live-2.0-flash-exp">
+            <div slot="headline">gemini-live-2.0-flash-exp</div>
+          </md-select-option>
+          <md-select-option value="gemini-2.0-flash-001">
+            <div slot="headline">gemini-2.0-flash-001</div>
+          </md-select-option>
+          <md-select-option selected value="gemini-live-2.5-flash-native-audio">
+            <div slot="headline">gemini-live-2.5-flash-native-audio</div>
           </md-select-option>
         </md-outlined-select>
         <div class="button-group">
@@ -541,6 +603,14 @@
             style="font-size: 12px; color: var(--gcp-text-secondary); margin-top: 8px; display: block;"></span>
         </div>
 
+      </div>
+
+      <div class="config-section">
+        <h3>Avatar Mode</h3>
+        <div class="checkbox-row">
+          <md-checkbox id="enableAvatarMode" touch-target="wrapper" checked onchange="toggleAvatarMode()"></md-checkbox>
+          <label for="enableAvatarMode">Enable Avatar Mode (Side-by-side view)</label>
+        </div>
       </div>
 
       <div class="config-section">

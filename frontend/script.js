@@ -3,6 +3,7 @@ window.addEventListener("load", (event) => {
 
     setAvailableCamerasOptions();
     setAvailableMicrophoneOptions();
+    toggleAvatarMode();
 });
 
 const isHttps = window.location.protocol === "https:";
@@ -185,6 +186,9 @@ geminiLiveApi.onReceiveResponse = (messageResponse) => {
     console.log("Message response received, type: " + messageResponse.type);
     if (messageResponse.type === "AUDIO") {
         liveAudioOutputManager.playAudioChunk(messageResponse.data);
+    } else if (messageResponse.type === "VIDEO") {
+        const avatarOutput = document.getElementById("avatar-output");
+        avatarOutput.src = `data:${messageResponse.mimeType};base64,${messageResponse.data}`;
     } else if (messageResponse.type === "TEXT") {
         console.log("Gemini said: ", messageResponse.data);
         newModelMessage(messageResponse.data);
@@ -505,6 +509,18 @@ let audioChunks = [];
 let isRecording = false;
 let recordingStartTime;
 
+function toggleAvatarMode() {
+    const avatarModeCheckbox = document.getElementById("enableAvatarMode");
+    const videoContainer = document.getElementById("video-preview-container");
+    if (!avatarModeCheckbox || !videoContainer) return;
+    
+    if (avatarModeCheckbox.checked) {
+        videoContainer.classList.add("avatar-mode");
+    } else {
+        videoContainer.classList.remove("avatar-mode");
+    }
+}
+
 async function handleRecordClick() {
     const voiceName = newVoiceNameInput.value.trim();
     if (voiceName === "") {
@@ -688,3 +704,4 @@ function downloadBlob(blob, filename) {
     window.URL.revokeObjectURL(url);
     document.body.removeChild(a);
 }
+
