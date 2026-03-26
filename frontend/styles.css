@@ -103,16 +103,63 @@ details .details-content {
 
 #video-preview-container {
   width: 100%;
-  aspect-ratio: 4 / 3;
+  aspect-ratio: 16 / 9;
   border-radius: 12px;
   background-color: var(--md-sys-color-surface-container);
   overflow: hidden;
   position: relative;
+  margin-top: 24px;
+  margin-bottom: 24px;
 }
 
-#video {
+#video-preview-container.avatar-mode {
+  display: flex;
+  aspect-ratio: auto;
+  gap: 24px;
+  background-color: transparent;
+  overflow: visible;
+}
+
+#video-preview-container > div {
+  display: none;
+}
+
+#video-preview-container.avatar-mode > div {
+  flex: 1;
+  background-color: var(--gcp-surface);
+  border: 1px solid var(--gcp-border);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 1px 2px 0 rgba(60,64,67,.30), 0 1px 3px 1px rgba(60,64,67,.15);
+}
+
+/* Solo Input View */
+#video-preview-container:not(.avatar-mode) > .input-container {
+  display: block;
   width: 100%;
   height: 100%;
+}
+
+#video-preview-container:not(.avatar-mode) #video {
+  width: 100%;
+  height: 100%;
+  aspect-ratio: auto;
+  object-fit: cover;
+  border-radius: 0;
+}
+
+#video-preview-container:not(.avatar-mode) h3 {
+  display: none;
+}
+
+#video, #avatar-output {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 8px;
+  background-color: #000;
   object-fit: cover;
 }
 

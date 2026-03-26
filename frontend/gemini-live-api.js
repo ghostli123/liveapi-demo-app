@@ -20,7 +20,16 @@ class GeminiLiveResponseMessage {
             this.type = "TEXT";
         } else if (parts?.length && parts[0].inlineData) {
             this.data = parts[0].inlineData.data;
-            this.type = "AUDIO";
+            const mimeType = parts[0].inlineData.mimeType;
+            if (
+                mimeType &&
+                (mimeType.startsWith("video/") || mimeType.startsWith("image/"))
+            ) {
+                this.type = "VIDEO";
+                this.mimeType = mimeType;
+            } else {
+                this.type = "AUDIO";
+            }
         } else if (data?.sessionResumptionUpdate) {
             this.type = "RESUMPTION";
             this.data = data?.sessionResumptionUpdate?.newHandle;
