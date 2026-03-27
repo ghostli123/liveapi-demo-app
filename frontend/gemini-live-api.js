@@ -114,7 +114,7 @@ class GeminiLiveAPI {
         this.enableS2ST = false;
         this.s2stTargetLanguage = "";
         this.functionCallDefinition = null;
-        this.customizedAvatarData = DUMMY_AVATAR_16_9;
+        this.customizedAvatarData = CUSTOM_AVATAR_DATA;
         this.customizedAvatarMimeType = "image/png";
 
         console.log("Created Gemini Live API object: ", this);
