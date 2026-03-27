@@ -30,24 +30,27 @@ class GeminiLiveResponseMessage {
             } else {
                 this.type = "AUDIO";
             }
-        } else if (data?.sessionResumptionUpdate) {
+        } else if (data?.sessionResumptionUpdate || data?.session_resumption_update) {
             this.type = "RESUMPTION";
-            this.data = data?.sessionResumptionUpdate?.newHandle;
-        } else if (data?.serverContent?.inputTranscription) {
+            const sessionResumptionUpdate = data?.sessionResumptionUpdate || data?.session_resumption_update;
+            this.data = sessionResumptionUpdate?.newHandle || sessionResumptionUpdate?.new_handle;
+        } else if (data?.serverContent?.inputTranscription || data?.serverContent?.input_transcription) {
             this.type = "INPUT_TRANSCRIPTION";
-            if (data?.serverContent?.inputTranscription?.text) {
-                this.data = data?.serverContent?.inputTranscription?.text;
-            } else if (data?.serverContent?.inputTranscription?.finished) {
-                this.data = data?.serverContent?.inputTranscription?.finished;
+            const inputTranscription = data?.serverContent?.inputTranscription || data?.serverContent?.input_transcription;
+            if (inputTranscription?.text) {
+                this.data = inputTranscription?.text;
+            } else if (inputTranscription?.finished) {
+                this.data = inputTranscription?.finished;
             }
-        } else if (data?.serverContent?.outputTranscription) {
+        } else if (data?.serverContent?.outputTranscription || data?.serverContent?.output_transcription) {
             this.type = "OUTPUT_TRANSCRIPTION";
-            if (data?.serverContent?.outputTranscription?.text) {
-                this.data = data?.serverContent?.outputTranscription?.text;
-            } else if (data?.serverContent?.outputTranscription?.finished) {
+            const outputTranscription = data?.serverContent?.outputTranscription || data?.serverContent?.output_transcription;
+            if (outputTranscription?.text) {
+                this.data = outputTranscription?.text;
+            } else if (outputTranscription?.finished) {
                 this.data =
                     "Finished: " +
-                    data?.serverContent?.outputTranscription?.finished;
+                    outputTranscription?.finished;
             }
         } else if (this.endOfTurn) {
             this.data = "END OF TURN";
@@ -58,6 +61,8 @@ class GeminiLiveResponseMessage {
         }
     }
 }
+const DUMMY_AVATAR_16_9 =
+    "iVBORw0KGgoAAAANSUhEUgAAABAAAAAJCAIAAABnTYUvAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAAMSURBVBhXYwQDAAACAAHnSm8jAAAAAElFTkSuQmCC";
 
 class GeminiLiveAPI {
     constructor(proxyUrl, controlUrl, frUrl) {
@@ -71,7 +76,7 @@ class GeminiLiveAPI {
 
         this.environment = "prod";
 
-        this.responseModalities = ["AUDIO"];
+        this.responseModalities = ["VIDEO"];
         this.systemInstructions = "";
 
         this.endPoint = null;
@@ -90,6 +95,7 @@ class GeminiLiveAPI {
 
         this.websocket = null;
         this.location = null;
+        this.avatarMode = false;
 
         this.enableInputTranscript = false;
         this.enableOutputTranscript = false;
@@ -106,6 +112,8 @@ class GeminiLiveAPI {
         this.enableS2ST = false;
         this.s2stTargetLanguage = "";
         this.functionCallDefinition = null;
+        this.customizedAvatarData = DUMMY_AVATAR_16_9;
+        this.customizedAvatarMimeType = "image/png";
 
         console.log("Created Gemini Live API object: ", this);
     }
@@ -176,6 +184,11 @@ class GeminiLiveAPI {
         console.log(`Setting S2ST to: ${enable}, Target Language: ${language}`);
         this.enableS2ST = enable;
         this.s2stTargetLanguage = language;
+    }
+
+    setCustomizedAvatar(imageData, mimeType = "image/png") {
+        this.customizedAvatarData = imageData;
+        this.customizedAvatarMimeType = mimeType;
     }
 
     connect() {
@@ -296,27 +309,34 @@ class GeminiLiveAPI {
                     speech_config: {
                         voice_config: this.customVoiceSample
                             ? {
-                                  replicated_voice_config: {
-                                      voice_sample_audio:
+                                replicated_voice_config: {
+                                    voice_sample_audio:
                                           this.customVoiceSample,
-                                      mime_type: "audio/pcm;rate=24000",
+                                    mime_type: "audio/pcm;rate=24000",
                                   },
                               }
                             : {
-                                  prebuilt_voice_config: {
-                                      voice_name: this.voiceName,
+                                prebuilt_voice_config: {
+                                    voice_name: this.voiceName,
                                   },
                               },
                         language_code: this.voiceLocale,
+                    },
+                },
+                avatar_config: {
+                    customized_avatar: {
+                        image_mime_type: this.customizedAvatarMimeType,
+                        image_data: this.customizedAvatarData,
                     },
                 },
             },
         };
         if (this.functionCallDefinition) {
             sessionSetupMessage.setup.tools = [
-                { functionDeclarations: this.functionCallDefinition },
+                { function_declarations: this.functionCallDefinition },
             ];
         }
+
         console.log(sessionSetupMessage);
 
         if (this.systemInstructions && this.systemInstructions.trim()) {
@@ -325,12 +345,6 @@ class GeminiLiveAPI {
             };
         }
 
-        if (this.enableInputTranscript) {
-            sessionSetupMessage.setup.input_audio_transcription = {};
-        }
-        if (this.enableOutputTranscript) {
-            sessionSetupMessage.setup.output_audio_transcription = {};
-        }
         if (this.enableSessionResumption) {
             sessionSetupMessage.setup.session_resumption = {
                 handle: this.resumptionHandle,
@@ -383,14 +397,14 @@ class GeminiLiveAPI {
 
     sendTextMessage(text) {
         const textMessage = {
-            client_content: {
+            clientContent: {
                 turns: [
                     {
                         role: "user",
                         parts: [{ text: text }],
                     },
                 ],
-                turn_complete: true,
+                turnComplete: true,
             },
         };
         this.sendMessage(textMessage);
@@ -399,27 +413,27 @@ class GeminiLiveAPI {
     sendVoiceActivityMessage(start) {
         if (start) {
             const startMessage = {
-                realtime_input: {
-                    activity_start: {},
+                realtimeInput: {
+                    activityStart: {},
                 },
             };
             this.sendMessage(startMessage);
         } else {
             const endMessage = {
-                realtime_input: {
-                    activity_end: {},
+                realtimeInput: {
+                    activityEnd: {},
                 },
             };
             this.sendMessage(endMessage);
         }
     }
 
-    sendRealtimeInputMessage(data, mime_type) {
+    sendRealtimeInputMessage(data, mimeType) {
         const message = {
-            realtime_input: {
-                media_chunks: [
+            realtimeInput: {
+                mediaChunks: [
                     {
-                        mime_type: mime_type,
+                        mimeType: mimeType,
                         data: data,
                     },
                 ],
@@ -429,7 +443,7 @@ class GeminiLiveAPI {
     }
 
     sendAudioMessage(base64PCM) {
-        this.sendRealtimeInputMessage(base64PCM, "audio/pcm");
+        this.sendRealtimeInputMessage(base64PCM, "audio/pcm;rate=16000");
     }
 
     sendImageMessage(base64Image, mime_type = "image/jpeg") {
