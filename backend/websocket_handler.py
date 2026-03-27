@@ -54,14 +54,18 @@ class WebsocketHandler:
         while True:
             try:
                 message = await source_websocket.recv()
-                # We have to convert to json format, the frontend implementation won't recognize blob!
-                # Leave as a TODO: modify frontend that can handle blob directly.
-                data = json.loads(message)
-
-                logging.debug(
-                    "%s proxying: %s", service_name, json.dumps(data, indent=2)
-                )
-                await target_websocket.send(json.dumps(data))
+                
+                try:
+                    # Try to parse as JSON for logging and potential modification
+                    data = json.loads(message)
+                    logging.debug(
+                        "%s proxying: %s", service_name, json.dumps(data, indent=2)
+                    )
+                    await target_websocket.send(json.dumps(data))
+                except (json.JSONDecodeError, TypeError):
+                    # If it's not JSON (e.g. binary data), just forward it as is
+                    logging.debug("%s proxying binary data", service_name)
+                    await target_websocket.send(message)
             except websockets.exceptions.ConnectionClosed:
                 logging.exception(
                     "%s Connection closed, stopping proxy task.", service_name
