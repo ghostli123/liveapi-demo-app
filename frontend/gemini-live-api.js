@@ -450,7 +450,15 @@ class GeminiLiveAPI {
     }
 
     sendImageMessage(base64Image, mime_type = "image/jpeg") {
-        this.sendRealtimeInputMessage(base64Image, mime_type);
+        const message = {
+            realtime_input: {
+                video: {
+                    mime_type: mime_type,
+                    data: base64Image,
+                },
+            },
+        };
+        this.sendMessage(message);
     }
 
     async sendPostRequest(url, data) {
