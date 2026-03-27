@@ -21,8 +21,8 @@ class GeminiLiveResponseMessage {
         } else if (parts?.length && parts[0].text) {
             this.data = parts[0].text;
             this.type = "TEXT";
-        } else if (parts?.length && (parts[0].inlineData || parts[0].inline_data)) {
-            const inlineData = parts[0].inlineData || parts[0].inline_data;
+        } else if (parts?.length && (parts[0].inlineData || parts[0].inline_data || parts[0].video)) {
+            const inlineData = parts[0].inlineData || parts[0].inline_data || parts[0].video;
             this.data = inlineData.data;
             const mimeType = inlineData.mimeType || inlineData.mime_type;
             if (
@@ -266,7 +266,13 @@ class GeminiLiveAPI {
 
     onReceiveMessage(messageEvent) {
         console.log("Message received: ", messageEvent);
-        const messageData = JSON.parse(messageEvent.data);
+        let messageData;
+        if (typeof messageEvent.data === "string") {
+            messageData = JSON.parse(messageEvent.data);
+        } else {
+            console.warn("Received binary message, ignoring: ", messageEvent.data);
+            return;
+        }
         const message = new GeminiLiveResponseMessage(messageData);
         console.log("onReceiveMessageCallBack this ", this);
         this.onReceiveResponse(message);
@@ -431,17 +437,25 @@ class GeminiLiveAPI {
         }
     }
 
-    sendRealtimeInputMessage(data, mimeType) {
+    sendRealtimeInputMessage(data, mimeType, isVideo = false) {
         const message = {
-            realtime_input: {
-                media_chunks: [
-                    {
-                        mime_type: mimeType,
-                        data: data,
-                    },
-                ],
-            },
+            realtime_input: {},
         };
+
+        if (isVideo) {
+            message.realtime_input.video = {
+                mime_type: mimeType,
+                data: data,
+            };
+        } else {
+            message.realtime_input.media_chunks = [
+                {
+                    mime_type: mimeType,
+                    data: data,
+                },
+            ];
+        }
+
         this.sendMessage(message);
     }
 
@@ -450,7 +464,7 @@ class GeminiLiveAPI {
     }
 
     sendImageMessage(base64Image, mime_type = "image/jpeg") {
-        this.sendRealtimeInputMessage(base64Image, mime_type);
+        this.sendRealtimeInputMessage(base64Image, mime_type, true);
     }
 
     async sendPostRequest(url, data) {
