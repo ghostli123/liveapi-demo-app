@@ -202,7 +202,7 @@ def initialize_gemini_chat_session(location: str):
     if not project_id:
         _, project_id = get_credentials.get_credentials()
         if not project_id:
-            project_id = "visionai-testing-stable"
+            project_id = "cloud-llm-preview1"
             logging.info(f"Using hardcoded fallback project ID: {project_id}")
         else:
             logging.info(f"Auto-detected project ID: {project_id}")
