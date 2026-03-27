@@ -2,25 +2,29 @@ class GeminiLiveResponseMessage {
     constructor(data) {
         this.data = "";
         this.type = "";
-        this.endOfTurn = data?.serverContent?.turnComplete;
-        this.interrupt = data?.serverContent?.interrupted;
 
-        const parts = data?.serverContent?.modelTurn?.parts;
-        const tool_calls = data?.toolCall?.functionCalls;
+        const serverContent = data?.serverContent || data?.server_content;
+        this.endOfTurn = serverContent?.turnComplete || serverContent?.turn_complete;
+        this.interrupt = serverContent?.interrupted;
 
-        if (data?.setupComplete) {
+        const modelTurn = serverContent?.modelTurn || serverContent?.model_turn;
+        const parts = modelTurn?.parts;
+        const tool_calls = data?.toolCall?.functionCalls || data?.tool_call?.function_calls;
+
+        if (data?.setupComplete || data?.setup_complete) {
             this.type = "SETUP COMPLETE";
         } else if (tool_calls) {
             this.data = tool_calls;
             this.type = "FUNCTION_CALL";
-        } else if (data?.voiceActivityDetectionSignal) {
+        } else if (data?.voiceActivityDetectionSignal || data?.voice_activity_detection_signal) {
             this.type = "VAD_SIGNAL";
         } else if (parts?.length && parts[0].text) {
             this.data = parts[0].text;
             this.type = "TEXT";
-        } else if (parts?.length && parts[0].inlineData) {
-            this.data = parts[0].inlineData.data;
-            const mimeType = parts[0].inlineData.mimeType;
+        } else if (parts?.length && (parts[0].inlineData || parts[0].inline_data)) {
+            const inlineData = parts[0].inlineData || parts[0].inline_data;
+            this.data = inlineData.data;
+            const mimeType = inlineData.mimeType || inlineData.mime_type;
             if (
                 mimeType &&
                 (mimeType.startsWith("video/") || mimeType.startsWith("image/"))
@@ -34,23 +38,21 @@ class GeminiLiveResponseMessage {
             this.type = "RESUMPTION";
             const sessionResumptionUpdate = data?.sessionResumptionUpdate || data?.session_resumption_update;
             this.data = sessionResumptionUpdate?.newHandle || sessionResumptionUpdate?.new_handle;
-        } else if (data?.serverContent?.inputTranscription || data?.serverContent?.input_transcription) {
+        } else if (serverContent?.inputTranscription || serverContent?.input_transcription) {
             this.type = "INPUT_TRANSCRIPTION";
-            const inputTranscription = data?.serverContent?.inputTranscription || data?.serverContent?.input_transcription;
+            const inputTranscription = serverContent?.inputTranscription || serverContent?.input_transcription;
             if (inputTranscription?.text) {
                 this.data = inputTranscription?.text;
             } else if (inputTranscription?.finished) {
                 this.data = inputTranscription?.finished;
             }
-        } else if (data?.serverContent?.outputTranscription || data?.serverContent?.output_transcription) {
+        } else if (serverContent?.outputTranscription || serverContent?.output_transcription) {
             this.type = "OUTPUT_TRANSCRIPTION";
-            const outputTranscription = data?.serverContent?.outputTranscription || data?.serverContent?.output_transcription;
+            const outputTranscription = serverContent?.outputTranscription || serverContent?.output_transcription;
             if (outputTranscription?.text) {
                 this.data = outputTranscription?.text;
             } else if (outputTranscription?.finished) {
-                this.data =
-                    "Finished: " +
-                    outputTranscription?.finished;
+                this.data = "Finished: " + outputTranscription?.finished;
             }
         } else if (this.endOfTurn) {
             this.data = "END OF TURN";
@@ -330,7 +332,11 @@ class GeminiLiveAPI {
                     },
                 },
             },
+            api_version: "internal",
+            internal_large_model_id: "gemini_live_rev24",
+            native_audio_input: true,
         };
+
         if (this.functionCallDefinition) {
             sessionSetupMessage.setup.tools = [
                 { function_declarations: this.functionCallDefinition },
@@ -364,19 +370,19 @@ class GeminiLiveAPI {
         }
 
         if (this.startSensitivity === "") {
-            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.start_of_speech_sensitivity = 0;
+            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.start_of_speech_sensitivity = "START_SENSITIVITY_UNSPECIFIED";
         } else if (this.startSensitivity === "low") {
-            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.start_of_speech_sensitivity = 2;
+            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.start_of_speech_sensitivity = "START_SENSITIVITY_LOW";
         } else if (this.startSensitivity === "high") {
-            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.start_of_speech_sensitivity = 1;
+            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.start_of_speech_sensitivity = "START_SENSITIVITY_HIGH";
         }
 
         if (this.endSensitivity === "") {
-            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.end_of_speech_sensitivity = 0;
+            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.end_of_speech_sensitivity = "END_SENSITIVITY_UNSPECIFIED";
         } else if (this.endSensitivity === "low") {
-            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.end_of_speech_sensitivity = 2;
+            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.end_of_speech_sensitivity = "END_SENSITIVITY_LOW";
         } else if (this.endSensitivity === "high") {
-            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.end_of_speech_sensitivity = 1;
+            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.end_of_speech_sensitivity = "START_SENSITIVITY_HIGH";
         }
 
         if (this.enableProactiveVideo) {
@@ -397,14 +403,14 @@ class GeminiLiveAPI {
 
     sendTextMessage(text) {
         const textMessage = {
-            clientContent: {
+            client_content: {
                 turns: [
                     {
                         role: "user",
                         parts: [{ text: text }],
                     },
                 ],
-                turnComplete: true,
+                turn_complete: true,
             },
         };
         this.sendMessage(textMessage);
@@ -413,15 +419,15 @@ class GeminiLiveAPI {
     sendVoiceActivityMessage(start) {
         if (start) {
             const startMessage = {
-                realtimeInput: {
-                    activityStart: {},
+                realtime_input: {
+                    activity_start: {},
                 },
             };
             this.sendMessage(startMessage);
         } else {
             const endMessage = {
-                realtimeInput: {
-                    activityEnd: {},
+                realtime_input: {
+                    activity_end: {},
                 },
             };
             this.sendMessage(endMessage);
@@ -430,10 +436,10 @@ class GeminiLiveAPI {
 
     sendRealtimeInputMessage(data, mimeType) {
         const message = {
-            realtimeInput: {
-                mediaChunks: [
+            realtime_input: {
+                media_chunks: [
                     {
-                        mimeType: mimeType,
+                        mime_type: mimeType,
                         data: data,
                     },
                 ],
