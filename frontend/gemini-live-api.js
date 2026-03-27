@@ -332,9 +332,6 @@ class GeminiLiveAPI {
                     },
                 },
             },
-            api_version: "internal",
-            internal_large_model_id: "gemini_live_rev24",
-            native_audio_input: true,
         };
 
         if (this.functionCallDefinition) {
