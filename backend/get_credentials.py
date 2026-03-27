@@ -8,7 +8,7 @@ def get_credentials():
     # ADC automatically finds credentials in your environment (Service Account, gcloud, etc.)
     credentials: google.auth.credentials.Credentials
 
-    credentials, _ = google.auth.default(
+    credentials, project_id = google.auth.default(
         scopes=["https://www.googleapis.com/auth/cloud-platform"],
     )
 
@@ -18,4 +18,4 @@ def get_credentials():
         credentials.refresh(google.auth.transport.requests.Request())
 
     # 3. The access token is available in the 'token' attribute
-    return credentials
+    return credentials, project_id
