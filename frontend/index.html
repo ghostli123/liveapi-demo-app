@@ -106,7 +106,15 @@
 
     #video-preview-container.avatar-mode .avatar-output-container {
       display: flex;
-      /* Shown in avatar mode */
+      flex: 2;
+      min-width: 500px;
+      /* Enlarged for better visibility */
+    }
+
+    #video-preview-container.avatar-mode .input-container {
+      flex: 1;
+      max-width: 400px;
+      /* Compact input view in avatar mode */
     }
 
     #video-preview-container:not(.avatar-mode) .input-container {
@@ -147,8 +155,11 @@
     #avatar-output {
       width: 100%;
       max-width: 100%;
+      max-height: 70vh; /* Limit height for portrait images */
       border-radius: 4px;
       background-color: #222;
+      aspect-ratio: auto;
+      object-fit: contain;
     }
 
     .app-container {
