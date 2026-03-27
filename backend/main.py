@@ -12,6 +12,7 @@ import websockets
 
 import session_management
 import websocket_handler
+import get_credentials
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Navigate to the frontend folder (assuming it's a sibling to the backend folder)
@@ -177,7 +178,7 @@ async def handle_control_request(request: web.Request):
             if session_handler and session_handler.websocket_handler:
                 return web.json_response({"error": "Already running"}, status=409)
 
-            gemini_chat_session = await asyncio.to_thread(
+            gemini_chat_session, used_project_id = await asyncio.to_thread(
                 initialize_gemini_chat_session, location
             )
             session_handler = session_management.SessionBaseModel(
@@ -187,7 +188,7 @@ async def handle_control_request(request: web.Request):
             return web.json_response(
                 {
                     "status": "Session initialized.",
-                    "project_id": PROJECT_ID.value,
+                    "project_id": used_project_id,
                 }
             )
 
@@ -196,16 +197,28 @@ async def handle_control_request(request: web.Request):
         return web.json_response({"error": str(e)}, status=500)
 
 
-def initialize_gemini_chat_session(location: str) -> google.genai.chats.AsyncChat:
+def initialize_gemini_chat_session(location: str):
+    project_id = PROJECT_ID.value
+    if not project_id:
+        _, project_id = get_credentials.get_credentials()
+        if not project_id:
+            project_id = "visionai-testing-stable"
+            logging.info(f"Using hardcoded fallback project ID: {project_id}")
+        else:
+            logging.info(f"Auto-detected project ID: {project_id}")
+
     logging.info(
-        f"Initializing Gemini chat session with project {PROJECT_ID.value}, location {location}..."
+        f"Initializing Gemini chat session with project {project_id}, location {location}..."
     )
-    client = genai.Client(vertexai=True, project=PROJECT_ID.value, location=location)
-    return client.aio.chats.create(
-        model=FR_SIMULATOR_MODEL,
-        config=genai.types.GenerateContentConfig(
-            system_instruction=FR_SIMULATOR_PROMPT
+    client = genai.Client(vertexai=True, project=project_id, location=location)
+    return (
+        client.aio.chats.create(
+            model=FR_SIMULATOR_MODEL,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=FR_SIMULATOR_PROMPT
+            ),
         ),
+        project_id,
     )
 
 

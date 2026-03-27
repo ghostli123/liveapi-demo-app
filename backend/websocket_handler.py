@@ -112,7 +112,7 @@ class WebsocketHandler:
         Start the websocket connection between client and the server.
 
         """
-        creds = get_credentials.get_credentials()
+        creds, _ = get_credentials.get_credentials()
         self.bearer_token = creds.token
         self.expire_time: datetime.datetime = creds.expiry
         if self.expire_time.tzinfo is None:
@@ -165,7 +165,7 @@ class WebsocketHandler:
             wait_time,
         )
 
-        creds = get_credentials.get_credentials()
+        creds, _ = get_credentials.get_credentials()
         self.bearer_token = creds.token
         self.expire_time: datetime.datetime = creds.expiry
         if self.expire_time.tzinfo is None:
