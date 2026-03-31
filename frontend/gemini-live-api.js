@@ -114,10 +114,39 @@ class GeminiLiveAPI {
         this.enableS2ST = false;
         this.s2stTargetLanguage = "";
         this.functionCallDefinition = null;
-        this.customizedAvatarData = CUSTOM_AVATAR_DATA;
+        this.customizedAvatarData = "";
         this.customizedAvatarMimeType = "image/png";
 
         console.log("Created Gemini Live API object: ", this);
+    }
+
+    async loadCustomAvatar(url = "/frontend/assets/avatar_image.png") {
+        try {
+            console.log("Loading custom avatar from:", url);
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`Failed to load avatar image: ${response.statusText}`);
+            }
+            const blob = await response.blob();
+            this.customizedAvatarMimeType = blob.type;
+            
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    // Extract base64 data from DataURL
+                    const base64data = reader.result.split(",")[1];
+                    this.customizedAvatarData = base64data;
+                    console.log("Custom avatar image loaded successfully.");
+                    resolve();
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(blob);
+            });
+        } catch (error) {
+            console.error("Error loading custom avatar:", error);
+            this.onErrorMessage("Error loading custom avatar image.");
+            throw error;
+        }
     }
 
     setLocation(location) {
@@ -194,8 +223,12 @@ class GeminiLiveAPI {
     }
 
     connect() {
-        console.log("connect(): Triggering initBackendService...");
-        this.initBackendService()
+        console.log("connect(): Loading custom avatar and triggering initBackendService...");
+        this.loadCustomAvatar()
+            .then(() => {
+                console.log("connect(): Avatar loaded. Triggering initBackendService...");
+                return this.initBackendService();
+            })
             .then(() => {
                 console.log(
                     "connect(): initBackendService successful. Triggering setupFuncDeclarationToService..."
