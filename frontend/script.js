@@ -183,14 +183,15 @@ function connectBtnClick() {
 }
 
 const liveAudioOutputManager = new LiveAudioOutputManager();
+const liveVideoOutputManager = new LiveVideoOutputManager();
+
 
 geminiLiveApi.onReceiveResponse = (messageResponse) => {
     console.log("Message response received, type: " + messageResponse.type);
     if (messageResponse.type === "AUDIO") {
         liveAudioOutputManager.playAudioChunk(messageResponse.data);
     } else if (messageResponse.type === "VIDEO") {
-        const avatarOutput = document.getElementById("avatar-output");
-        avatarOutput.src = `data:${messageResponse.mimeType};base64,${messageResponse.data}`;
+        liveVideoOutputManager.playVideoChunk(messageResponse.data);
     } else if (messageResponse.type === "TEXT") {
         console.log("Gemini said: ", messageResponse.data);
         newModelMessage(messageResponse.data);
