@@ -375,4 +375,78 @@ class LiveScreenManager {
     }
 }
 
+class LiveVideoOutputManager {
+    constructor() {
+        this.mediaSource = null;
+        this.sourceBuffer = null;
+        this.chunkQueue = [];
+        this.initialized = false;
+        this.codec = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
+
+        this.initMediaSource();
+    }
+
+    initMediaSource() {
+        const video = document.getElementById('video_player');
+        if (!video) {
+            console.error("video_player element not found for LiveVideoOutputManager");
+            return;
+        }
+
+        if ('MediaSource' in window && MediaSource.isTypeSupported(this.codec)) {
+            this.mediaSource = new MediaSource();
+            video.src = URL.createObjectURL(this.mediaSource);
+
+            this.mediaSource.addEventListener('sourceopen', () => {
+                console.log('MediaSource opened');
+                try {
+                    this.sourceBuffer = this.mediaSource.addSourceBuffer(this.codec);
+                    this.sourceBuffer.addEventListener('updateend', () => {
+                        this.processQueue();
+                    });
+                    this.initialized = true;
+                    this.processQueue();
+                } catch (e) {
+                    console.error("Error adding source buffer:", e);
+                }
+            });
+
+            this.mediaSource.addEventListener('sourceclose', () => console.log('MediaSource closed'));
+            this.mediaSource.addEventListener('error', e => console.error('MediaSource error', e));
+        } else {
+            console.error('Unsupported MIME type or codec:', this.codec);
+        }
+    }
+
+    playVideoChunk(base64Chunk) {
+        const arrayBuffer = LiveVideoOutputManager.base64ToArrayBuffer(base64Chunk);
+        this.chunkQueue.push(arrayBuffer);
+        this.processQueue();
+    }
+
+    processQueue() {
+        if (!this.initialized || !this.sourceBuffer) return;
+        if (this.sourceBuffer.updating) return;
+
+        if (this.chunkQueue.length > 0) {
+            const chunk = this.chunkQueue.shift();
+            try {
+                this.sourceBuffer.appendBuffer(chunk);
+            } catch (e) {
+                console.error("Error appending buffer:", e);
+            }
+        }
+    }
+
+    static base64ToArrayBuffer(base64) {
+        const binaryString = window.atob(base64);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        return bytes.buffer;
+    }
+}
+
 console.log("loaded live-media-manager.js");
+

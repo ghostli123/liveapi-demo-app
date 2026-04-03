@@ -120,7 +120,7 @@ class GeminiLiveAPI {
         console.log("Created Gemini Live API object: ", this);
     }
 
-    async loadCustomAvatar(url = "/frontend/assets/avatar_image.png") {
+    async loadCustomAvatar(url = "/frontend/assets/avatar_image.png?v=" + Date.now()) {
         try {
             console.log("Loading custom avatar from:", url);
             const response = await fetch(url);
