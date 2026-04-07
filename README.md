@@ -25,7 +25,7 @@ While some web development experience, particularly with localhost, port numbers
 -   `frontend/pcm-processor.js`: Script for processing PCM audio
 -   `frontend/cookieJar.js`: Script for managing cookies
 
-![Demo](/img/avatar_ui.jpg)
+![Demo](/img/ui.jpg)
 
 ## Setup instructions
 
