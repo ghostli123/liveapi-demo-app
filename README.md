@@ -1,6 +1,6 @@
 # Multimodal Live API Demo
 
-In this tutorial, you will be building a web application that enables you to use your voice and camera to talk to Gemini 3.1 through the [Multimodal Live API](https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/multimodal-live).
+In this tutorial, you will be building a web application that enables you to use your voice and camera to talk to Gemini 3.1 and 3.2 through the [Multimodal Live API](https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/multimodal-live).
 
 The [Multimodal Live API](https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/multimodal-live) is a low-latency bidirectional streaming API that supports audio and video streaming inputs and can output audio.
 
