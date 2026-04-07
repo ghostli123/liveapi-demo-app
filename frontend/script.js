@@ -4,6 +4,7 @@ window.addEventListener("load", (event) => {
     setAvailableCamerasOptions();
     setAvailableMicrophoneOptions();
     toggleAvatarMode();
+    loadDefaultVoiceSample();
 });
 
 const isHttps = window.location.protocol === "https:";
@@ -75,6 +76,26 @@ geminiLiveApi.onErrorMessage = (message) => {
 };
 
 let customVoiceBase64 = "";
+
+async function loadDefaultVoiceSample() {
+    try {
+        const response = await fetch("/frontend/assets/output_24khz.wav");
+        if (!response.ok) {
+            console.error("Failed to load default voice sample:", response.statusText);
+            return;
+        }
+        const blob = await response.blob();
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            customVoiceBase64 = reader.result.split(",")[1];
+            console.log("Loaded default voice sample from output_24khz.wav");
+        };
+        reader.readAsDataURL(blob);
+    } catch (e) {
+        console.error("Error loading default voice sample:", e);
+    }
+}
+
 audioFileInput.addEventListener("change", (event) => {
     const file = event.target.files[0];
 
