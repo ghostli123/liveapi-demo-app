@@ -1,6 +1,6 @@
 # Multimodal Live API Demo
 
-In this tutorial, you will be building a web application that enables you to use your voice and camera to talk to Gemini 2.0 through the [Multimodal Live API](https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/multimodal-live).
+In this tutorial, you will be building a web application that enables you to use your voice and camera to talk to Gemini 3.1 through the [Multimodal Live API](https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/multimodal-live).
 
 The [Multimodal Live API](https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/multimodal-live) is a low-latency bidirectional streaming API that supports audio and video streaming inputs and can output audio.
 
@@ -25,7 +25,7 @@ While some web development experience, particularly with localhost, port numbers
 -   `frontend/pcm-processor.js`: Script for processing PCM audio
 -   `frontend/cookieJar.js`: Script for managing cookies
 
-![Demo](/img/ui.jpg)
+![Demo](/img/avatar_ui.jpg)
 
 ## Setup instructions
 
@@ -82,6 +82,7 @@ You can set up this app locally or via Cloud Shell.
     - Text input: You can write a text prompt to send to the model by entering your message in the box and pressing the send arrow. The model will then respond via audio (turn up your volume!).
     - Voice input: Press the microphone button to stop speaking. The model will respond via audio. If you would like to mute your microphone, press the button with a slash through the microphone.
     - Video input: The model will also capture your camera input and send it to Gemini. You can ask questions about current or previous video footage. For more details on how this works, visit the [documentation page for the Multimodal Live API](https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/multimodal-live).
+    - Avatar Output: The application supports real-time video streaming of an avatar, providing a more immersive interaction experience.
 
 ### Setup in Cloud Run
 
