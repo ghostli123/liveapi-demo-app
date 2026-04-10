@@ -463,6 +463,15 @@ function setAppStatus(status) {
             disconnected.hidden = false;
             connectBtn.disabled = false;
             disconnectBtn.disabled = true;
+            
+            // Download recorded video if any
+            if (typeof liveVideoOutputManager !== 'undefined') {
+                const blob = liveVideoOutputManager.getRecordedBlob();
+                if (blob && blob.size > 0) {
+                    downloadBlob(blob, `received_video_${Date.now()}.mp4`);
+                    liveVideoOutputManager.clearRecordedChunks();
+                }
+            }
             break;
         case "connecting":
             connecting.hidden = false;
