@@ -364,12 +364,15 @@ class GeminiLiveAPI {
                         language_code: this.voiceLocale,
                     },
                 },
+                // avatar_config: {
+                //     customized_avatar: {
+                //         image_mime_type: this.customizedAvatarMimeType,
+                //         image_data: this.customizedAvatarData,
+                //     },
+                // },
                 avatar_config: {
-                    customized_avatar: {
-                        image_mime_type: this.customizedAvatarMimeType,
-                        image_data: this.customizedAvatarData,
-                    },
-                },
+                    avatar_name: "Piper",
+                }
             },
         };
 
