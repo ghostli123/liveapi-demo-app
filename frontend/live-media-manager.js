@@ -382,6 +382,7 @@ class LiveVideoOutputManager {
         this.chunkQueue = [];
         this.initialized = false;
         this.codec = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
+        this.recordedChunks = [];
 
         this.initMediaSource();
     }
@@ -421,6 +422,7 @@ class LiveVideoOutputManager {
     playVideoChunk(base64Chunk) {
         const arrayBuffer = LiveVideoOutputManager.base64ToArrayBuffer(base64Chunk);
         this.chunkQueue.push(arrayBuffer);
+        this.recordedChunks.push(arrayBuffer);
         this.processQueue();
     }
 
@@ -436,6 +438,14 @@ class LiveVideoOutputManager {
                 console.error("Error appending buffer:", e);
             }
         }
+    }
+
+    getRecordedBlob() {
+        return new Blob(this.recordedChunks, { type: "video/mp4" });
+    }
+
+    clearRecordedChunks() {
+        this.recordedChunks = [];
     }
 
     static base64ToArrayBuffer(base64) {
