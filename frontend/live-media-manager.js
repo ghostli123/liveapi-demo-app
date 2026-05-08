@@ -381,7 +381,7 @@ class LiveVideoOutputManager {
         this.sourceBuffer = null;
         this.chunkQueue = [];
         this.initialized = false;
-        this.codec = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
+        this.codec = 'video/mp4; codecs="avc1.42c020, mp4a.40.2"';
         this.recordedChunks = [];
 
         this.initMediaSource();
