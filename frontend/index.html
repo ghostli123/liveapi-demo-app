@@ -625,7 +625,27 @@
           <span id="fcFileName"
             style="font-size: 12px; color: var(--gcp-text-secondary); margin-top: 8px; display: block;"></span>
         </div>
-
+        <div style="margin-top: 12px;">
+          <md-outlined-select label="Tool Behavior" id="toolBehavior" onchange="toggleSchedulingDisable()">
+            <md-select-option selected value="BLOCKING">
+              <div slot="headline">BLOCKING</div>
+            </md-select-option>
+            <md-select-option value="NON_BLOCKING">
+              <div slot="headline">NON_BLOCKING</div>
+            </md-select-option>
+          </md-outlined-select>
+          <md-outlined-select label="Scheduling" id="fcScheduling" disabled>
+            <md-select-option value="SILENT">
+              <div slot="headline">SILENT</div>
+            </md-select-option>
+            <md-select-option selected value="WHEN_IDLE">
+              <div slot="headline">WHEN_IDLE</div>
+            </md-select-option>
+            <md-select-option value="INTERRUPT">
+              <div slot="headline">INTERRUPT</div>
+            </md-select-option>
+          </md-outlined-select>
+        </div>
       </div>
 
       <div class="config-section">

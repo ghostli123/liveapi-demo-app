@@ -160,6 +160,7 @@ function connectBtnClick() {
     );
     geminiLiveApi.setCustomVoice(customVoiceBase64);
     geminiLiveApi.setFunctionCall(functionCallDefinition);
+    geminiLiveApi.toolBehavior = document.getElementById("toolBehavior").value;
     geminiLiveApi.setProactiveVideo(proactiveVideo.checked);
     geminiLiveApi.setS2ST(
         enableS2STInput.checked,
@@ -218,6 +219,9 @@ geminiLiveApi.onReceiveResponse = (messageResponse) => {
         const functionCalls = messageResponse.data;
         newModelMessage("Function Call: " + JSON.stringify(functionCalls));
 
+        const schedulingVal = document.getElementById("fcScheduling")?.value || "WHEN_IDLE";
+        console.log("Processing function calls with scheduling:", schedulingVal);
+
         // Process function calls sequentially using promise chaining without making the parent function async.
         const allResponsesPromise = functionCalls.reduce(
             (promiseChain, funcCall) => {
@@ -238,7 +242,7 @@ geminiLiveApi.onReceiveResponse = (messageResponse) => {
                                 name: funcCall.name,
                                 response: {
                                     result: result,
-                                    scheduling: "WHEN_IDLE",
+                                    scheduling: schedulingVal,
                                 },
                             });
                             return allResponses;
@@ -248,10 +252,8 @@ geminiLiveApi.onReceiveResponse = (messageResponse) => {
             Promise.resolve([])
         ); // Start with a resolved promise with an empty array.
 
-        // After all post requests have completed sequentially...
         allResponsesPromise
             .then((fcResponseList) => {
-                // ...send the collected responses back to Gemini.
                 const responseDict = {
                     toolResponse: {
                         functionResponses: fcResponseList,
@@ -715,5 +717,13 @@ function downloadBlob(blob, filename) {
     a.click();
     window.URL.revokeObjectURL(url);
     document.body.removeChild(a);
+}
+
+function toggleSchedulingDisable() {
+    const toolBehavior = document.getElementById("toolBehavior");
+    const fcScheduling = document.getElementById("fcScheduling");
+    if (toolBehavior && fcScheduling) {
+        fcScheduling.disabled = (toolBehavior.value === "BLOCKING");
+    }
 }
 

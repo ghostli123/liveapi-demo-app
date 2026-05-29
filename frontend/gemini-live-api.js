@@ -114,6 +114,7 @@ class GeminiLiveAPI {
         this.enableS2ST = false;
         this.s2stTargetLanguage = "";
         this.functionCallDefinition = null;
+        this.toolBehavior = "BLOCKING";
         this.customizedAvatarData = "";
         this.customizedAvatarMimeType = "image/png";
 
@@ -378,7 +379,10 @@ class GeminiLiveAPI {
 
         if (this.functionCallDefinition) {
             sessionSetupMessage.setup.tools = [
-                { function_declarations: this.functionCallDefinition },
+                { 
+                    function_declarations: this.functionCallDefinition,
+                    behavior: this.toolBehavior
+                },
             ];
         }
 
