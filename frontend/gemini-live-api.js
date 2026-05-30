@@ -117,6 +117,8 @@ class GeminiLiveAPI {
         this.toolBehavior = "BLOCKING";
         this.customizedAvatarData = "";
         this.customizedAvatarMimeType = "image/png";
+        this.audioBitrate = 0;
+        this.videoBitrate = 0;
 
         console.log("Created Gemini Live API object: ", this);
     }
@@ -199,6 +201,11 @@ class GeminiLiveAPI {
     setResumption(enable, handle) {
         this.enableSessionResumption = enable;
         this.resumptionHandle = handle;
+    }
+
+    setBitrates(audioBitrate, videoBitrate) {
+        this.audioBitrate = audioBitrate;
+        this.videoBitrate = videoBitrate;
     }
 
     setVad(disableInterruption, disableDetection, startSen, endSen) {
@@ -438,6 +445,14 @@ class GeminiLiveAPI {
             sessionSetupMessage.setup.enable_speech_to_speech_translation = true;
             sessionSetupMessage.setup.generation_config.speech_config.language_code =
                 this.s2stTargetLanguage;
+        }
+
+        if (this.audioBitrate > 0) {
+            sessionSetupMessage.setup.avatar_config.audio_bitrate_bps = this.audioBitrate;
+        }
+
+        if (this.videoBitrate > 0) {
+            sessionSetupMessage.setup.avatar_config.video_bitrate_bps = this.videoBitrate;
         }
 
         console.log("setup message: " + sessionSetupMessage);

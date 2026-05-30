@@ -383,8 +383,6 @@ class LiveVideoOutputManager {
         this.initialized = false;
         this.codec = 'video/mp4; codecs="avc1.42c020, mp4a.40.2"';
         this.recordedChunks = [];
-
-        this.initMediaSource();
     }
 
     initMediaSource() {
@@ -394,8 +392,17 @@ class LiveVideoOutputManager {
             return;
         }
 
-        if ('MediaSource' in window && MediaSource.isTypeSupported(this.codec)) {
-            this.mediaSource = new MediaSource();
+        const MediaSourceClass = window.ManagedMediaSource || window.MediaSource;
+        if (!MediaSourceClass) {
+            console.error('MediaSource API not supported in this browser');
+            return;
+        }
+
+        const isMMS = !!window.ManagedMediaSource;
+        console.log(`Using ${isMMS ? 'ManagedMediaSource' : 'MediaSource'} interface`);
+
+        if (MediaSourceClass.isTypeSupported(this.codec)) {
+            this.mediaSource = new MediaSourceClass();
             video.src = URL.createObjectURL(this.mediaSource);
 
             this.mediaSource.addEventListener('sourceopen', () => {
@@ -446,6 +453,15 @@ class LiveVideoOutputManager {
 
     clearRecordedChunks() {
         this.recordedChunks = [];
+    }
+
+    resetPlayer() {
+        this.mediaSource.endOfStream();
+        this.chunkQueue = [];
+        this.recordedChunks = [];
+        this.sourceBuffer = null;
+        this.mediaSource = null;
+        this.initialized = false;
     }
 
     static base64ToArrayBuffer(base64) {
