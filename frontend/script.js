@@ -56,6 +56,8 @@ const fcFileNameDisplay = document.getElementById("fcFileName");
 const proactiveVideo = document.getElementById("proactiveVideo");
 const audioInterval = document.getElementById("audioInterval");
 const videoInterval = document.getElementById("videoInterval");
+const audioBitrateInput = document.getElementById("audioBitrate");
+const videoBitrateInput = document.getElementById("videoBitrate");
 const enableS2STInput = document.getElementById("enableS2ST");
 const s2stTargetLanguageInput = document.getElementById("s2stTargetLanguage");
 
@@ -138,6 +140,7 @@ function connectBtnClick() {
     setAppStatus("connecting");
     console.log("Connecting...");
 
+    liveVideoOutputManager.initMediaSource();
     geminiLiveApi.responseModalities = [getSelectedResponseModality()];
     if (getSystemInstructions() !== "") {
         geminiLiveApi.systemInstructions = getSystemInstructions();
@@ -150,6 +153,10 @@ function connectBtnClick() {
     geminiLiveApi.setResumption(
         enableResumption.checked,
         resumptionHandle.value
+    );
+    geminiLiveApi.setBitrates(
+        audioBitrateInput.value,
+        videoBitrateInput.value
     );
     geminiLiveApi.setVoice(voiceName.value, voiceLocale.value);
     geminiLiveApi.setVad(
@@ -198,6 +205,8 @@ geminiLiveApi.onReceiveResponse = (messageResponse) => {
         newModelMessage(messageResponse.data);
     } else if (messageResponse.type === "RESUMPTION") {
         console.log("Resumption handle received: ", messageResponse.data);
+        enableResumption.checked = true;
+        resumptionHandle.value = messageResponse.data;
         newModelMessage("New Resumption Handle ID: " + messageResponse.data);
     } else if (messageResponse.type === "INPUT_TRANSCRIPTION") {
         console.log("Input transcription received: ", messageResponse.data);
@@ -393,6 +402,7 @@ function disconnectBtnClick() {
     audioFileInput.value = ""; // Reset file input
     fileNameDisplay.textContent = "";
     fcFileNameDisplay.textContent = "";
+    liveVideoOutputManager.resetPlayer();
     setAppStatus("disconnected");
 }
 
