@@ -443,6 +443,15 @@
             class="icon-text">connected</span></div>
         <div id="speaking" class="state" hidden><span class="material-symbols-outlined">graphic_eq</span><span
             class="icon-text">model speaking</span></div>
+        <div class="metrics-container">
+          <div class="metrics-icon" id="metrics-icon">📊</div>
+          <div class="metrics-panel" id="metrics-panel">
+            <h3>WebSocket Metrics</h3>
+            <p>Download: <span id="download-speed">0.00</span> KB/s</p>
+            <p>Upload: <span id="upload-speed">0.00</span> KB/s</p>
+            <p>Recommended Video Bitrate: <span id="recommended-video-bitrate"></span> bps</p>
+          </div>
+        </div>
       </div>
 
       <div id="video-preview-container" class="avatar-mode">
@@ -458,7 +467,7 @@
       </div>
 
       <div class="media-controls" style="margin-top: 16px;">
-        <md-outlined-select id="cameraSource" label="Camera" onchange="newCameraSelected()"></md-outlined-select>
+      <md-outlined-select id="cameraSource" label="Camera" onchange="newCameraSelected()"></md-outlined-select>
         <md-outlined-select id="audioSource" label="Microphone" onchange="newMicSelected()"></md-outlined-select>
         <span id="micBtn" hidden><md-filled-icon-button
             onclick="micBtnClick()"><md-icon>mic</md-icon></md-filled-icon-button></span>

@@ -424,6 +424,32 @@ class LiveVideoOutputManager {
         } else {
             console.error('Unsupported MIME type or codec:', this.codec);
         }
+
+        video.addEventListener('waiting', () => {
+            let downloadSpeed = 0;
+            let uploadSpeed = 0;
+            const uploadSpeedElement = document.getElementById('upload-speed');
+            const downloadSpeedElement = document.getElementById('download-speed');
+            if (uploadSpeedElement) {
+                uploadSpeed = uploadSpeedElement.textContent;
+            }
+            if (downloadSpeedElement) {
+                downloadSpeed = downloadSpeedElement.textContent;
+            }
+
+            const bitrate = downloadSpeed * 1024 * 8 * 0.5;
+            const recommendedBitrateElement = document.getElementById('recommended-video-bitrate');
+            if (recommendedBitrateElement) {
+                recommendedBitrateElement.textContent = bitrate.toFixed(2);
+            }
+        });
+
+        video.addEventListener('playing', () => {
+            const recommendedBitrateElement = document.getElementById('recommended-video-bitrate');
+            if (recommendedBitrateElement) {
+                recommendedBitrateElement.textContent = "0";
+            }
+        });
     }
 
     playVideoChunk(base64Chunk) {

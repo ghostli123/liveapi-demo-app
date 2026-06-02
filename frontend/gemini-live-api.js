@@ -120,6 +120,13 @@ class GeminiLiveAPI {
         this.audioBitrate = 0;
         this.videoBitrate = 0;
 
+        // Real-time bandwidth usage statistics
+        this.intervalMs = 2000; // Update interval in milliseconds (2 seconds)
+        this.bytesIn = 0; // Total bytes received (download)
+        this.bytesOut = 0; // Total bytes sent (upload)
+        this.intervalId = null; // Timer ID for interval updates
+        this.history = []; // Array to store bandwidth history for display
+
         console.log("Created Gemini Live API object: ", this);
     }
 
@@ -307,6 +314,10 @@ class GeminiLiveAPI {
 
     onReceiveMessage(messageEvent) {
         console.log("Message received: ", messageEvent);
+
+        // Calculate received bandwidth usage
+        this.bytesIn += this.calculateByteSize(messageEvent.data);
+
         let messageData;
         if (typeof messageEvent.data === "string") {
             messageData = JSON.parse(messageEvent.data);
@@ -343,6 +354,56 @@ class GeminiLiveAPI {
         };
 
         this.webSocket.onmessage = this.onReceiveMessage.bind(this);
+
+        const originalSend = this.webSocket.send.bind(this.webSocket);
+        this.webSocket.send = (data) => {
+            this.bytesOut += this.calculateByteSize(data);
+            originalSend(data);
+        };
+
+        // Start periodic bandwidth updates
+        this.updateBandwidthUsage();
+    }
+
+    updateBandwidthUsage() {
+        if (this.intervalId) return;
+
+        this.intervalId = setInterval(() => {
+            const timeSec = this.intervalMs / 1000;
+
+            // Convert to Kilobytes per second (KB/s)
+            const uploadSpeed = (this.bytesOut / 1024) / timeSec;
+            const downloadSpeed = (this.bytesIn / 1024) / timeSec;
+
+            const stats = {
+                uploadKbps: uploadSpeed,
+                downloadKbps: downloadSpeed,
+                totalKbps: uploadSpeed + downloadSpeed
+            };
+
+            this.history.push(stats);
+            if (this.history.length > 60) this.history.shift(); // Keep last minute of history
+
+            const uploadSpeedElement = document.getElementById('upload-speed');
+            const downloadSpeedElement = document.getElementById('download-speed');
+            if (uploadSpeedElement) {
+                uploadSpeedElement.textContent = uploadSpeed.toFixed(2);
+            }
+            if (downloadSpeedElement) {
+                downloadSpeedElement.textContent = downloadSpeed.toFixed(2);
+            }
+
+            // Reset counters for the next interval
+            this.bytesIn = 0;
+            this.bytesOut = 0;
+        }, this.intervalMs);
+    }
+
+    stopUpdateBandwidthUsage() {
+        if (this.intervalId) {
+            clearInterval(this.intervalId);
+            this.intervalId = null;
+        }
     }
 
     sendInitialSetupMessages() {
@@ -544,6 +605,17 @@ class GeminiLiveAPI {
             this.onErrorMessage(`Error sending POST request: ${error.message}`);
             throw error; // Re-throw the error to reject the promise
         }
+    }
+
+    calculateByteSize(data) {
+        if (typeof data === 'string') {
+            return new Blob([data]).size; // Text payload size in bytes
+        } else if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+            return data.byteLength; // Binary payload size in bytes
+        } else if (data instanceof Blob) {
+            return data.size; // Blob payload size in bytes
+        }
+        return 0;
     }
 }
 
