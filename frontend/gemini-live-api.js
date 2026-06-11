@@ -1,124 +1,224 @@
+/**
+ * Represents a parsed response message from the Gemini Live API WebSocket connection.
+ */
 class GeminiLiveResponseMessage {
+    /**
+     * @param {Object} data - Raw JSON message received from the WebSocket.
+     */
     constructor(data) {
         this.data = "";
         this.type = "";
+        this.mimeType = undefined;
 
         const serverContent = data?.serverContent || data?.server_content;
         this.endOfTurn = serverContent?.turnComplete || serverContent?.turn_complete;
         this.interrupt = serverContent?.interrupted;
 
-        const modelTurn = serverContent?.modelTurn || serverContent?.model_turn;
-        const parts = modelTurn?.parts;
-        const tool_calls = data?.toolCall?.functionCalls || data?.tool_call?.function_calls;
+        this._parseMessage(data, serverContent);
+    }
 
+    /**
+     * Internal method to parse and resolve the message type and data.
+     * @param {Object} data - Raw WebSocket message data.
+     * @param {Object} serverContent - Extracted server content object.
+     */
+    _parseMessage(data, serverContent) {
+        if (this._parseSetupComplete(data)) return;
+        if (this._parseFunctionCall(data)) return;
+        if (this._parseVadSignal(data)) return;
+        if (this._parseModelTurn(serverContent)) return;
+        if (this._parseResumption(data)) return;
+        if (this._parseInputTranscription(serverContent)) return;
+        if (this._parseOutputTranscription(serverContent)) return;
+        if (this._parseTurnEvents()) return;
+    }
+
+    _parseSetupComplete(data) {
         if (data?.setupComplete || data?.setup_complete) {
             this.type = "SETUP COMPLETE";
-        } else if (tool_calls) {
-            this.data = tool_calls;
+            return true;
+        }
+        return false;
+    }
+
+    _parseFunctionCall(data) {
+        const toolCalls = data?.toolCall?.functionCalls || data?.tool_call?.function_calls;
+        if (toolCalls) {
+            this.data = toolCalls;
             this.type = "FUNCTION_CALL";
-        } else if (data?.voiceActivityDetectionSignal || data?.voice_activity_detection_signal) {
+            return true;
+        }
+        return false;
+    }
+
+    _parseVadSignal(data) {
+        if (data?.voiceActivityDetectionSignal || data?.voice_activity_detection_signal) {
             this.type = "VAD_SIGNAL";
-        } else if (parts?.length && parts[0].text) {
-            this.data = parts[0].text;
+            return true;
+        }
+        return false;
+    }
+
+    _parseModelTurn(serverContent) {
+        const modelTurn = serverContent?.modelTurn || serverContent?.model_turn;
+        const parts = modelTurn?.parts;
+        if (!parts?.length) return false;
+
+        const firstPart = parts[0];
+        if (firstPart.text) {
+            this.data = firstPart.text;
             this.type = "TEXT";
-        } else if (parts?.length && (parts[0].inlineData || parts[0].inline_data || parts[0].video)) {
-            const inlineData = parts[0].inlineData || parts[0].inline_data || parts[0].video;
+            return true;
+        }
+
+        const inlineData = firstPart.inlineData || firstPart.inline_data || firstPart.video;
+        if (inlineData) {
             this.data = inlineData.data;
             const mimeType = inlineData.mimeType || inlineData.mime_type;
-            if (
-                mimeType &&
-                (mimeType.startsWith("video/") || mimeType.startsWith("image/"))
-            ) {
+            if (mimeType && (mimeType.startsWith("video/") || mimeType.startsWith("image/"))) {
                 this.type = "VIDEO";
                 this.mimeType = mimeType;
             } else {
                 this.type = "AUDIO";
+                if (mimeType) {
+                    this.mimeType = mimeType;
+                }
             }
-        } else if (data?.sessionResumptionUpdate || data?.session_resumption_update) {
+            return true;
+        }
+
+        return false;
+    }
+
+    _parseResumption(data) {
+        const resumption = data?.sessionResumptionUpdate || data?.session_resumption_update;
+        if (resumption) {
             this.type = "RESUMPTION";
-            const sessionResumptionUpdate = data?.sessionResumptionUpdate || data?.session_resumption_update;
-            this.data = sessionResumptionUpdate?.newHandle || sessionResumptionUpdate?.new_handle;
-        } else if (serverContent?.inputTranscription || serverContent?.input_transcription) {
+            this.data = resumption.newHandle || resumption.new_handle;
+            return true;
+        }
+        return false;
+    }
+
+    _parseInputTranscription(serverContent) {
+        const transcription = serverContent?.inputTranscription || serverContent?.input_transcription;
+        if (transcription) {
             this.type = "INPUT_TRANSCRIPTION";
-            const inputTranscription = serverContent?.inputTranscription || serverContent?.input_transcription;
-            if (inputTranscription?.text) {
-                this.data = inputTranscription?.text;
-            } else if (inputTranscription?.finished) {
-                this.data = inputTranscription?.finished;
+            if (transcription.text) {
+                this.data = transcription.text;
+            } else if (transcription.finished) {
+                this.data = transcription.finished;
             }
-        } else if (serverContent?.outputTranscription || serverContent?.output_transcription) {
+            return true;
+        }
+        return false;
+    }
+
+    _parseOutputTranscription(serverContent) {
+        const transcription = serverContent?.outputTranscription || serverContent?.output_transcription;
+        if (transcription) {
             this.type = "OUTPUT_TRANSCRIPTION";
-            const outputTranscription = serverContent?.outputTranscription || serverContent?.output_transcription;
-            if (outputTranscription?.text) {
-                this.data = outputTranscription?.text;
-            } else if (outputTranscription?.finished) {
-                this.data = "Finished: " + outputTranscription?.finished;
+            if (transcription.text) {
+                this.data = transcription.text;
+            } else if (transcription.finished) {
+                this.data = "Finished: " + transcription.finished;
             }
-        } else if (this.endOfTurn) {
+            return true;
+        }
+        return false;
+    }
+
+    _parseTurnEvents() {
+        if (this.endOfTurn) {
             this.data = "END OF TURN";
             this.type = "END_OF_TURN";
-        } else if (this.interrupt) {
+            return true;
+        }
+        if (this.interrupt) {
             this.data = "INTERRUPT";
             this.type = "INTERRUPT";
+            return true;
         }
+        return false;
     }
 }
+
 const DUMMY_AVATAR_16_9 =
     "iVBORw0KGgoAAAANSUhEUgAAABAAAAAJCAIAAABnTYUvAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAAMSURBVBhXYwQDAAACAAHnSm8jAAAAAElFTkSuQmCC";
 
+/**
+ * Main Client API class for interacting with Gemini Live Realtime connections.
+ * Manages WebSocket connections, HTTP backend control requests, tool declarations,
+ * and real-time bandwidth statistics.
+ */
 class GeminiLiveAPI {
+    /**
+     * @param {string} proxyUrl - WebSocket Proxy service URL.
+     * @param {string} controlUrl - Backend control service HTTP URL (for session initialization).
+     * @param {string} frUrl - Function registry / declaration HTTP URL.
+     */
     constructor(proxyUrl, controlUrl, frUrl) {
+        // Services and Endpoints
         this.proxyUrl = proxyUrl;
         this.controlUrl = controlUrl;
         this.frUrl = frUrl;
+        this.endPoint = null;
+        this.environment = "prod";
 
+        // Session and Context State
         this.sessionId = crypto.randomUUID();
         this.projectId = null;
         this.model = null;
+        this.location = null;
 
-        this.environment = "prod";
-
+        // Features & Configuration
         this.responseModalities = ["VIDEO"];
         this.systemInstructions = "";
-
-        this.endPoint = null;
-
-        this.onReceiveResponse = (message) => {
-            console.log("Default message received callback", message);
-        };
-
-        this.onConnectionStarted = () => {
-            console.log("Default onConnectionStarted");
-        };
-
-        this.onErrorMessage = (message) => {
-            alert(message);
-        };
-
-        this.websocket = null;
-        this.location = null;
         this.avatarMode = false;
-
         this.enableInputTranscript = false;
         this.enableOutputTranscript = false;
+        this.enableSessionResumption = false;
+        this.resumptionHandle = "";
+        this.enableProactiveVideo = false;
+
+        // Voice and Audio/Video Settings
         this.voiceName = "";
         this.voiceLocale = "";
-        this.enableSessionResumption = false;
         this.customVoiceSample = "";
-        this.resumptionHandle = "";
+        this.audioBitrate = 0;
+        this.videoBitrate = 0;
+
+        // VAD (Voice Activity Detection) Settings
         this.disableDetection = false;
         this.disableInterruption = false;
         this.startSensitivity = "";
         this.endSensitivity = "";
-        this.enableProactiveVideo = false;
+
+        // S2ST (Speech to Speech Translation) Settings
         this.enableS2ST = false;
         this.s2stTargetLanguage = "";
+
+        // Function Calling / Tools Settings
         this.functionCallDefinition = null;
         this.toolBehavior = "BLOCKING";
+
+        // Avatar Customization Settings
         this.customizedAvatarData = "";
         this.customizedAvatarMimeType = "image/png";
-        this.audioBitrate = 0;
-        this.videoBitrate = 0;
+
+        // Callbacks (Publicly overridable)
+        this.onReceiveResponse = (message) => {
+            console.log("Default message received callback", message);
+        };
+        this.onConnectionStarted = () => {
+            console.log("Default onConnectionStarted");
+        };
+        this.onErrorMessage = (message) => {
+            alert(message);
+        };
+
+        // Internal State
+        this.webSocket = null;
 
         // Real-time bandwidth usage statistics
         this.intervalMs = 2000; // Update interval in milliseconds (2 seconds)
@@ -130,6 +230,11 @@ class GeminiLiveAPI {
         console.log("Created Gemini Live API object: ", this);
     }
 
+    /**
+     * Loads a custom avatar image and extracts its base64 data.
+     * @param {string} [url] - URL to fetch avatar image from.
+     * @returns {Promise<void>}
+     */
     async loadCustomAvatar(url = "/frontend/assets/avatar_image.png?v=" + Date.now()) {
         try {
             console.log("Loading custom avatar from:", url);
@@ -143,7 +248,6 @@ class GeminiLiveAPI {
             return new Promise((resolve, reject) => {
                 const reader = new FileReader();
                 reader.onloadend = () => {
-                    // Extract base64 data from DataURL
                     const base64data = reader.result.split(",")[1];
                     this.customizedAvatarData = base64data;
                     console.log("Custom avatar image loaded successfully.");
@@ -159,177 +263,272 @@ class GeminiLiveAPI {
         }
     }
 
+    /**
+     * Sets the location/region and updates the corresponding API host endpoint.
+     * @param {string} location - Google Cloud location (e.g., 'us-central1').
+     */
     setLocation(location) {
         this.location = location;
         this.setApiHost(this.environment);
     }
+
+    /**
+     * Sets the target Google Cloud Project ID.
+     * @param {string} projectId - Google Cloud Project ID.
+     */
     setProjectId(projectId) {
         this.projectId = projectId;
     }
+
+    /**
+     * Sets the Gemini Live model name.
+     * @param {string} model - Gemini Live model ID.
+     */
     setModel(model) {
         this.model = model;
     }
 
+    /**
+     * Configures the API hostname based on the execution environment.
+     * @param {string} environment - Target environment ('prod', 'staging', 'autopush').
+     */
     setApiHost(environment) {
         this.environment = environment;
-        if (this.environment === "autopush") {
-            this.endPoint = `autopush-aiplatform.sandbox.googleapis.com`;
-        } else if (this.environment === "staging") {
-            this.endPoint = `staging-aiplatform.sandbox.googleapis.com`;
-        } else if (this.environment === "prod") {
-            this.endPoint = `aiplatform.googleapis.com`;
-        } else {
-            console.error(
-                `Unknown environment: ${this.environment}. Using production API host.`
-            );
-            this.endPoint = `aiplatform.googleapis.com`; // Default to production
+        switch (this.environment) {
+            case "autopush":
+                this.endPoint = "autopush-aiplatform.sandbox.googleapis.com";
+                break;
+            case "staging":
+                this.endPoint = "staging-aiplatform.sandbox.googleapis.com";
+                break;
+            case "prod":
+            default:
+                if (this.environment !== "prod") {
+                    console.error(
+                        `Unknown environment: ${this.environment}. Using production API host.`
+                    );
+                }
+                this.endPoint = "aiplatform.googleapis.com";
+                break;
         }
     }
 
+    /**
+     * Enables or disables live transcription of user input and model output.
+     * @param {boolean} input - Whether to enable input transcripts.
+     * @param {boolean} output - Whether to enable output transcripts.
+     */
     setTranscript(input, output) {
         console.log("input transcript: ", input, "output transcript: ", output);
         this.enableInputTranscript = input;
         this.enableOutputTranscript = output;
     }
 
+    /**
+     * Sets the preferred TTS voice name and locale.
+     * @param {string} name - TTS voice name (e.g., 'Aoede').
+     * @param {string} locale - Voice language/locale code (e.g., 'en-US').
+     */
     setVoice(name, locale) {
         this.voiceName = name;
         this.voiceLocale = locale;
     }
 
+    /**
+     * Sets the function call / tool definition schema for the session.
+     * @param {Object} fcDefinition - Function calling definitions.
+     */
     setFunctionCall(fcDefinition) {
         this.functionCallDefinition = fcDefinition;
     }
 
+    /**
+     * Sets a custom voice sample audio payload for replicated voice synthesis.
+     * @param {string} base64Wav - Base64 encoded WAV audio sample.
+     */
     setCustomVoice(base64Wav) {
         this.customVoiceSample = base64Wav;
     }
 
+    /**
+     * Configures session resumption parameters.
+     * @param {boolean} enable - Whether session resumption is enabled.
+     * @param {string} handle - Resumption handle string from a prior session.
+     */
     setResumption(enable, handle) {
         this.enableSessionResumption = enable;
         this.resumptionHandle = handle;
     }
 
+    /**
+     * Configures audio and video bitrates for the connection.
+     * @param {number} audioBitrate - Audio bitrate in bits per second.
+     * @param {number} videoBitrate - Video bitrate in bits per second.
+     */
     setBitrates(audioBitrate, videoBitrate) {
         this.audioBitrate = audioBitrate;
         this.videoBitrate = videoBitrate;
     }
 
+    /**
+     * Sets Voice Activity Detection (VAD) configuration options.
+     * @param {boolean} disableInterruption - Whether to disable interruption handling.
+     * @param {boolean} disableDetection - Whether to completely disable VAD.
+     * @param {string} startSen - Speech start sensitivity ('low', 'high', or empty).
+     * @param {string} endSen - Speech end sensitivity ('low', 'high', or empty).
+     */
     setVad(disableInterruption, disableDetection, startSen, endSen) {
-        this.disableDetection = disableDetection;
         this.disableInterruption = disableInterruption;
+        this.disableDetection = disableDetection;
         this.startSensitivity = startSen;
         this.endSensitivity = endSen;
     }
 
+    /**
+     * Enables or disables proactive video generation.
+     * @param {boolean} enable - Whether to enable proactive video.
+     */
     setProactiveVideo(enable) {
         this.enableProactiveVideo = enable;
     }
 
+    /**
+     * Configures Speech-to-Speech Translation (S2ST).
+     * @param {boolean} enable - Whether S2ST is enabled.
+     * @param {string} language - Target translation language code.
+     */
     setS2ST(enable, language) {
         console.log(`Setting S2ST to: ${enable}, Target Language: ${language}`);
         this.enableS2ST = enable;
         this.s2stTargetLanguage = language;
     }
 
+    /**
+     * Sets customized avatar image and MIME type.
+     * @param {string} imageData - Base64 encoded image data.
+     * @param {string} [mimeType="image/png"] - Image MIME type.
+     */
     setCustomizedAvatar(imageData, mimeType = "image/png") {
         this.customizedAvatarData = imageData;
         this.customizedAvatarMimeType = mimeType;
     }
 
-    connect() {
-        console.log("connect(): Loading custom avatar and triggering initBackendService...");
-        this.loadCustomAvatar()
-            .then(() => {
-                console.log("connect(): Avatar loaded. Triggering initBackendService...");
-                return this.initBackendService();
-            })
-            .then(() => {
-                console.log(
-                    "connect(): initBackendService successful. Triggering setupFuncDeclarationToService..."
-                );
-                return this.setupFuncDeclarationToService();
-            })
-            .then(() => {
-                console.log(
-                    "connect(): setupFuncDeclarationToService successful. Triggering setupWebSocketToService."
-                );
-                this.setupWebSocketToService();
-            })
-            .catch((error) =>
-                console.error("connect(): Promise chain failed.", error)
-            );
+    /**
+     * Initiates the overall connection process: loads custom avatar,
+     * initializes backend service, posts tool declarations, and establishes WebSocket.
+     */
+    async connect() {
+        try {
+            console.log("connect(): Loading custom avatar...");
+            await this.loadCustomAvatar();
+
+            console.log("connect(): Avatar loaded. Initializing backend service...");
+            await this.initBackendService();
+
+            console.log("connect(): initBackendService successful. Setting up function declarations...");
+            await this.setupFuncDeclarationToService();
+
+            console.log("connect(): Function declarations set up. Starting WebSocket connection...");
+            this.setupWebSocketToService();
+        } catch (error) {
+            console.error("connect(): Connection sequence failed.", error);
+        }
     }
 
-    initBackendService() {
+    /**
+     * Initializes backend control session to retrieve Project ID or other session metadata.
+     * @returns {Promise<void>}
+     */
+    async initBackendService() {
         const postRequestBody = {
             command: "connect",
             session_id: this.sessionId,
             endpoint: this.endPoint,
             location: this.location,
         };
-        return this.sendPostRequest(this.controlUrl, postRequestBody)
-            .then((response) => {
-                if (response) {
-                    if (response.project_id) {
-                        this.setProjectId(response.project_id);
-                    }
-                }
-            })
-            .catch((error) => {
-                console.error("Error in initBackendService:", error);
-                this.onErrorMessage("Error initializing backend service.");
-                throw error; // Re-throw the error to stop the promise chain
-            });
-    }
-
-    setupFuncDeclarationToService() {
-        if (this.functionCallDefinition) {
-            const funcDeclarationMessage = {
-                objective: "fc_definition",
-                session_id: this.sessionId,
-                functionDefinition: this.functionCallDefinition,
-            };
-            return this.sendPostRequest(
-                this.frUrl,
-                funcDeclarationMessage
-            ).catch((error) => {
-                console.error("Error in setupFuncDeclarationToService:", error);
-                this.onErrorMessage("Error setting up function declaration.");
-                // Re-throw the error to stop the promise chain
-                throw error;
-            });
+        try {
+            const response = await this.sendPostRequest(this.controlUrl, postRequestBody);
+            if (response?.project_id) {
+                this.setProjectId(response.project_id);
+            }
+        } catch (error) {
+            console.error("Error in initBackendService:", error);
+            this.onErrorMessage("Error initializing backend service.");
+            throw error;
         }
-        // If there's no function definition, return a resolved promise so .then() can still be used.
-        return Promise.resolve();
     }
 
+    /**
+     * Posts tool / function declarations to the function registry service.
+     * @returns {Promise<void>}
+     */
+    async setupFuncDeclarationToService() {
+        if (!this.functionCallDefinition) {
+            return;
+        }
+        const funcDeclarationMessage = {
+            objective: "fc_definition",
+            session_id: this.sessionId,
+            functionDefinition: this.functionCallDefinition,
+        };
+        try {
+            await this.sendPostRequest(this.frUrl, funcDeclarationMessage);
+        } catch (error) {
+            console.error("Error in setupFuncDeclarationToService:", error);
+            this.onErrorMessage("Error setting up function declaration.");
+            throw error;
+        }
+    }
+
+    /**
+     * Closes the active WebSocket connection and stops bandwidth tracking.
+     */
     disconnect() {
-        this.webSocket.close();
+        if (this.webSocket) {
+            this.webSocket.close();
+        }
+        this.stopUpdateBandwidthUsage();
     }
 
+    /**
+     * Sends a structured JSON message over the WebSocket connection.
+     * @param {Object} message - Message object to serialize and send.
+     */
     sendMessage(message) {
-        this.webSocket.send(JSON.stringify(message));
+        if (this.webSocket && this.webSocket.readyState === WebSocket.OPEN) {
+            this.webSocket.send(JSON.stringify(message));
+        } else {
+            console.warn("sendMessage(): WebSocket is not open. Cannot send message:", message);
+        }
     }
 
+    /**
+     * Handler for incoming WebSocket message events.
+     * @param {MessageEvent} messageEvent - The WebSocket message event.
+     */
     onReceiveMessage(messageEvent) {
         console.log("Message received: ", messageEvent);
 
-        // Calculate received bandwidth usage
         this.bytesIn += this.calculateByteSize(messageEvent.data);
 
-        let messageData;
-        if (typeof messageEvent.data === "string") {
-            messageData = JSON.parse(messageEvent.data);
-        } else {
+        if (typeof messageEvent.data !== "string") {
             console.warn("Received binary message, ignoring: ", messageEvent.data);
             return;
         }
-        const message = new GeminiLiveResponseMessage(messageData);
-        console.log("onReceiveMessageCallBack this ", this);
-        this.onReceiveResponse(message);
+
+        try {
+            const messageData = JSON.parse(messageEvent.data);
+            const message = new GeminiLiveResponseMessage(messageData);
+            console.log("onReceiveMessageCallBack this ", this);
+            this.onReceiveResponse(message);
+        } catch (error) {
+            console.error("Failed to parse incoming WebSocket message as JSON:", error);
+        }
     }
 
+    /**
+     * Establishes the WebSocket connection to the proxy service and binds event handlers.
+     */
     setupWebSocketToService() {
         console.log("connecting: ", this.proxyUrl);
 
@@ -355,6 +554,7 @@ class GeminiLiveAPI {
 
         this.webSocket.onmessage = this.onReceiveMessage.bind(this);
 
+        // Override send to track outbound bandwidth
         const originalSend = this.webSocket.send.bind(this.webSocket);
         this.webSocket.send = (data) => {
             this.bytesOut += this.calculateByteSize(data);
@@ -365,6 +565,9 @@ class GeminiLiveAPI {
         this.updateBandwidthUsage();
     }
 
+    /**
+     * Starts periodic calculation and DOM reporting of upload/download bandwidth usage.
+     */
     updateBandwidthUsage() {
         if (this.intervalId) return;
 
@@ -378,14 +581,15 @@ class GeminiLiveAPI {
             const stats = {
                 uploadKbps: uploadSpeed,
                 downloadKbps: downloadSpeed,
-                totalKbps: uploadSpeed + downloadSpeed
+                totalKbps: uploadSpeed + downloadSpeed,
             };
 
             this.history.push(stats);
             if (this.history.length > 60) this.history.shift(); // Keep last minute of history
 
-            const uploadSpeedElement = document.getElementById('upload-speed');
-            const downloadSpeedElement = document.getElementById('download-speed');
+            const uploadSpeedElement = document.getElementById("upload-speed");
+            const downloadSpeedElement = document.getElementById("download-speed");
+
             if (uploadSpeedElement) {
                 uploadSpeedElement.textContent = uploadSpeed.toFixed(2);
             }
@@ -399,6 +603,9 @@ class GeminiLiveAPI {
         }, this.intervalMs);
     }
 
+    /**
+     * Stops the periodic bandwidth reporting interval.
+     */
     stopUpdateBandwidthUsage() {
         if (this.intervalId) {
             clearInterval(this.intervalId);
@@ -406,120 +613,193 @@ class GeminiLiveAPI {
         }
     }
 
+    /**
+     * Constructs and sends the initial WebSocket session setup message.
+     */
     sendInitialSetupMessages() {
         console.log("start setting up");
         console.log("Setting up voice sample:" + this.customVoiceSample);
 
         const modelUri = `projects/${this.projectId}/locations/${this.location}/publishers/google/models/${this.model}`;
+
         const sessionSetupMessage = {
             setup: {
                 model: modelUri,
-                generation_config: {
-                    response_modalities: this.responseModalities,
-                    speech_config: {
-                        voice_config: this.customVoiceSample
-                            ? {
-                                replicated_voice_config: {
-                                    voice_sample_audio:
-                                          this.customVoiceSample,
-                                    mime_type: "audio/pcm;rate=24000",
-                                  },
-                              }
-                            : {
-                                prebuilt_voice_config: {
-                                    voice_name: this.voiceName,
-                                  },
-                              },
-                        language_code: this.voiceLocale,
-                    },
-                },
-                // avatar_config: {
-                //     customized_avatar: {
-                //         image_mime_type: this.customizedAvatarMimeType,
-                //         image_data: this.customizedAvatarData,
-                //     },
-                // },
-                avatar_config: {
-                    avatar_name: "Piper",
-                }
+                generation_config: this._buildGenerationConfig(),
+                avatar_config: this._buildAvatarConfig(),
             },
         };
 
-        if (this.functionCallDefinition) {
-            sessionSetupMessage.setup.tools = [
-                { 
-                    function_declarations: this.functionCallDefinition,
-                    behavior: this.toolBehavior
-                },
-            ];
+        const toolsConfig = this._buildToolsConfig();
+        if (toolsConfig) {
+            sessionSetupMessage.setup.tools = toolsConfig;
         }
 
-        console.log(sessionSetupMessage);
-
-        if (this.systemInstructions && this.systemInstructions.trim()) {
-            sessionSetupMessage.setup.system_instruction = {
-                parts: [{ text: this.systemInstructions }],
-            };
+        const sysInstruction = this._buildSystemInstructionConfig();
+        if (sysInstruction) {
+            sessionSetupMessage.setup.system_instruction = sysInstruction;
         }
 
-        if (this.enableSessionResumption) {
-            sessionSetupMessage.setup.session_resumption = {
-                handle: this.resumptionHandle,
-            };
+        const sessionResumption = this._buildSessionResumptionConfig();
+        if (sessionResumption) {
+            sessionSetupMessage.setup.session_resumption = sessionResumption;
         }
 
-        if (this.disableDetection || this.disableInterruption || this.startSensitivity !== "" || this.endSensitivity !== "") {
-            sessionSetupMessage.setup.realtime_input_config = {
-                automatic_activity_detection: {}
-            };
-            if (this.disableDetection) {
-                sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.disabled = true;
-            }
-            if (this.disableInterruption) {
-                sessionSetupMessage.setup.realtime_input_config.activity_handling = 2;
-            }
+        const realtimeInputConfig = this._buildRealtimeInputConfig();
+        if (realtimeInputConfig) {
+            sessionSetupMessage.setup.realtime_input_config = realtimeInputConfig;
         }
 
-        if (this.startSensitivity === "") {
-            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.start_of_speech_sensitivity = "START_SENSITIVITY_UNSPECIFIED";
-        } else if (this.startSensitivity === "low") {
-            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.start_of_speech_sensitivity = "START_SENSITIVITY_LOW";
-        } else if (this.startSensitivity === "high") {
-            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.start_of_speech_sensitivity = "START_SENSITIVITY_HIGH";
-        }
-
-        if (this.endSensitivity === "") {
-            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.end_of_speech_sensitivity = "END_SENSITIVITY_UNSPECIFIED";
-        } else if (this.endSensitivity === "low") {
-            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.end_of_speech_sensitivity = "END_SENSITIVITY_LOW";
-        } else if (this.endSensitivity === "high") {
-            sessionSetupMessage.setup.realtime_input_config.automatic_activity_detection.end_of_speech_sensitivity = "START_SENSITIVITY_HIGH";
-        }
-
-        if (this.enableProactiveVideo) {
-            sessionSetupMessage.setup.proactivity = {
-                proactive_video: true,
-            };
+        const proactivityConfig = this._buildProactivityConfig();
+        if (proactivityConfig) {
+            sessionSetupMessage.setup.proactivity = proactivityConfig;
         }
 
         if (this.enableS2ST) {
             sessionSetupMessage.setup.enable_speech_to_speech_translation = true;
-            sessionSetupMessage.setup.generation_config.speech_config.language_code =
-                this.s2stTargetLanguage;
         }
 
-        if (this.audioBitrate > 0) {
-            sessionSetupMessage.setup.avatar_config.audio_bitrate_bps = this.audioBitrate;
-        }
-
-        if (this.videoBitrate > 0) {
-            sessionSetupMessage.setup.avatar_config.video_bitrate_bps = this.videoBitrate;
-        }
-
-        console.log("setup message: " + sessionSetupMessage);
+        console.log("setup message: ", JSON.stringify(sessionSetupMessage));
         this.sendMessage(sessionSetupMessage);
     }
 
+    _buildGenerationConfig() {
+        const voiceConfig = this.customVoiceSample
+            ? {
+                replicated_voice_config: {
+                    voice_sample_audio: this.customVoiceSample,
+                    mime_type: "audio/pcm;rate=24000",
+                },
+            }
+            : {
+                prebuilt_voice_config: {
+                    voice_name: this.voiceName,
+                },
+            };
+
+        const languageCode = this.enableS2ST
+            ? this.s2stTargetLanguage
+            : this.voiceLocale;
+
+        return {
+            response_modalities: this.responseModalities,
+            speech_config: {
+                voice_config: voiceConfig,
+                language_code: languageCode,
+            },
+        };
+    }
+
+    _buildAvatarConfig() {
+        const config = {
+            avatar_name: "Piper",
+        };
+    // Customized avatar config option (currently commented out in original specs):
+    // if (this.customizedAvatarData) {
+    //     config.customized_avatar = {
+    //         image_mime_type: this.customizedAvatarMimeType,
+    //         image_data: this.customizedAvatarData,
+        //     };
+        // }
+        if (this.audioBitrate > 0) {
+            config.audio_bitrate_bps = this.audioBitrate;
+        }
+        if (this.videoBitrate > 0) {
+            config.video_bitrate_bps = this.videoBitrate;
+        }
+        return config;
+    }
+
+    _buildToolsConfig() {
+        if (!this.functionCallDefinition) {
+            return null;
+        }
+        return [
+            {
+                function_declarations: this.functionCallDefinition,
+                behavior: this.toolBehavior,
+            },
+        ];
+    }
+
+    _buildSystemInstructionConfig() {
+        if (!this.systemInstructions || !this.systemInstructions.trim()) {
+            return null;
+        }
+        return {
+            parts: [{ text: this.systemInstructions }],
+        };
+    }
+
+    _buildSessionResumptionConfig() {
+        if (!this.enableSessionResumption) {
+            return null;
+        }
+        return {
+            handle: this.resumptionHandle,
+        };
+    }
+
+    _buildRealtimeInputConfig() {
+        const hasDetectionConfig =
+            this.disableDetection ||
+            this.startSensitivity !== "" ||
+            this.endSensitivity !== "";
+
+        const hasInterruptionConfig = this.disableInterruption;
+
+        if (!hasDetectionConfig && !hasInterruptionConfig) {
+            return null;
+        }
+
+        const getStartSensitivity = (sens) => {
+            switch (sens?.toLowerCase()) {
+                case "low": return "START_SENSITIVITY_LOW";
+                case "high": return "START_SENSITIVITY_HIGH";
+                default: return "START_SENSITIVITY_UNSPECIFIED";
+            }
+        };
+
+        const getEndSensitivity = (sens) => {
+            switch (sens?.toLowerCase()) {
+                case "low": return "END_SENSITIVITY_LOW";
+                case "high": return "END_SENSITIVITY_HIGH";
+                default: return "END_SENSITIVITY_UNSPECIFIED";
+            }
+        };
+
+        const config = {};
+
+        if (hasDetectionConfig) {
+            config.automatic_activity_detection = {
+                start_of_speech_sensitivity: getStartSensitivity(this.startSensitivity),
+                end_of_speech_sensitivity: getEndSensitivity(this.endSensitivity),
+            };
+            if (this.disableDetection) {
+                config.automatic_activity_detection.disabled = true;
+            }
+        }
+
+        if (hasInterruptionConfig) {
+            config.activity_handling = 2;
+        }
+
+        return config;
+    }
+
+    _buildProactivityConfig() {
+        if (!this.enableProactiveVideo) {
+            return null;
+        }
+        return {
+            proactive_video: true,
+        };
+    }
+
+    /**
+     * Sends a text interaction message from the user.
+     * @param {string} text - User message text.
+     */
     sendTextMessage(text) {
         const textMessage = {
             client_content: {
@@ -535,54 +815,55 @@ class GeminiLiveAPI {
         this.sendMessage(textMessage);
     }
 
+    /**
+     * Sends a VAD activity signal (speech start or end).
+     * @param {boolean} start - True for activity start, false for activity end.
+     */
     sendVoiceActivityMessage(start) {
-        if (start) {
-            const startMessage = {
-                realtime_input: {
-                    activity_start: {},
-                },
-            };
-            this.sendMessage(startMessage);
-        } else {
-            const endMessage = {
-                realtime_input: {
-                    activity_end: {},
-                },
-            };
-            this.sendMessage(endMessage);
-        }
+        const activityMessage = {
+            realtime_input: start ? { activity_start: {} } : { activity_end: {} },
+        };
+        this.sendMessage(activityMessage);
     }
 
+    /**
+     * Helper to send real-time input media chunks (audio or images).
+     * @param {string} data - Base64 encoded media payload.
+     * @param {string} mimeType - Media MIME type.
+     * @param {boolean} [isVideo=false] - Whether the input should be formatted as a video frame or media chunk.
+     */
     sendRealtimeInputMessage(data, mimeType, isVideo = false) {
         const message = {
-            realtime_input: {},
+            realtime_input: isVideo
+                ? { video: { mime_type: mimeType, data: data } }
+                : { media_chunks: [{ mime_type: mimeType, data: data }] },
         };
-
-        if (isVideo) {
-            message.realtime_input.video = {
-                mime_type: mimeType,
-                data: data,
-            };
-        } else {
-            message.realtime_input.media_chunks = [
-                {
-                    mime_type: mimeType,
-                    data: data,
-                },
-            ];
-        }
-
         this.sendMessage(message);
     }
 
+    /**
+     * Sends a stream of PCM audio data.
+     * @param {string} base64PCM - Base64 encoded 16kHz PCM audio chunk.
+     */
     sendAudioMessage(base64PCM) {
         this.sendRealtimeInputMessage(base64PCM, "audio/pcm;rate=16000");
     }
 
-    sendImageMessage(base64Image, mime_type = "image/jpeg") {
-        this.sendRealtimeInputMessage(base64Image, mime_type, true);
+    /**
+     * Sends an image frame or picture message.
+     * @param {string} base64Image - Base64 encoded image data.
+     * @param {string} [mimeType="image/jpeg"] - Image MIME type.
+     */
+    sendImageMessage(base64Image, mimeType = "image/jpeg") {
+        this.sendRealtimeInputMessage(base64Image, mimeType, true);
     }
 
+    /**
+     * Executes an HTTP POST request and parses the JSON response.
+     * @param {string} url - Target HTTP URL.
+     * @param {Object} data - JSON payload to post.
+     * @returns {Promise<Object>} Parsed JSON response.
+     */
     async sendPostRequest(url, data) {
         try {
             const response = await fetch(url, {
@@ -597,23 +878,30 @@ class GeminiLiveAPI {
                 throw new Error(`HTTP error! status: ${response.status}`);
             }
 
-            const received_data = await response.json();
-            console.log("Received data:", received_data);
-            return received_data;
+            const receivedData = await response.json();
+            console.log("Received data:", receivedData);
+            return receivedData;
         } catch (error) {
             console.error("Error sending POST request:", error);
             this.onErrorMessage(`Error sending POST request: ${error.message}`);
-            throw error; // Re-throw the error to reject the promise
+            throw error;
         }
     }
 
+    /**
+     * Calculates the approximate byte size of a payload.
+     * @param {string|ArrayBuffer|ArrayBufferView|Blob} data - Payload to measure.
+     * @returns {number} Payload size in bytes.
+     */
     calculateByteSize(data) {
-        if (typeof data === 'string') {
-            return new Blob([data]).size; // Text payload size in bytes
-        } else if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
-            return data.byteLength; // Binary payload size in bytes
-        } else if (data instanceof Blob) {
-            return data.size; // Blob payload size in bytes
+        if (typeof data === "string") {
+            return new Blob([data]).size;
+        }
+        if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+            return data.byteLength;
+        }
+        if (data instanceof Blob) {
+            return data.size;
         }
         return 0;
     }
