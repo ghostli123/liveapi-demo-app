@@ -204,7 +204,7 @@ class LiveVideoManager {
     async updateVideoInterval(interval) {
         this.intervalMs = parseInt(interval, 10);
         this.stopWebcam();
-        this.startWebCam();
+        this.startWebcam();
     }
 
     async startWebcam() {

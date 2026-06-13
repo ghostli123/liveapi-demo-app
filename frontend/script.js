@@ -1,128 +1,239 @@
-window.addEventListener("load", (event) => {
+/**
+ * Global application state and UI coordinator for the Gemini Realtime Demo web application.
+ * Manages WebSocket connections, media devices (camera/mic/screen), Cookie persistence,
+ * tool/function calling declarations, and secure DOM manipulations.
+ */
+
+// --- Application Configuration ---
+const isHttps = window.location.protocol === "https:";
+const wsProtocol = isHttps ? "wss:" : "ws:";
+const host = window.location.host;
+
+const AppConfig = {
+    PROXY_URL: `${wsProtocol}//${host}/ws`,
+    CONTROL_URL: "/api/control",
+    FR_SERVICE_URL: "/api/post_endpoint",
+};
+
+// --- Application State Coordinator ---
+const AppState = {
+    geminiLiveApi: null,
+    liveAudioOutputManager: null,
+    liveVideoOutputManager: null,
+    liveAudioInputManager: null,
+    liveVideoManager: null,
+    liveScreenManager: null,
+    customVoiceBase64: "",
+    functionCallDefinition: null,
+    mediaRecorder: null,
+    audioChunks: [],
+    isRecording: false,
+    recordingStartTime: null,
+};
+
+// --- Secure UI Management ---
+const AppUI = {
+    getElement(id) {
+        return document.getElementById(id);
+    },
+    setHidden(id, hidden) {
+        const el = this.getElement(id);
+        if (el) el.hidden = hidden;
+    },
+    setDisabled(id, disabled) {
+        const el = this.getElement(id);
+        if (el) el.disabled = disabled;
+    },
+    setText(id, text) {
+        const el = this.getElement(id);
+        if (el) el.textContent = text; // Secure against XSS
+    },
+    getValue(id, fallback = "") {
+        const el = this.getElement(id);
+        return el ? el.value : fallback;
+    },
+    getChecked(id, fallback = false) {
+        const el = this.getElement(id);
+        return el ? el.checked : fallback;
+    },
+    showModal(message) {
+        const dialog = this.getElement("dialog");
+        const dialogMessage = this.getElement("dialogMessage");
+        if (dialogMessage) {
+            dialogMessage.textContent = message; // Secure against XSS
+        }
+        if (dialog && typeof dialog.show === "function") {
+            dialog.show();
+        }
+    },
+    setButtonWithIcon(id, iconName, text) {
+        const button = this.getElement(id);
+        if (!button) return;
+        button.replaceChildren(); // Safe DOM construction
+        if (iconName) {
+            const span = document.createElement("span");
+            span.className = "material-icons";
+            span.textContent = iconName;
+            button.appendChild(span);
+        }
+        button.appendChild(document.createTextNode(" " + text));
+    },
+};
+
+// --- Immediate Manager Initialization ---
+function initApplicationManagers() {
+    AppState.geminiLiveApi = new GeminiLiveAPI(
+        AppConfig.PROXY_URL,
+        AppConfig.CONTROL_URL,
+        AppConfig.FR_SERVICE_URL
+    );
+
+    AppState.geminiLiveApi.onErrorMessage = (message) => {
+        AppUI.showModal(message);
+        setAppStatus("disconnected");
+        stopAudioInput();
+
+        AppUI.setHidden("micBtn", true);
+        AppUI.setHidden("micOffBtn", false);
+        const micOffBtn = AppUI.getElement("micOffBtn");
+        if (micOffBtn) {
+            const iconBtn = micOffBtn.querySelector("md-filled-icon-button");
+            if (iconBtn) iconBtn.disabled = true;
+        }
+
+        AppUI.setHidden("cameraBtn", true);
+        AppUI.setHidden("cameraOffBtn", false);
+        const cameraOffBtn = AppUI.getElement("cameraOffBtn");
+        if (cameraOffBtn) {
+            const iconBtn = cameraOffBtn.querySelector("md-filled-icon-button");
+            if (iconBtn) iconBtn.disabled = true;
+        }
+
+        const screenBtn = AppUI.getElement("screenBtn");
+        if (screenBtn) {
+            const iconBtn = screenBtn.querySelector("md-filled-icon-button");
+            if (iconBtn) iconBtn.disabled = true;
+        }
+    };
+
+    AppState.geminiLiveApi.onReceiveResponse = handleReceiveResponse;
+
+    AppState.liveAudioOutputManager = new LiveAudioOutputManager();
+    AppState.liveVideoOutputManager = new LiveVideoOutputManager();
+    AppState.liveAudioInputManager = new LiveAudioInputManager();
+
+    AppState.liveAudioInputManager.onNewAudioRecordingChunk = (audioData) => {
+        AppState.geminiLiveApi.sendAudioMessage(audioData);
+    };
+
+    const videoElement = AppUI.getElement("video");
+    const canvasElement = AppUI.getElement("canvas");
+
+    AppState.liveVideoManager = new LiveVideoManager(videoElement, canvasElement);
+    AppState.liveScreenManager = new LiveScreenManager(videoElement, canvasElement);
+
+    AppState.liveVideoManager.onNewFrame = (b64Image) => {
+        AppState.geminiLiveApi.sendImageMessage(b64Image);
+    };
+
+    AppState.liveScreenManager.onNewFrame = (b64Image) => {
+        AppState.geminiLiveApi.sendImageMessage(b64Image);
+    };
+}
+
+initApplicationManagers();
+
+// --- Cookie Persistence ---
+if (typeof CookieJar !== "undefined") {
+    CookieJar.init("systemInstructions");
+    CookieJar.init("location");
+}
+
+// --- Page Load Event Initialization ---
+window.addEventListener("load", () => {
     console.log("Hello Gemini Realtime Demo!");
 
+    initDOMEventListeners();
     setAvailableCamerasOptions();
     setAvailableMicrophoneOptions();
     toggleAvatarMode();
 });
 
-const isHttps = window.location.protocol === "https:";
-const wsProtocol = isHttps ? "wss:" : "ws:";
-const host = window.location.host;
-
-const PROXY_URL = `${wsProtocol}//${host}/ws`;
-const CONTROL_URL = `/api/control`;
-const FR_SERVICE_URL = `/api/post_endpoint`;
-
-const systemInstructionsInput = document.getElementById("systemInstructions");
-const locationInput = document.getElementById("location");
-
-CookieJar.init("systemInstructions");
-CookieJar.init("location");
-
-const disconnected = document.getElementById("disconnected");
-const connecting = document.getElementById("connecting");
-const connected = document.getElementById("connected");
-const speaking = document.getElementById("speaking");
-
-const micBtn = document.getElementById("micBtn");
-const micOffBtn = document.getElementById("micOffBtn");
-const cameraBtn = document.getElementById("cameraBtn");
-const cameraOffBtn = document.getElementById("cameraOffBtn");
-const screenBtn = document.getElementById("screenBtn");
-
-const cameraSelect = document.getElementById("cameraSource");
-const micSelect = document.getElementById("audioSource");
-
-const envApiHost = document.getElementById("envApiHost");
-const liveApiModel = document.getElementById("liveApiModel");
-const inputTranscript = document.getElementById("inputTranscript");
-const outputTranscript = document.getElementById("outputTranscript");
-const enableResumption = document.getElementById("resumption");
-const resumptionHandle = document.getElementById("handle");
-const voiceName = document.getElementById("voiceName");
-const voiceLocale = document.getElementById("voiceLocale");
-const disableInterruption = document.getElementById("disableInterruption");
-const disableDetection = document.getElementById("disableDetection");
-const startSensitivity = document.getElementById("startSensitivity");
-const endSensitivity = document.getElementById("endSensitivity");
-
-const audioFileInput = document.getElementById("audioFileInput");
-const fileNameDisplay = document.getElementById("fileName");
-
-const fcFileInput = document.getElementById("fcFileInput");
-const fcFileNameDisplay = document.getElementById("fcFileName");
-
-const proactiveVideo = document.getElementById("proactiveVideo");
-const audioInterval = document.getElementById("audioInterval");
-const videoInterval = document.getElementById("videoInterval");
-const audioBitrateInput = document.getElementById("audioBitrate");
-const videoBitrateInput = document.getElementById("videoBitrate");
-const enableS2STInput = document.getElementById("enableS2ST");
-const s2stTargetLanguageInput = document.getElementById("s2stTargetLanguage");
-
-const geminiLiveApi = new GeminiLiveAPI(PROXY_URL, CONTROL_URL, FR_SERVICE_URL);
-
-geminiLiveApi.onErrorMessage = (message) => {
-    showDialogWithMessage(message);
-    setAppStatus("disconnected");
-    stopAudioInput();
-    micBtn.hidden = true;
-    micOffBtn.hidden = false;
-    micOffBtn.querySelector('md-filled-icon-button').disabled = true;
-    cameraBtn.hidden = true;
-    cameraOffBtn.hidden = false;
-    cameraOffBtn.querySelector('md-filled-icon-button').disabled = true;
-    screenBtn.querySelector('md-filled-icon-button').disabled = true;
-};
-
-let customVoiceBase64 = "";
-audioFileInput.addEventListener("change", (event) => {
-    const file = event.target.files[0];
-
-    if (file) {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            console.log(e.target.result);
-            // The result includes the data URL header, so we split it.
-            // e.g., "data:audio/wav;base64,UklGRiYAAABXQVZFZm10IBAAAA..." -> "UklGRiYAAABXQVZFZm10IBAAAA..."
-            customVoiceBase64 = e.target.result.split(",")[1];
-            fileNameDisplay.textContent = `File: ${file.name}`;
-        };
-        reader.readAsDataURL(file);
+// --- DOM Event Listeners Setup ---
+function initDOMEventListeners() {
+    const audioFileInput = AppUI.getElement("audioFileInput");
+    if (audioFileInput) {
+        audioFileInput.addEventListener("change", handleAudioFileInputChange);
     }
-    alert(`New branded voice ${file.name} file has been uploaded`);
-});
 
-functionCallDefinition = null;
-fcFileInput.addEventListener("change", (event) => {
-    const file = event.target.files[0];
+    const fcFileInput = AppUI.getElement("fcFileInput");
+    if (fcFileInput) {
+        fcFileInput.addEventListener("change", handleFcFileInputChange);
+    }
 
-    if (file) {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            try {
-                functionCallDefinition = JSON.parse(e.target.result);
-                console.log(
-                    "Function call definition loaded:",
-                    functionCallDefinition
-                );
-                fcFileNameDisplay.textContent = `File: ${file.name}`;
-            } catch (error) {
-                alert(`Error parsing JSON file: ${error.message}`);
+    const createVoiceBtn = AppUI.getElement("createVoiceBtn");
+    if (createVoiceBtn) {
+        createVoiceBtn.addEventListener("click", openModal);
+    }
+
+    const closeModalBtn = AppUI.getElement("closeModalBtn");
+    if (closeModalBtn) {
+        closeModalBtn.addEventListener("click", closeModal);
+    }
+
+    const brandedVoiceModal = AppUI.getElement("brandedVoiceModal");
+    if (brandedVoiceModal) {
+        window.addEventListener("click", (event) => {
+            if (event.target === brandedVoiceModal) {
+                closeModal();
             }
-        };
-        reader.readAsText(file);
+        });
     }
-    alert(`Function call definition ${file.name} file has been uploaded`);
-});
+
+    const recordButton = AppUI.getElement("recordButton");
+    if (recordButton) {
+        recordButton.addEventListener("click", handleRecordClick);
+    }
+}
+
+// --- Input Handlers ---
+function handleAudioFileInputChange(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        if (typeof e.target.result === "string") {
+            AppState.customVoiceBase64 = e.target.result.split(",")[1] || "";
+            AppUI.setText("fileName", `File: ${file.name}`);
+        }
+    };
+    reader.readAsDataURL(file);
+
+    AppUI.showModal(`New branded voice "${file.name}" has been successfully uploaded.`);
+}
+
+function handleFcFileInputChange(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        try {
+            AppState.functionCallDefinition = JSON.parse(e.target.result);
+            console.log("Function call definition loaded:", AppState.functionCallDefinition);
+            AppUI.setText("fcFileName", `File: ${file.name}`);
+            AppUI.showModal(`Function call definition "${file.name}" has been successfully uploaded.`);
+        } catch (error) {
+            AppUI.showModal(`Error parsing JSON file: ${error.message}`);
+        }
+    };
+    reader.readAsText(file);
+}
 
 function getSelectedResponseModality() {
-    const radioButtons = document.querySelectorAll(
-        'md-radio[name="responseModality"]'
-    );
-
-    let selectedValue;
+    const radioButtons = document.querySelectorAll('md-radio[name="responseModality"]');
+    let selectedValue = "VIDEO";
     for (const radioButton of radioButtons) {
         if (radioButton.checked) {
             selectedValue = radioButton.value;
@@ -132,163 +243,120 @@ function getSelectedResponseModality() {
     return selectedValue;
 }
 
-function getSystemInstructions() {
-    return systemInstructionsInput.value;
-}
-
-function connectBtnClick() {
-    setAppStatus("connecting");
-    console.log("Connecting...");
-
-    liveVideoOutputManager.initMediaSource();
-    geminiLiveApi.responseModalities = [getSelectedResponseModality()];
-    if (getSystemInstructions() !== "") {
-        geminiLiveApi.systemInstructions = getSystemInstructions();
-    }
-    geminiLiveApi.setModel(liveApiModel.value);
-    geminiLiveApi.setTranscript(
-        inputTranscript.checked,
-        outputTranscript.checked
-    );
-    geminiLiveApi.setResumption(
-        enableResumption.checked,
-        resumptionHandle.value
-    );
-    geminiLiveApi.setBitrates(
-        audioBitrateInput.value,
-        videoBitrateInput.value
-    );
-    geminiLiveApi.setVoice(voiceName.value, voiceLocale.value);
-    geminiLiveApi.setVad(
-        disableInterruption.checked,
-        disableDetection.checked,
-        startSensitivity.value,
-        endSensitivity.value
-    );
-    geminiLiveApi.setCustomVoice(customVoiceBase64);
-    geminiLiveApi.setFunctionCall(functionCallDefinition);
-    geminiLiveApi.toolBehavior = document.getElementById("toolBehavior").value;
-    geminiLiveApi.setProactiveVideo(proactiveVideo.checked);
-    geminiLiveApi.setS2ST(
-        enableS2STInput.checked,
-        s2stTargetLanguageInput.value
-    );
-    geminiLiveApi.setLocation(locationInput.value);
-    geminiLiveApi.setApiHost(envApiHost.value);
-    const avatarModeCheckbox = document.getElementById("enableAvatarMode");
-    geminiLiveApi.avatarMode = avatarModeCheckbox.checked;
-
-    geminiLiveApi.connect();
-
-    geminiLiveApi.onConnectionStarted = () => {
-        micOffBtn.querySelector('md-filled-icon-button').disabled = false;
-        cameraOffBtn.querySelector('md-filled-icon-button').disabled = false;
-        screenBtn.querySelector('md-filled-icon-button').disabled = false;
-        setAppStatus("connected");
-
-        // startAudioInput();
-    };
-}
-
-const liveAudioOutputManager = new LiveAudioOutputManager();
-const liveVideoOutputManager = new LiveVideoOutputManager();
-
-
-geminiLiveApi.onReceiveResponse = (messageResponse) => {
+// --- Live API Response Coordinator ---
+function handleReceiveResponse(messageResponse) {
     console.log("Message response received, type: " + messageResponse.type);
-    if (messageResponse.type === "AUDIO") {
-        liveAudioOutputManager.playAudioChunk(messageResponse.data);
-    } else if (messageResponse.type === "VIDEO") {
-        liveVideoOutputManager.playVideoChunk(messageResponse.data);
-    } else if (messageResponse.type === "TEXT") {
-        console.log("Gemini said: ", messageResponse.data);
-        newModelMessage(messageResponse.data);
-    } else if (messageResponse.type === "RESUMPTION") {
-        console.log("Resumption handle received: ", messageResponse.data);
-        enableResumption.checked = true;
-        resumptionHandle.value = messageResponse.data;
-        newModelMessage("New Resumption Handle ID: " + messageResponse.data);
-    } else if (messageResponse.type === "INPUT_TRANSCRIPTION") {
-        console.log("Input transcription received: ", messageResponse.data);
-        newModelMessage("Input Transcription: " + messageResponse.data);
-    } else if (messageResponse.type === "OUTPUT_TRANSCRIPTION") {
-        console.log("Output transcription received: ", messageResponse.data);
-        newModelMessage("Output Transcription: " + messageResponse.data);
-    } else if (messageResponse.type === "END_OF_TURN") {
-        console.log("End of turn");
-        newModelMessage("End of turn!");
-    } else if (messageResponse.type === "INTERRUPT") {
-        console.log("Interrupted!");
-        newModelMessage("Interrupted!");
-    } else if (messageResponse.type === "VAD_SIGNAL") {
-        console.log("VAD signal");
-        newModelMessage("VAD signal received");
-    } else if (messageResponse.type === "FUNCTION_CALL") {
-        console.log("Function call requested: ", messageResponse.data);
-        const functionCalls = messageResponse.data;
-        newModelMessage("Function Call: " + JSON.stringify(functionCalls));
 
-        const schedulingVal = document.getElementById("fcScheduling")?.value || "WHEN_IDLE";
-        console.log("Processing function calls with scheduling:", schedulingVal);
+    switch (messageResponse.type) {
+        case "AUDIO":
+            if (AppState.liveAudioOutputManager) {
+                AppState.liveAudioOutputManager.playAudioChunk(messageResponse.data);
+            }
+            break;
+        case "VIDEO":
+            if (AppState.liveVideoOutputManager) {
+                AppState.liveVideoOutputManager.playVideoChunk(messageResponse.data);
+            }
+            break;
+        case "TEXT":
+            console.log("Gemini said: ", messageResponse.data);
+            newModelMessage(messageResponse.data);
+            break;
+        case "RESUMPTION":
+            console.log("Resumption handle received: ", messageResponse.data);
+            const enableResumption = AppUI.getElement("resumption");
+            if (enableResumption) enableResumption.checked = true;
 
-        // Process function calls sequentially using promise chaining without making the parent function async.
-        const allResponsesPromise = functionCalls.reduce(
-            (promiseChain, funcCall) => {
-                return promiseChain.then((allResponses) => {
-                    const postData = {
-                        objective: "fr_generate",
-                        functionName: funcCall.name,
-                        functionArgs: funcCall.args,
-                    };
+            const resumptionHandle = AppUI.getElement("handle");
+            if (resumptionHandle) resumptionHandle.value = messageResponse.data;
 
-                    // sendPostRequest returns a promise. We chain it.
-                    return geminiLiveApi
-                        .sendPostRequest(geminiLiveApi.frUrl, postData)
-                        .then((result) => {
-                            // Add the new response to our list of all responses
-                            allResponses.push({
-                                id: funcCall.id,
-                                name: funcCall.name,
-                                response: {
-                                    result: result,
-                                    scheduling: schedulingVal,
-                                },
-                            });
-                            return allResponses;
-                        });
-                });
-            },
-            Promise.resolve([])
-        ); // Start with a resolved promise with an empty array.
-
-        allResponsesPromise
-            .then((fcResponseList) => {
-                const responseDict = {
-                    toolResponse: {
-                        functionResponses: fcResponseList,
-                    },
-                };
-                geminiLiveApi.sendMessage(responseDict);
-            })
-            .catch((error) => {
-                console.error("Error processing function calls:", error);
-                newModelMessage(
-                    "Error processing function calls: " + error.message
-                );
-            });
+            newModelMessage("New Resumption Handle ID: " + messageResponse.data);
+            break;
+        case "INPUT_TRANSCRIPTION":
+            console.log("Input transcription received: ", messageResponse.data);
+            newModelMessage("Input Transcription: " + messageResponse.data);
+            break;
+        case "OUTPUT_TRANSCRIPTION":
+            console.log("Output transcription received: ", messageResponse.data);
+            newModelMessage("Output Transcription: " + messageResponse.data);
+            break;
+        case "END_OF_TURN":
+            console.log("End of turn");
+            newModelMessage("End of turn!");
+            break;
+        case "INTERRUPT":
+            console.log("Interrupted!");
+            newModelMessage("Interrupted!");
+            break;
+        case "VAD_SIGNAL":
+            console.log("VAD signal");
+            newModelMessage("VAD signal received");
+            break;
+        case "FUNCTION_CALL":
+            handleFunctionCallRequest(messageResponse.data);
+            break;
+        default:
+            console.warn("Unhandled message type:", messageResponse.type);
+            break;
     }
-};
+}
 
-const liveAudioInputManager = new LiveAudioInputManager();
+function handleFunctionCallRequest(functionCalls) {
+    console.log("Function call requested: ", functionCalls);
+    newModelMessage("Function Call: " + JSON.stringify(functionCalls));
 
-liveAudioInputManager.onNewAudioRecordingChunk = (audioData) => {
-    geminiLiveApi.sendAudioMessage(audioData);
-};
+    const schedulingVal = AppUI.getValue("fcScheduling", "WHEN_IDLE");
+    console.log("Processing function calls with scheduling:", schedulingVal);
 
+    const allResponsesPromise = functionCalls.reduce(
+        (promiseChain, funcCall) => {
+            return promiseChain.then((allResponses) => {
+                const postData = {
+                    objective: "fr_generate",
+                    functionName: funcCall.name,
+                    functionArgs: funcCall.args,
+                };
+
+                return AppState.geminiLiveApi
+                    .sendPostRequest(AppState.geminiLiveApi.frUrl, postData)
+                    .then((result) => {
+                        allResponses.push({
+                            id: funcCall.id,
+                            name: funcCall.name,
+                            response: {
+                                result: result,
+                                scheduling: schedulingVal,
+                            },
+                        });
+                        return allResponses;
+                    });
+            });
+        },
+        Promise.resolve([])
+    );
+
+    allResponsesPromise
+        .then((fcResponseList) => {
+            const responseDict = {
+                toolResponse: {
+                    functionResponses: fcResponseList,
+                },
+            };
+            AppState.geminiLiveApi.sendMessage(responseDict);
+        })
+        .catch((error) => {
+            console.error("Error processing function calls:", error);
+            newModelMessage("Error processing function calls: " + error.message);
+        });
+}
+
+// --- Chat Interface Helpers ---
 function addMessageToChat(message) {
-    const textChat = document.getElementById("text-chat");
+    const textChat = AppUI.getElement("text-chat");
+    if (!textChat) return;
+
     const newParagraph = document.createElement("p");
-    newParagraph.textContent = message;
+    newParagraph.textContent = message; // Secure against XSS
     textChat.appendChild(newParagraph);
 }
 
@@ -297,85 +365,90 @@ function newModelMessage(message) {
 }
 
 function newUserMessage() {
-    const textMessage = document.getElementById("text-message");
-    addMessageToChat("User: " + textMessage.value);
-    geminiLiveApi.sendTextMessage(textMessage.value);
+    const textMessage = AppUI.getElement("text-message");
+    if (!textMessage) return;
+
+    const val = textMessage.value;
+    if (val.trim() === "") return;
+
+    addMessageToChat("User: " + val);
+    AppState.geminiLiveApi.sendTextMessage(val);
 
     textMessage.value = "";
 }
 
+// --- Audio Input Operations ---
 function startAudioInput() {
-    liveAudioInputManager.updateAudioInterval(audioInterval.value);
-    // liveAudioInputManager.connectMicrophone();
+    const intervalVal = AppUI.getValue("audioInterval", "1000");
+    if (AppState.liveAudioInputManager) {
+        AppState.liveAudioInputManager.updateAudioInterval(intervalVal);
+    }
 }
 
 function stopAudioInput() {
-    liveAudioInputManager.disconnectMicrophone();
+    if (AppState.liveAudioInputManager) {
+        AppState.liveAudioInputManager.disconnectMicrophone();
+    }
 }
 
 function micBtnClick() {
     console.log("micBtnClick");
     stopAudioInput();
-    micBtn.hidden = true;
-    micOffBtn.hidden = false;
+    AppUI.setHidden("micBtn", true);
+    AppUI.setHidden("micOffBtn", false);
 }
 
 function micOffBtnClick() {
     console.log("micOffBtnClick");
     startAudioInput();
-
-    micBtn.hidden = false;
-    micOffBtn.hidden = true;
+    AppUI.setHidden("micBtn", false);
+    AppUI.setHidden("micOffBtn", true);
 }
 
 function audioStartButtonClick() {
     console.log("start voice activity...");
-    geminiLiveApi.sendVoiceActivityMessage(true);
+    AppState.geminiLiveApi.sendVoiceActivityMessage(true);
 }
 
 function audioEndButtonClick() {
     console.log("end voice activity...");
-    geminiLiveApi.sendVoiceActivityMessage(false);
+    AppState.geminiLiveApi.sendVoiceActivityMessage(false);
 }
 
-const videoElement = document.getElementById("video");
-const canvasElement = document.getElementById("canvas");
-
-const liveVideoManager = new LiveVideoManager(videoElement, canvasElement);
-
-const liveScreenManager = new LiveScreenManager(videoElement, canvasElement);
-
-liveVideoManager.onNewFrame = (b64Image) => {
-    geminiLiveApi.sendImageMessage(b64Image);
-};
-
-liveScreenManager.onNewFrame = (b64Image) => {
-    geminiLiveApi.sendImageMessage(b64Image);
-};
-
+// --- Video & Screen Capturing ---
 function startCameraCapture() {
-    liveScreenManager.stopCapture();
-    liveVideoManager.updateVideoInterval(videoInterval.value);
-    // liveVideoManager.startWebcam();
+    if (AppState.liveScreenManager) {
+        AppState.liveScreenManager.stopCapture();
+    }
+    const intervalVal = AppUI.getValue("videoInterval", "5000");
+    if (AppState.liveVideoManager) {
+        AppState.liveVideoManager.updateVideoInterval(intervalVal);
+    }
 }
 
 function startScreenCapture() {
-    liveVideoManager.stopWebcam();
-    liveScreenManager.updateVideoInterval(videoInterval.value);
-    // liveScreenManager.startCapture();
+    if (AppState.liveVideoManager) {
+        AppState.liveVideoManager.stopWebcam();
+    }
+    const intervalVal = AppUI.getValue("videoInterval", "5000");
+    if (AppState.liveScreenManager) {
+        AppState.liveScreenManager.updateVideoInterval(intervalVal);
+    }
 }
 
 function cameraBtnClick() {
-    liveVideoManager.stopWebcam();
-    cameraBtn.hidden = true;
-    cameraOffBtn.hidden = false;
+    if (AppState.liveVideoManager) {
+        AppState.liveVideoManager.stopWebcam();
+    }
+    AppUI.setHidden("cameraBtn", true);
+    AppUI.setHidden("cameraOffBtn", false);
     console.log("Camera turned off");
 }
 
 function cameraOffBtnClick() {
     startCameraCapture();
-    cameraBtn.hidden = false;
-    cameraOffBtn.hidden = true;
+    AppUI.setHidden("cameraBtn", false);
+    AppUI.setHidden("cameraOffBtn", true);
     console.log("Camera turned on");
 }
 
@@ -385,64 +458,62 @@ function screenShareBtnClick() {
 }
 
 function newCameraSelected() {
-    console.log("newCameraSelected ", cameraSelect.value);
-    liveVideoManager.updateWebcamDevice(cameraSelect.value);
+    const camVal = AppUI.getValue("cameraSource");
+    console.log("newCameraSelected ", camVal);
+    if (AppState.liveVideoManager) {
+        AppState.liveVideoManager.updateWebcamDevice(camVal);
+    }
 }
 
 function newMicSelected() {
-    console.log("newMicSelected", micSelect.value);
-    liveAudioInputManager.updateMicrophoneDevice(micSelect.value);
+    const micVal = AppUI.getValue("audioSource");
+    console.log("newMicSelected", micVal);
+    if (AppState.liveAudioInputManager) {
+        AppState.liveAudioInputManager.updateMicrophoneDevice(micVal);
+    }
 }
 
-function disconnectBtnClick() {
-    geminiLiveApi.disconnect();
-    stopAudioInput();
-    customVoiceBase64 = "";
-    functionCallDefinition = null;
-    audioFileInput.value = ""; // Reset file input
-    fileNameDisplay.textContent = "";
-    fcFileNameDisplay.textContent = "";
-    liveVideoOutputManager.resetPlayer();
-    setAppStatus("disconnected");
-}
-
-function showDialogWithMessage(messageText) {
-    const dialog = document.getElementById("dialog");
-    const dialogMessage = document.getElementById("dialogMessage");
-    dialogMessage.innerHTML = messageText;
-    dialog.show();
-}
-
+// --- Device Enumeration ---
 async function getAvailableDevices(deviceType) {
-    const allDevices = await navigator.mediaDevices.enumerateDevices();
-    const devices = [];
-    allDevices.forEach((device) => {
-        if (device.kind === deviceType) {
-            devices.push({
-                id: device.deviceId,
-                name: device.label || device.deviceId,
-            });
-        }
-    });
-    return devices;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+        return [];
+    }
+    try {
+        const allDevices = await navigator.mediaDevices.enumerateDevices();
+        const devices = [];
+        allDevices.forEach((device) => {
+            if (device.kind === deviceType) {
+                devices.push({
+                    id: device.deviceId,
+                    name: device.label || device.deviceId,
+                });
+            }
+        });
+        return devices;
+    } catch (error) {
+        console.error("Error enumerating media devices:", error);
+        return [];
+    }
 }
 
 async function getAvailableCameras() {
-    return await this.getAvailableDevices("videoinput");
+    return await getAvailableDevices("videoinput");
 }
 
 async function getAvailableAudioInputs() {
-    return await this.getAvailableDevices("audioinput");
+    return await getAvailableDevices("audioinput");
 }
 
 function setMaterialSelect(allOptions, selectElement) {
+    if (!selectElement) return;
+    selectElement.replaceChildren(); // Clean old options securely
     allOptions.forEach((optionData) => {
         const option = document.createElement("md-select-option");
         option.value = optionData.id;
 
         const slotDiv = document.createElement("div");
         slotDiv.slot = "headline";
-        slotDiv.innerHTML = optionData.name;
+        slotDiv.textContent = optionData.name; // Secure against XSS
         option.appendChild(slotDiv);
 
         selectElement.appendChild(option);
@@ -451,149 +522,221 @@ function setMaterialSelect(allOptions, selectElement) {
 
 async function setAvailableCamerasOptions() {
     const cameras = await getAvailableCameras();
-    const videoSelect = document.getElementById("cameraSource");
+    const videoSelect = AppUI.getElement("cameraSource");
     setMaterialSelect(cameras, videoSelect);
 }
 
 async function setAvailableMicrophoneOptions() {
     const mics = await getAvailableAudioInputs();
-    const audioSelect = document.getElementById("audioSource");
+    const audioSelect = AppUI.getElement("audioSource");
     setMaterialSelect(mics, audioSelect);
 }
 
-const connectBtn = document.getElementById("connectBtn");
-const disconnectBtn = document.getElementById("disconnectBtn");
-
+// --- App Lifecycle Handlers (Connect / Disconnect) ---
 function setAppStatus(status) {
-    disconnected.hidden = true;
-    connecting.hidden = true;
-    connected.hidden = true;
-    speaking.hidden = true;
+    AppUI.setHidden("disconnected", true);
+    AppUI.setHidden("connecting", true);
+    AppUI.setHidden("connected", true);
+    AppUI.setHidden("speaking", true);
 
     switch (status) {
         case "disconnected":
-            disconnected.hidden = false;
-            connectBtn.disabled = false;
-            disconnectBtn.disabled = true;
-            
-            // Download recorded video if any
-            if (typeof liveVideoOutputManager !== 'undefined') {
-                const blob = liveVideoOutputManager.getRecordedBlob();
+            AppUI.setHidden("disconnected", false);
+            AppUI.setDisabled("connectBtn", false);
+            AppUI.setDisabled("disconnectBtn", true);
+
+            if (AppState.liveVideoOutputManager) {
+                const blob = AppState.liveVideoOutputManager.getRecordedBlob();
                 if (blob && blob.size > 0) {
                     downloadBlob(blob, `received_video_${Date.now()}.mp4`);
-                    liveVideoOutputManager.clearRecordedChunks();
+                    AppState.liveVideoOutputManager.clearRecordedChunks();
                 }
             }
             break;
         case "connecting":
-            connecting.hidden = false;
-            connectBtn.disabled = true;
-            disconnectBtn.disabled = true;
+            AppUI.setHidden("connecting", false);
+            AppUI.setDisabled("connectBtn", true);
+            AppUI.setDisabled("disconnectBtn", true);
             break;
         case "connected":
-            connected.hidden = false;
-            connectBtn.disabled = true;
-            disconnectBtn.disabled = false;
+            AppUI.setHidden("connected", false);
+            AppUI.setDisabled("connectBtn", true);
+            AppUI.setDisabled("disconnectBtn", false);
             break;
         case "speaking":
-            speaking.hidden = false;
+            AppUI.setHidden("speaking", false);
             break;
         default:
+            break;
     }
 }
 
-// --- DOM Element References ---
-const createVoiceBtn = document.getElementById("createVoiceBtn");
-const modal = document.getElementById("brandedVoiceModal");
-const closeModalBtn = document.getElementById("closeModalBtn");
-const newVoiceNameInput = document.getElementById("newVoiceName");
-const recordButton = document.getElementById("recordButton");
-const recordStatus = document.getElementById("recordStatus");
-const processingSpinner = document.getElementById("processingSpinner");
-const voiceDropdown = document.getElementById("voice-dropdown");
+function connectBtnClick() {
+    setAppStatus("connecting");
+    console.log("Connecting...");
 
-// --- Event Listeners ---
-createVoiceBtn.addEventListener("click", openModal);
-closeModalBtn.addEventListener("click", closeModal);
-window.addEventListener("click", (event) => {
-    if (event.target === modal) {
-        closeModal();
+    if (AppState.liveVideoOutputManager) {
+        AppState.liveVideoOutputManager.initMediaSource();
     }
-});
-recordButton.addEventListener("click", handleRecordClick);
-
-// --- Functions ---
-function closeModal() {
-    modal.style.display = "none";
-}
-
-// --- State for Recording ---
-let mediaRecorder;
-let audioChunks = [];
-let isRecording = false;
-let recordingStartTime;
-
-function toggleAvatarMode() {
-    const avatarModeCheckbox = document.getElementById("enableAvatarMode");
-    const videoContainer = document.getElementById("video-preview-container");
-    if (!avatarModeCheckbox || !videoContainer) return;
     
-    if (avatarModeCheckbox.checked) {
-        videoContainer.classList.add("avatar-mode");
-    } else {
-        videoContainer.classList.remove("avatar-mode");
+    AppState.geminiLiveApi.responseModalities = [getSelectedResponseModality()];
+
+    const sysInstructions = AppUI.getValue("systemInstructions");
+    if (sysInstructions !== "") {
+        AppState.geminiLiveApi.systemInstructions = sysInstructions;
     }
+
+    AppState.geminiLiveApi.setModel(AppUI.getValue("liveApiModel"));
+    AppState.geminiLiveApi.setTranscript(
+        AppUI.getChecked("inputTranscript"),
+        AppUI.getChecked("outputTranscript")
+    );
+    AppState.geminiLiveApi.setResumption(
+        AppUI.getChecked("resumption"),
+        AppUI.getValue("handle")
+    );
+    AppState.geminiLiveApi.setBitrates(
+        AppUI.getValue("audioBitrate"),
+        AppUI.getValue("videoBitrate")
+    );
+    AppState.geminiLiveApi.setVoice(
+        AppUI.getValue("voiceName"),
+        AppUI.getValue("voiceLocale")
+    );
+    AppState.geminiLiveApi.setVad(
+        AppUI.getChecked("disableInterruption"),
+        AppUI.getChecked("disableDetection"),
+        AppUI.getValue("startSensitivity"),
+        AppUI.getValue("endSensitivity")
+    );
+    AppState.geminiLiveApi.setCustomVoice(AppState.customVoiceBase64);
+    AppState.geminiLiveApi.setFunctionCall(AppState.functionCallDefinition);
+    AppState.geminiLiveApi.toolBehavior = AppUI.getValue("toolBehavior", "BLOCKING");
+    AppState.geminiLiveApi.setProactiveVideo(AppUI.getChecked("proactiveVideo"));
+    AppState.geminiLiveApi.setS2ST(
+        AppUI.getChecked("enableS2ST"),
+        AppUI.getValue("s2stTargetLanguage")
+    );
+    AppState.geminiLiveApi.setLocation(AppUI.getValue("location"));
+    AppState.geminiLiveApi.setApiHost(AppUI.getValue("envApiHost"));
+    AppState.geminiLiveApi.avatarMode = AppUI.getChecked("enableAvatarMode");
+
+    AppState.geminiLiveApi.connect();
+
+    AppState.geminiLiveApi.onConnectionStarted = () => {
+        const micOffBtn = AppUI.getElement("micOffBtn");
+        if (micOffBtn) {
+            const iconBtn = micOffBtn.querySelector("md-filled-icon-button");
+            if (iconBtn) iconBtn.disabled = false;
+        }
+
+        const cameraOffBtn = AppUI.getElement("cameraOffBtn");
+        if (cameraOffBtn) {
+            const iconBtn = cameraOffBtn.querySelector("md-filled-icon-button");
+            if (iconBtn) iconBtn.disabled = false;
+        }
+
+        const screenBtn = AppUI.getElement("screenBtn");
+        if (screenBtn) {
+            const iconBtn = screenBtn.querySelector("md-filled-icon-button");
+            if (iconBtn) iconBtn.disabled = false;
+        }
+
+        setAppStatus("connected");
+    };
+}
+
+function disconnectBtnClick() {
+    AppState.geminiLiveApi.disconnect();
+    stopAudioInput();
+
+    AppState.customVoiceBase64 = "";
+    AppState.functionCallDefinition = null;
+
+    const audioFileInput = AppUI.getElement("audioFileInput");
+    if (audioFileInput) audioFileInput.value = "";
+
+    AppUI.setText("fileName", "");
+    AppUI.setText("fcFileName", "");
+
+    if (AppState.liveVideoOutputManager) {
+        AppState.liveVideoOutputManager.resetPlayer();
+    }
+    setAppStatus("disconnected");
+}
+
+// --- Branded Voice / Reference Voice Modal Operations ---
+function openModal() {
+    const modal = AppUI.getElement("brandedVoiceModal");
+    if (modal) modal.style.display = "flex";
+
+    const nameInput = AppUI.getElement("newVoiceName");
+    if (nameInput) nameInput.value = "";
+
+    AppUI.setDisabled("recordButton", false);
+    AppUI.setButtonWithIcon("recordButton", "mic", "Record reference voice");
+    AppUI.setText("recordStatus", "");
+    AppUI.setHidden("processingSpinner", true);
+
+    AppState.isRecording = false;
+    AppState.audioChunks = [];
+}
+
+function closeModal() {
+    const modal = AppUI.getElement("brandedVoiceModal");
+    if (modal) modal.style.display = "none";
 }
 
 async function handleRecordClick() {
-    const voiceName = newVoiceNameInput.value.trim();
+    const nameInput = AppUI.getElement("newVoiceName");
+    const voiceName = nameInput ? nameInput.value.trim() : "";
     if (voiceName === "") {
-        alert("Please enter a name for the reference voice.");
-        newVoiceNameInput.focus();
+        AppUI.showModal("Please enter a name for the reference voice.");
+        if (nameInput) nameInput.focus();
         return;
     }
 
-    if (isRecording) {
-        // Stop recording
-        const duration = (new Date() - recordingStartTime) / 1000;
+    if (AppState.isRecording) {
+        const duration = (new Date() - AppState.recordingStartTime) / 1000;
         if (duration < 10) {
-            alert("A recording of at least 10 seconds is required.");
-            // Don't stop, let user continue recording
+            AppUI.showModal(
+                "A recording of at least 10 seconds is required to ensure reference voice quality."
+            );
             return;
         }
 
-        mediaRecorder.stop();
-        recordButton.disabled = true;
-        recordStatus.textContent = "Processing...";
-        processingSpinner.style.display = "block";
-        recordButton.innerHTML = "Processing...";
-        isRecording = false;
+        if (AppState.mediaRecorder) {
+            AppState.mediaRecorder.stop();
+        }
+
+        AppUI.setDisabled("recordButton", true);
+        AppUI.setText("recordStatus", "Processing recorded sample...");
+        AppUI.setHidden("processingSpinner", false);
+        AppUI.setButtonWithIcon("recordButton", "hourglass_empty", "Processing...");
+
+        AppState.isRecording = false;
     } else {
-        // Start recording
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                audio: true,
-            });
-            // Try to record as WAV, but fall back to browser default if not supported
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             const mimeType = MediaRecorder.isTypeSupported("audio/wav")
                 ? "audio/wav"
                 : "audio/webm";
-            mediaRecorder = new MediaRecorder(stream, { mimeType });
+            AppState.mediaRecorder = new MediaRecorder(stream, { mimeType });
 
-            mediaRecorder.ondataavailable = (event) => {
-                audioChunks.push(event.data);
+            AppState.mediaRecorder.ondataavailable = (event) => {
+                AppState.audioChunks.push(event.data);
             };
 
-            mediaRecorder.onstop = async () => {
-                const audioBlob = new Blob(audioChunks, { type: mimeType });
-                console.log("Conversion start");
-                // Resample the audio to 24kHz
+            AppState.mediaRecorder.onstop = async () => {
+                const audioBlob = new Blob(AppState.audioChunks, { type: mimeType });
+                console.log("Audio resampling started...");
+
                 const targetSampleRate = 24000;
-                const audioContext = new (window.AudioContext ||
-                    window.webkitAudioContext)();
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 const decodedBuffer = await audioContext.decodeAudioData(
                     await audioBlob.arrayBuffer()
                 );
+
                 const offlineContext = new OfflineAudioContext(
                     decodedBuffer.numberOfChannels,
                     decodedBuffer.duration * targetSampleRate,
@@ -605,45 +748,41 @@ async function handleRecordClick() {
                 source.start();
                 const resampledBuffer = await offlineContext.startRendering();
 
-                // Convert the resampled buffer to a WAV blob
                 const wavBlob = bufferToWave(resampledBuffer);
-                console.log("Conversion done");
-                // downloadBlob(wavBlob, 'resampled_audio_16k.wav');
-                // console.log("Downloading the audio...")
+                console.log("Audio resampling finished.");
 
                 const reader = new FileReader();
-                reader.readAsDataURL(wavBlob);
                 reader.onloadend = () => {
-                    const base64String = reader.result.split(",")[1];
-
-                    customVoiceBase64 = base64String;
+                    if (typeof reader.result === "string") {
+                        AppState.customVoiceBase64 = reader.result.split(",")[1] || "";
+                    }
 
                     const newOption = document.createElement("option");
-                    const optionValue = voiceName
-                        .toLowerCase()
-                        .replace(/\s/g, "-");
-                    newOption.value = optionValue;
+                    newOption.value = voiceName.toLowerCase().replace(/\s/g, "-");
                     newOption.textContent = voiceName;
                     newOption.selected = true;
-                    voiceDropdown.appendChild(newOption);
 
-                    alert(
-                        `New branded voice "${voiceName}" has been created and selected!`
+                    const voiceDropdown = AppUI.getElement("voice-dropdown");
+                    if (voiceDropdown) voiceDropdown.appendChild(newOption);
+
+                    AppUI.showModal(
+                        `New branded voice "${voiceName}" has been successfully created and selected!`
                     );
                     closeModal();
-                    audioChunks = [];
+                    AppState.audioChunks = [];
                 };
+                reader.readAsDataURL(wavBlob);
             };
 
-            mediaRecorder.start();
-            recordingStartTime = new Date();
-            isRecording = true;
-            recordButton.innerHTML =
-                '<span class="material-icons">stop</span> Stop Recording';
-            recordStatus.textContent = "Recording... (10s minimum)";
+            AppState.mediaRecorder.start();
+            AppState.recordingStartTime = new Date();
+            AppState.isRecording = true;
+
+            AppUI.setButtonWithIcon("recordButton", "stop", "Stop Recording");
+            AppUI.setText("recordStatus", "Recording... (Please speak for at least 10 seconds)");
         } catch (error) {
-            console.error("Error accessing microphone:", error);
-            alert("Could not access microphone. Please check permissions.");
+            console.error("Error accessing microphone for reference voice recording:", error);
+            AppUI.showModal("Could not access microphone. Please check your browser permissions.");
         }
     }
 }
@@ -659,6 +798,16 @@ function bufferToWave(abuffer) {
     let offset = 0;
     let pos = 0;
 
+    function setUint16(data) {
+        view.setUint16(pos, data, true);
+        pos += 2;
+    }
+
+    function setUint32(data) {
+        view.setUint32(pos, data, true);
+        pos += 4;
+    }
+
     // write WAVE header
     setUint32(0x46464952); // "RIFF"
     setUint32(length - 8); // file length - 8
@@ -671,7 +820,7 @@ function bufferToWave(abuffer) {
     setUint32(abuffer.sampleRate);
     setUint32(abuffer.sampleRate * 2 * numOfChan); // avg. bytes/sec
     setUint16(numOfChan * 2); // block-align
-    setUint16(16); // 16-bit (hardcoded in this demo)
+    setUint16(16); // 16-bit
 
     setUint32(0x61746164); // "data" - chunk
     setUint32(length - pos - 4); // chunk length
@@ -683,38 +832,15 @@ function bufferToWave(abuffer) {
 
     while (pos < length) {
         for (i = 0; i < numOfChan; i++) {
-            // interleave channels
             sample = Math.max(-1, Math.min(1, channels[i][offset])); // clamp
             sample = (sample < 0 ? sample * 32768 : sample * 32767) | 0;
-            view.setInt16(pos, sample, true); // write 16-bit sample
+            view.setInt16(pos, sample, true);
             pos += 2;
         }
-        offset++; // next source sample
+        offset++;
     }
 
     return new Blob([view], { type: "audio/wav" });
-
-    function setUint16(data) {
-        view.setUint16(pos, data, true);
-        pos += 2;
-    }
-
-    function setUint32(data) {
-        view.setUint32(pos, data, true);
-        pos += 4;
-    }
-}
-
-function openModal() {
-    modal.style.display = "flex";
-    newVoiceNameInput.value = "";
-    recordButton.disabled = false;
-    recordButton.innerHTML =
-        '<span class="material-icons">mic</span> Record reference voice';
-    recordStatus.textContent = "";
-    processingSpinner.style.display = "none";
-    isRecording = false;
-    audioChunks = [];
 }
 
 function downloadBlob(blob, filename) {
@@ -730,10 +856,42 @@ function downloadBlob(blob, filename) {
 }
 
 function toggleSchedulingDisable() {
-    const toolBehavior = document.getElementById("toolBehavior");
-    const fcScheduling = document.getElementById("fcScheduling");
-    if (toolBehavior && fcScheduling) {
-        fcScheduling.disabled = (toolBehavior.value === "BLOCKING");
+    const toolBehaviorVal = AppUI.getValue("toolBehavior");
+    const fcScheduling = AppUI.getElement("fcScheduling");
+    if (fcScheduling) {
+        fcScheduling.disabled = (toolBehaviorVal === "BLOCKING");
     }
 }
 
+function toggleAvatarMode() {
+    const isChecked = AppUI.getChecked("enableAvatarMode", true);
+    const videoContainer = AppUI.getElement("video-preview-container");
+    if (!videoContainer) return;
+
+    if (isChecked) {
+        videoContainer.classList.add("avatar-mode");
+    } else {
+        videoContainer.classList.remove("avatar-mode");
+    }
+}
+
+function showDialogWithMessage(messageText) {
+    AppUI.showModal(messageText);
+}
+
+// --- Expose Public HTML Interface on Global Window Scope ---
+window.AppState = AppState;
+window.AppUI = AppUI;
+window.connectBtnClick = connectBtnClick;
+window.disconnectBtnClick = disconnectBtnClick;
+window.micBtnClick = micBtnClick;
+window.micOffBtnClick = micOffBtnClick;
+window.cameraBtnClick = cameraBtnClick;
+window.cameraOffBtnClick = cameraOffBtnClick;
+window.screenShareBtnClick = screenShareBtnClick;
+window.newUserMessage = newUserMessage;
+window.newCameraSelected = newCameraSelected;
+window.newMicSelected = newMicSelected;
+window.toggleSchedulingDisable = toggleSchedulingDisable;
+window.toggleAvatarMode = toggleAvatarMode;
+window.showDialogWithMessage = showDialogWithMessage;
