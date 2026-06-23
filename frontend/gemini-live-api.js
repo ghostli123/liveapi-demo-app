@@ -247,6 +247,10 @@ class GeminiLiveAPI {
      * @returns {Promise<void>}
      */
     async loadCustomAvatar(url = "/frontend/assets/avatar_image.png?v=" + Date.now()) {
+        if (this.customizedAvatarData) {
+            console.log("Custom avatar already loaded, skipping fetch.");
+            return;
+        }
         try {
             console.log("Loading custom avatar from:", url);
             const response = await fetch(url);
@@ -428,18 +432,29 @@ class GeminiLiveAPI {
      * Initiates the overall connection process: loads custom avatar,
      * initializes backend service, posts tool declarations, and establishes WebSocket.
      */
+    /**
+     * Performs all asynchronous HTTP and media initialization steps required before
+     * establishing the WebSocket connection.
+     * @returns {Promise<void>}
+     */
+    async prepare() {
+        console.log("prepare(): Loading custom avatar...");
+        await this.loadCustomAvatar();
+
+        console.log("prepare(): Avatar loaded. Initializing backend service...");
+        await this.initBackendService();
+
+        console.log("prepare(): initBackendService successful. Setting up function declarations...");
+        await this.setupFuncDeclarationToService();
+    }
+
+    /**
+     * Initiates the overall connection process: prepares the session and establishes the WebSocket.
+     */
     async connect() {
         try {
-            console.log("connect(): Loading custom avatar...");
-            await this.loadCustomAvatar();
-
-            console.log("connect(): Avatar loaded. Initializing backend service...");
-            await this.initBackendService();
-
-            console.log("connect(): initBackendService successful. Setting up function declarations...");
-            await this.setupFuncDeclarationToService();
-
-            console.log("connect(): Function declarations set up. Starting WebSocket connection...");
+            await this.prepare();
+            console.log("connect(): Preparation successful. Starting WebSocket connection...");
             this.setupWebSocketToService();
         } catch (error) {
             console.error("connect(): Connection sequence failed.", error);
