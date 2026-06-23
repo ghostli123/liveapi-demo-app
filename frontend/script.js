@@ -311,43 +311,55 @@ async function handleSessionResumptionReconnect() {
     if (!api) return;
 
     setAppStatus("connecting");
+    newModelMessage("Reconnecting for session resumption...");
 
-    // 1. Cleanly close the old WebSocket without triggering error/disconnected UI
+    // 1. Start cleanly closing the old WebSocket in the background (preventing the disconnect handler from showing error)
+    let closePromise = Promise.resolve();
     if (api.webSocket) {
         const oldWs = api.webSocket;
-        const closePromise = new Promise((resolve) => {
+        closePromise = new Promise((resolve) => {
             if (oldWs.readyState === WebSocket.CLOSED) {
                 resolve();
                 return;
             }
-            oldWs.onclose = () => {
-                resolve();
-            };
-            oldWs.onerror = () => {
-                resolve();
-            };
+            oldWs.onclose = () => resolve();
+            oldWs.onerror = () => resolve();
             oldWs.close();
         });
-        await closePromise;
-        api.webSocket = null;
     }
 
     // Stop bandwidth updates for the old connection
     api.stopUpdateBandwidthUsage();
 
-    // Re-initialize video output manager to reset the MediaSource and player state for the new stream
+    // 2. Prepare the new session parameters
+    api.setResumption(true, AppUI.getValue("handle"));
+    
+    // Generate a new session ID for the new connection to avoid backend race conditions/collisions
+    api.sessionId = crypto.randomUUID();
+
+    // 3. Start preparing the new session (avatar loading, backend initialization, and tools configuration) in parallel
+    const preparePromise = api.prepare();
+
+    // 4. Wait for both the old connection to close and the new session preparation to complete
+    try {
+        await Promise.all([closePromise, preparePromise]);
+    } catch (error) {
+        console.error("Session resumption preparation failed: ", error);
+        api.onErrorMessage("Session resumption failed.");
+        return;
+    }
+
+    // 5. Tear down old reference
+    api.webSocket = null;
+
+    // 6. Re-initialize video output manager to reset the MediaSource and player state for the new stream
     if (AppState.liveVideoOutputManager) {
         AppState.liveVideoOutputManager.initMediaSource();
     }
 
-    // 2. Ensure session resumption is configured with the latest handle from UI
-    api.setResumption(true, AppUI.getValue("handle"));
-
-    // 3. Generate a new session ID for the new connection to avoid backend race conditions/collisions
-    api.sessionId = crypto.randomUUID();
-
-    // 4. Initiate the new connection
-    await api.connect();
+    // 7. Establish the new WebSocket connection immediately
+    console.log("handleSessionResumptionReconnect(): Opening new WebSocket connection...");
+    api.setupWebSocketToService();
 }
 
 function handleFunctionCallRequest(functionCalls) {
