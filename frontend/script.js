@@ -335,6 +335,11 @@ async function handleSessionResumptionReconnect() {
     // Stop bandwidth updates for the old connection
     api.stopUpdateBandwidthUsage();
 
+    // Re-initialize video output manager to reset the MediaSource and player state for the new stream
+    if (AppState.liveVideoOutputManager) {
+        AppState.liveVideoOutputManager.initMediaSource();
+    }
+
     // 2. Ensure session resumption is configured with the latest handle from UI
     api.setResumption(true, AppUI.getValue("handle"));
 
