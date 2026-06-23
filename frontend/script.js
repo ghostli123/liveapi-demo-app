@@ -338,7 +338,10 @@ async function handleSessionResumptionReconnect() {
     // 2. Ensure session resumption is configured with the latest handle from UI
     api.setResumption(true, AppUI.getValue("handle"));
 
-    // 3. Initiate the new connection
+    // 3. Generate a new session ID for the new connection to avoid backend race conditions/collisions
+    api.sessionId = crypto.randomUUID();
+
+    // 4. Initiate the new connection
     await api.connect();
 }
 
