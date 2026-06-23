@@ -746,9 +746,11 @@ class GeminiLiveAPI {
         if (!this.enableSessionResumption) {
             return null;
         }
-        return {
-            handle: this.resumptionHandle,
-        };
+        const config = {};
+        if (this.resumptionHandle && this.resumptionHandle.trim() !== "") {
+            config.handle = this.resumptionHandle;
+        }
+        return config;
     }
 
     _buildRealtimeInputConfig() {
