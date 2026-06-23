@@ -28,6 +28,7 @@ class GeminiLiveResponseMessage {
         if (this._parseVadSignal(data)) return;
         if (this._parseModelTurn(serverContent)) return;
         if (this._parseResumption(data)) return;
+        if (this._parseGoAway(data)) return;
         if (this._parseInputTranscription(serverContent)) return;
         if (this._parseOutputTranscription(serverContent)) return;
         if (this._parseTurnEvents()) return;
@@ -95,6 +96,16 @@ class GeminiLiveResponseMessage {
         if (resumption) {
             this.type = "RESUMPTION";
             this.data = resumption.newHandle || resumption.new_handle;
+            return true;
+        }
+        return false;
+    }
+
+    _parseGoAway(data) {
+        const goAway = data?.goAway || data?.go_away;
+        if (goAway) {
+            this.type = "GO_AWAY";
+            this.data = goAway.timeLeft || goAway.time_left;
             return true;
         }
         return false;

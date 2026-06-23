@@ -272,6 +272,11 @@ function handleReceiveResponse(messageResponse) {
 
             newModelMessage("New Resumption Handle ID: " + messageResponse.data);
             break;
+        case "GO_AWAY":
+            console.log("GoAway message received. Time left: ", messageResponse.data);
+            newModelMessage("Connection expiring. Reconnecting for session resumption...");
+            handleSessionResumptionReconnect();
+            break;
         case "INPUT_TRANSCRIPTION":
             console.log("Input transcription received: ", messageResponse.data);
             newModelMessage("Input Transcription: " + messageResponse.data);
@@ -299,6 +304,42 @@ function handleReceiveResponse(messageResponse) {
             console.warn("Unhandled message type:", messageResponse.type);
             break;
     }
+}
+
+async function handleSessionResumptionReconnect() {
+    const api = AppState.geminiLiveApi;
+    if (!api) return;
+
+    setAppStatus("connecting");
+
+    // 1. Cleanly close the old WebSocket without triggering error/disconnected UI
+    if (api.webSocket) {
+        const oldWs = api.webSocket;
+        const closePromise = new Promise((resolve) => {
+            if (oldWs.readyState === WebSocket.CLOSED) {
+                resolve();
+                return;
+            }
+            oldWs.onclose = () => {
+                resolve();
+            };
+            oldWs.onerror = () => {
+                resolve();
+            };
+            oldWs.close();
+        });
+        await closePromise;
+        api.webSocket = null;
+    }
+
+    // Stop bandwidth updates for the old connection
+    api.stopUpdateBandwidthUsage();
+
+    // 2. Ensure session resumption is configured with the latest handle from UI
+    api.setResumption(true, AppUI.getValue("handle"));
+
+    // 3. Initiate the new connection
+    await api.connect();
 }
 
 function handleFunctionCallRequest(functionCalls) {
