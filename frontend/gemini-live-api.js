@@ -237,7 +237,7 @@ class GeminiLiveAPI {
         this.bytesOut = 0; // Total bytes sent (upload)
         this.intervalId = null; // Timer ID for interval updates
         this.history = []; // Array to store bandwidth history for display
-
+        this.googleSearchEnabled = false; // Enable/disable Google Search tool
         console.log("Created Gemini Live API object: ", this);
     }
 
@@ -737,15 +737,22 @@ class GeminiLiveAPI {
     }
 
     _buildToolsConfig() {
-        if (!this.functionCallDefinition) {
-            return null;
+        let fcDef = null;
+
+        if (this.googleSearchEnabled) {
+            fcDef = [{ googleSearch: {} }];
         }
-        return [
-            {
+
+        if (this.functionCallDefinition) {
+            if (!fcDef) {
+                fcDef = [];
+            }
+            fcDef.push({
                 function_declarations: this.functionCallDefinition,
                 behavior: this.toolBehavior,
-            },
-        ];
+            });
+        }
+        return fcDef;
     }
 
     _buildSystemInstructionConfig() {

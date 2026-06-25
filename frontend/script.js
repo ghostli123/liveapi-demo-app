@@ -681,6 +681,7 @@ function connectBtnClick() {
     AppState.geminiLiveApi.setLocation(AppUI.getValue("location"));
     AppState.geminiLiveApi.setApiHost(AppUI.getValue("envApiHost"));
     AppState.geminiLiveApi.avatarMode = AppUI.getChecked("enableAvatarMode");
+    AppState.geminiLiveApi.googleSearchEnabled = AppUI.getChecked("enableGoogleSearch");
 
     AppState.geminiLiveApi.connect();
 
