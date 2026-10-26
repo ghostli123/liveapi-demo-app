@@ -613,7 +613,8 @@ class GeminiLiveAPI {
             if (this.webRtcManager) {
                 this.webRtcManager.close();
             }
-            this.onErrorMessage("Connection closed");
+            const reason = event && event.reason ? `: ${event.reason}` : "";
+            this.onErrorMessage(`Connection closed${reason}`);
         };
 
         this.webSocket.onerror = (event) => {
@@ -708,9 +709,19 @@ class GeminiLiveAPI {
         const isCommonBag =
             this.environment === "autopush-common" ||
             this.environment === "staging-common";
+        let resolvedModel = this.model;
+        if (
+            !isCommonBag &&
+            (resolvedModel === "live_avatar_rev23_rc4" ||
+                resolvedModel === "live_avatar_v2_rev25_rc2" ||
+                resolvedModel === "gemini_api_beyond_live_rev23_rc3" ||
+                resolvedModel === "gemini_live_rev25")
+        ) {
+            resolvedModel = "gemini-3.1-flash-live-preview-04-2026";
+        }
         const modelUri = isCommonBag
-            ? `models/${this.model}`
-            : `projects/${this.projectId}/locations/${this.location}/publishers/google/models/${this.model}`;
+            ? `models/${resolvedModel}`
+            : `projects/${this.projectId}/locations/${this.location}/publishers/google/models/${resolvedModel}`;
 
         const sessionSetupMessage = {
             setup: {

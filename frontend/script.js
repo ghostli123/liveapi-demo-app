@@ -194,6 +194,32 @@ function initDOMEventListeners() {
     if (recordButton) {
         recordButton.addEventListener("click", handleRecordClick);
     }
+
+    const envSelect = AppUI.getElement("envApiHost");
+    if (envSelect) {
+        envSelect.addEventListener("change", handleEnvironmentChange);
+    }
+}
+
+const COMMON_ONLY_MODELS = new Set([
+    "live_avatar_rev23_rc4",
+    "live_avatar_v2_rev25_rc2",
+    "gemini_api_beyond_live_rev23_rc3",
+    "gemini_live_rev25",
+]);
+
+function handleEnvironmentChange() {
+    const envVal = AppUI.getValue("envApiHost");
+    const modelSelect = AppUI.getElement("liveApiModel");
+    if (!modelSelect) return;
+    const isCommon =
+        envVal === "autopush-common" || envVal === "staging-common";
+    const currentModel = modelSelect.value;
+    if (!isCommon && COMMON_ONLY_MODELS.has(currentModel)) {
+        modelSelect.value = "gemini-3.1-flash-live-preview-04-2026";
+    } else if (isCommon && !COMMON_ONLY_MODELS.has(currentModel)) {
+        modelSelect.value = "live_avatar_rev23_rc4";
+    }
 }
 
 // --- Input Handlers ---
