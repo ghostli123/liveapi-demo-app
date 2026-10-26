@@ -54,7 +54,7 @@ class WebsocketHandler:
         while True:
             try:
                 message = await source_websocket.recv()
-                
+
                 try:
                     # Try to parse as JSON for logging and potential modification
                     data = json.loads(message)
@@ -77,16 +77,25 @@ class WebsocketHandler:
         Create bi directional connection between client websocket and server websocket.
 
         """
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.bearer_token}",
-        }
-        ssl_context = ssl.create_default_context(cafile=certifi.where())
-        async with websockets.connect(
-            self.liveapi_service_url,
-            additional_headers=headers,
-            ssl=ssl_context,
-        ) as server_websocket:
+        is_local_ws = self.liveapi_service_url.startswith("ws://")
+        if is_local_ws:
+            ws_conn = websockets.connect(
+                self.liveapi_service_url,
+                max_size=64 * 1024 * 1024,
+            )
+        else:
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.bearer_token}",
+            }
+            ssl_context = ssl.create_default_context(cafile=certifi.where())
+            ws_conn = websockets.connect(
+                self.liveapi_service_url,
+                additional_headers=headers,
+                ssl=ssl_context,
+                max_size=64 * 1024 * 1024,
+            )
+        async with ws_conn as server_websocket:
             self.server_websocket = server_websocket
             self.client_to_server_task = asyncio.create_task(
                 self.proxy_task(self.client_websocket, server_websocket, "c->s")
@@ -116,21 +125,24 @@ class WebsocketHandler:
         Start the websocket connection between client and the server.
 
         """
-        creds, _ = get_credentials.get_credentials()
-        self.bearer_token = creds.token
-        self.expire_time: datetime.datetime = creds.expiry
-        if self.expire_time.tzinfo is None:
-            self.expire_time = self.expire_time.replace(tzinfo=datetime.timezone.utc)
-        # Schedule the token refresh 60 seconds before it expires.
-        wait_time = (
-            self.expire_time - datetime.datetime.now(datetime.timezone.utc)
-        ).total_seconds() - 60
-        # Ensure we don't sleep for a negative duration
-        wait_time = max(0, wait_time)
+        if not self.liveapi_service_url.startswith("ws://"):
+            creds, _ = get_credentials.get_credentials()
+            self.bearer_token = creds.token
+            self.expire_time: datetime.datetime = creds.expiry
+            if self.expire_time.tzinfo is None:
+                self.expire_time = self.expire_time.replace(
+                    tzinfo=datetime.timezone.utc
+                )
+            # Schedule the token refresh 60 seconds before it expires.
+            wait_time = (
+                self.expire_time - datetime.datetime.now(datetime.timezone.utc)
+            ).total_seconds() - 60
+            # Ensure we don't sleep for a negative duration
+            wait_time = max(0, wait_time)
 
-        self.update_cred_task = asyncio.create_task(
-            self.update_websocket_creds(wait_time)
-        )
+            self.update_cred_task = asyncio.create_task(
+                self.update_websocket_creds(wait_time)
+            )
         self.connection_handler = asyncio.create_task(self.create_proxy())
         await self.connection_handler
 

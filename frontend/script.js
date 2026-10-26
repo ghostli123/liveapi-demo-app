@@ -248,14 +248,40 @@ function handleReceiveResponse(messageResponse) {
     console.log("Message response received, type: " + messageResponse.type);
 
     switch (messageResponse.type) {
+        case "SETUP COMPLETE":
+            if (
+                AppState.geminiLiveApi &&
+                AppState.geminiLiveApi.transportMode === "webrtc" &&
+                messageResponse.answerSdp
+            ) {
+                newModelMessage("Setup complete (WebRTC SDP answer negotiated).");
+            } else {
+                newModelMessage("Setup complete.");
+            }
+            break;
         case "AUDIO":
+            if (
+                AppState.geminiLiveApi &&
+                AppState.geminiLiveApi.transportMode === "webrtc"
+            ) {
+                break;
+            }
             if (AppState.liveAudioOutputManager) {
                 AppState.liveAudioOutputManager.playAudioChunk(messageResponse.data);
             }
             break;
         case "VIDEO":
+            if (
+                AppState.geminiLiveApi &&
+                AppState.geminiLiveApi.transportMode === "webrtc"
+            ) {
+                break;
+            }
             if (AppState.liveVideoOutputManager) {
-                AppState.liveVideoOutputManager.playVideoChunk(messageResponse.data);
+                AppState.liveVideoOutputManager.playVideoChunk(
+                    messageResponse.data,
+                    messageResponse.mimeType || ""
+                );
             }
             break;
         case "TEXT":
@@ -440,6 +466,20 @@ function newUserMessage() {
 
 // --- Audio Input Operations ---
 function startAudioInput() {
+    if (
+        AppState.geminiLiveApi &&
+        AppState.geminiLiveApi.transportMode === "webrtc" &&
+        AppState.geminiLiveApi.webRtcManager
+    ) {
+        const micVal = AppUI.getValue("audioSource") || null;
+        AppState.geminiLiveApi.webRtcManager
+            .startMicrophone(micVal)
+            .catch((err) => {
+                console.error("[WebRTC] Failed to start microphone:", err);
+                AppUI.showModal(`Could not start WebRTC microphone: ${err.message}`);
+            });
+        return;
+    }
     const intervalVal = AppUI.getValue("audioInterval", "1000");
     if (AppState.liveAudioInputManager) {
         AppState.liveAudioInputManager.updateAudioInterval(intervalVal);
@@ -447,6 +487,12 @@ function startAudioInput() {
 }
 
 function stopAudioInput() {
+    if (
+        AppState.geminiLiveApi &&
+        AppState.geminiLiveApi.webRtcManager
+    ) {
+        AppState.geminiLiveApi.webRtcManager.stopMicrophone();
+    }
     if (AppState.liveAudioInputManager) {
         AppState.liveAudioInputManager.disconnectMicrophone();
     }
@@ -477,9 +523,27 @@ function audioEndButtonClick() {
 }
 
 // --- Video & Screen Capturing ---
-function startCameraCapture() {
+async function startCameraCapture() {
     if (AppState.liveScreenManager) {
         AppState.liveScreenManager.stopCapture();
+    }
+    if (
+        AppState.geminiLiveApi &&
+        AppState.geminiLiveApi.transportMode === "webrtc" &&
+        AppState.geminiLiveApi.webRtcManager &&
+        AppState.liveVideoManager
+    ) {
+        await AppState.liveVideoManager.startWebcam();
+        if (AppState.liveVideoManager.interval) {
+            clearInterval(AppState.liveVideoManager.interval);
+            AppState.liveVideoManager.interval = null;
+        }
+        if (AppState.liveVideoManager.stream) {
+            await AppState.geminiLiveApi.webRtcManager.attachVideoStream(
+                AppState.liveVideoManager.stream
+            );
+        }
+        return;
     }
     const intervalVal = AppUI.getValue("videoInterval", "5000");
     if (AppState.liveVideoManager) {
@@ -487,9 +551,27 @@ function startCameraCapture() {
     }
 }
 
-function startScreenCapture() {
+async function startScreenCapture() {
     if (AppState.liveVideoManager) {
         AppState.liveVideoManager.stopWebcam();
+    }
+    if (
+        AppState.geminiLiveApi &&
+        AppState.geminiLiveApi.transportMode === "webrtc" &&
+        AppState.geminiLiveApi.webRtcManager &&
+        AppState.liveScreenManager
+    ) {
+        await AppState.liveScreenManager.startCapture();
+        if (AppState.liveScreenManager.interval) {
+            clearInterval(AppState.liveScreenManager.interval);
+            AppState.liveScreenManager.interval = null;
+        }
+        if (AppState.liveScreenManager.stream) {
+            await AppState.geminiLiveApi.webRtcManager.attachVideoStream(
+                AppState.liveScreenManager.stream
+            );
+        }
+        return;
     }
     const intervalVal = AppUI.getValue("videoInterval", "5000");
     if (AppState.liveScreenManager) {
@@ -498,6 +580,12 @@ function startScreenCapture() {
 }
 
 function cameraBtnClick() {
+    if (
+        AppState.geminiLiveApi &&
+        AppState.geminiLiveApi.webRtcManager
+    ) {
+        AppState.geminiLiveApi.webRtcManager.detachVideoStream();
+    }
     if (AppState.liveVideoManager) {
         AppState.liveVideoManager.stopWebcam();
     }
@@ -636,7 +724,21 @@ function connectBtnClick() {
     setAppStatus("connecting");
     console.log("Connecting...");
 
-    if (AppState.liveVideoOutputManager) {
+    const transportMode = AppUI.getValue("transportMode", "webrtc");
+    AppState.geminiLiveApi.setTransportMode(transportMode);
+    AppUI.setText(
+        "active-transport",
+        transportMode === "webrtc" ? "WebRTC" : "WebSocket"
+    );
+    AppUI.setText(
+        "webrtc-state",
+        transportMode === "webrtc" ? "negotiating" : "n/a"
+    );
+
+    if (
+        transportMode === "websocket" &&
+        AppState.liveVideoOutputManager
+    ) {
         AppState.liveVideoOutputManager.initMediaSource();
     }
     
