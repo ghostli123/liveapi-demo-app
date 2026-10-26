@@ -446,9 +446,11 @@
         <div class="metrics-container">
           <div class="metrics-icon" id="metrics-icon">📊</div>
           <div class="metrics-panel" id="metrics-panel">
-            <h3>WebSocket Metrics</h3>
+            <h3 id="metrics-title">Transport Metrics</h3>
+            <p>Transport: <span id="active-transport">WebRTC</span> (<span id="webrtc-state">idle</span>)</p>
             <p>Download: <span id="download-speed">0.00</span> KB/s</p>
             <p>Upload: <span id="upload-speed">0.00</span> KB/s</p>
+            <p>Video FPS: <span id="webrtc-fps">--</span> | Pkts Lost: <span id="webrtc-packet-loss">0</span></p>
             <p>Recommended Video Bitrate: <span id="recommended-video-bitrate"></span> bps</p>
           </div>
         </div>
@@ -495,19 +497,45 @@
     <aside class="right-sidebar">
       <div class="config-section">
         <h3>Connection</h3>
+        <md-outlined-select label="Transport" id="transportMode">
+          <md-select-option selected value="webrtc">
+            <div slot="headline">WebRTC (UDP/SRTP)</div>
+          </md-select-option>
+          <md-select-option value="websocket">
+            <div slot="headline">WebSocket (TCP)</div>
+          </md-select-option>
+        </md-outlined-select>
         <md-outlined-text-field id="location" label="Location" value="us-central1"></md-outlined-text-field>
         <md-outlined-select label="Environment" id="envApiHost">
-          <md-select-option selected value="autopush">
-            <div slot="headline">autopush</div>
+          <md-select-option selected value="autopush-common">
+            <div slot="headline">autopush-common (Beyond BAG)</div>
+          </md-select-option>
+          <md-select-option value="staging-common">
+            <div slot="headline">staging-common (Beyond BAG)</div>
+          </md-select-option>
+          <md-select-option value="autopush">
+            <div slot="headline">autopush (Vertex)</div>
           </md-select-option>
           <md-select-option value="staging">
-            <div slot="headline">staging</div>
+            <div slot="headline">staging (Vertex)</div>
           </md-select-option>
           <md-select-option value="prod">
-            <div slot="headline">prod</div>
+            <div slot="headline">prod (Vertex)</div>
           </md-select-option>
         </md-outlined-select>
         <md-outlined-select label="Model" id="liveApiModel">
+          <md-select-option selected value="live_avatar_rev23_rc4">
+            <div slot="headline">live_avatar_rev23_rc4 (Common Avatar)</div>
+          </md-select-option>
+          <md-select-option value="live_avatar_v2_rev25_rc2">
+            <div slot="headline">live_avatar_v2_rev25_rc2 (Common Avatar V2)</div>
+          </md-select-option>
+          <md-select-option value="gemini_api_beyond_live_rev23_rc3">
+            <div slot="headline">gemini_api_beyond_live_rev23_rc3 (Common Audio)</div>
+          </md-select-option>
+          <md-select-option value="gemini_live_rev25">
+            <div slot="headline">gemini_live_rev25 (Common Audio)</div>
+          </md-select-option>
           <md-select-option value="gemini-live-2.5-flash-native-audio">
             <div slot="headline">gemini-live-2.5-flash-native-audio</div>
           </md-select-option>
@@ -517,7 +545,7 @@
           <md-select-option value="gemini-3.1-flash-live-preview-04-2026">
             <div slot="headline">gemini-3.1-flash-live-preview-04-2026</div>
           </md-select-option>
-          <md-select-option selected value="gemini-3.5-flash-lite-live-preview">
+          <md-select-option value="gemini-3.5-flash-lite-live-preview">
             <div slot="headline">gemini-3.5-flash-lite-live-preview</div>
           </md-select-option>
           <md-select-option value="gemini-live-3.0-flash-preview-native-audio-beyond">

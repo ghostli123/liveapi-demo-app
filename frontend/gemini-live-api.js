@@ -35,8 +35,13 @@ class GeminiLiveResponseMessage {
     }
 
     _parseSetupComplete(data) {
-        if (data?.setupComplete || data?.setup_complete) {
+        const setupComplete = data?.setupComplete || data?.setup_complete;
+        if (setupComplete) {
             this.type = "SETUP COMPLETE";
+            const rtcSetupComplete =
+                setupComplete.rtcSetupComplete || setupComplete.rtc_setup_complete;
+            this.answerSdp =
+                rtcSetupComplete?.answerSdp || rtcSetupComplete?.answer_sdp || "";
             return true;
         }
         return false;
@@ -230,6 +235,11 @@ class GeminiLiveAPI {
 
         // Internal State
         this.webSocket = null;
+        this.transportMode = "webrtc";
+        this.webRtcManager =
+            typeof G3RtcWebRtcManager !== "undefined"
+                ? new G3RtcWebRtcManager()
+                : null;
 
         // Real-time bandwidth usage statistics
         this.intervalMs = 2000; // Update interval in milliseconds (2 seconds)
@@ -304,12 +314,24 @@ class GeminiLiveAPI {
     }
 
     /**
+     * Sets the transport mode ('webrtc' or 'websocket').
+     * @param {string} mode - Transport mode ('webrtc' or 'websocket').
+     */
+    setTransportMode(mode) {
+        this.transportMode = mode === "websocket" ? "websocket" : "webrtc";
+    }
+
+    /**
      * Configures the API hostname based on the execution environment.
-     * @param {string} environment - Target environment ('prod', 'staging', 'autopush').
+     * @param {string} environment - Target environment ('prod', 'staging', 'autopush', 'autopush-common', 'staging-common').
      */
     setApiHost(environment) {
         this.environment = environment;
         switch (this.environment) {
+            case "autopush-common":
+            case "staging-common":
+                this.endPoint = this.environment;
+                break;
             case "autopush":
                 this.endPoint = "autopush-aiplatform.sandbox.googleapis.com";
                 break;
@@ -510,6 +532,9 @@ class GeminiLiveAPI {
      * Closes the active WebSocket connection and stops bandwidth tracking.
      */
     disconnect() {
+        if (this.webRtcManager) {
+            this.webRtcManager.close();
+        }
         if (this.webSocket) {
             this.webSocket.close();
         }
@@ -545,6 +570,27 @@ class GeminiLiveAPI {
         try {
             const messageData = JSON.parse(messageEvent.data);
             const message = new GeminiLiveResponseMessage(messageData);
+            if (
+                message.type === "SETUP COMPLETE" &&
+                this.transportMode === "webrtc" &&
+                message.answerSdp &&
+                this.webRtcManager
+            ) {
+                console.log(
+                    "[WebRTC] Received answerSdp in setupComplete, completing WebRTC session..."
+                );
+                this.webRtcManager
+                    .completeSession(message.answerSdp)
+                    .catch((err) => {
+                        console.error(
+                            "[WebRTC] Failed to complete session with answerSdp:",
+                            err
+                        );
+                        this.onErrorMessage(
+                            `WebRTC answer negotiation failed: ${err.message}`
+                        );
+                    });
+            }
             console.log("onReceiveMessageCallBack this ", this);
             this.onReceiveResponse(message);
         } catch (error) {
@@ -564,18 +610,29 @@ class GeminiLiveAPI {
 
         this.webSocket.onclose = (event) => {
             console.log("websocket closed: ", event);
+            if (this.webRtcManager) {
+                this.webRtcManager.close();
+            }
             this.onErrorMessage("Connection closed");
         };
 
         this.webSocket.onerror = (event) => {
             console.log("websocket error: ", event);
+            if (this.webRtcManager) {
+                this.webRtcManager.close();
+            }
             this.onErrorMessage("Connection error");
         };
 
-        this.webSocket.onopen = (event) => {
+        this.webSocket.onopen = async (event) => {
             console.log("websocket open: ", event);
-            this.sendInitialSetupMessages();
-            this.onConnectionStarted();
+            try {
+                await this.sendInitialSetupMessages();
+                this.onConnectionStarted();
+            } catch (err) {
+                console.error("Failed during initial setup:", err);
+                this.onErrorMessage(`Setup failed: ${err.message}`);
+            }
         };
 
         this.webSocket.onmessage = this.onReceiveMessage.bind(this);
@@ -587,8 +644,10 @@ class GeminiLiveAPI {
             originalSend(data);
         };
 
-        // Start periodic bandwidth updates
-        this.updateBandwidthUsage();
+        // Start periodic bandwidth updates for WebSocket mode
+        if (this.transportMode !== "webrtc") {
+            this.updateBandwidthUsage();
+        }
     }
 
     /**
@@ -642,11 +701,16 @@ class GeminiLiveAPI {
     /**
      * Constructs and sends the initial WebSocket session setup message.
      */
-    sendInitialSetupMessages() {
+    async sendInitialSetupMessages() {
         console.log("start setting up");
         console.log("Setting up voice sample:" + this.customVoiceSample);
 
-        const modelUri = `projects/${this.projectId}/locations/${this.location}/publishers/google/models/${this.model}`;
+        const isCommonBag =
+            this.environment === "autopush-common" ||
+            this.environment === "staging-common";
+        const modelUri = isCommonBag
+            ? `models/${this.model}`
+            : `projects/${this.projectId}/locations/${this.location}/publishers/google/models/${this.model}`;
 
         const sessionSetupMessage = {
             setup: {
@@ -655,6 +719,26 @@ class GeminiLiveAPI {
                 avatar_config: this._buildAvatarConfig(),
             },
         };
+
+        if (this.enableInputTranscript) {
+            sessionSetupMessage.setup.input_audio_transcription = {};
+        }
+        if (this.enableOutputTranscript) {
+            sessionSetupMessage.setup.output_audio_transcription = {};
+        }
+
+        if (this.transportMode === "webrtc" && this.webRtcManager) {
+            const wantsVideo = this.responseModalities.includes("VIDEO");
+            console.log(
+                `[WebRTC] Generating SDP offer (wantsVideo=${wantsVideo})...`
+            );
+            const offerSdp = await this.webRtcManager.initiateSession({
+                wantsVideo,
+            });
+            sessionSetupMessage.setup.rtc_setup = {
+                offer_sdp: offerSdp,
+            };
+        }
 
         const toolsConfig = this._buildToolsConfig();
         if (toolsConfig) {
@@ -717,16 +801,23 @@ class GeminiLiveAPI {
     }
 
     _buildAvatarConfig() {
+        const isCommonBag =
+            this.environment === "autopush-common" ||
+            this.environment === "staging-common";
+        if (isCommonBag) {
+            if (this.customizedAvatarData) {
+                return {
+                    customized_avatar: {
+                        image_mime_type: this.customizedAvatarMimeType,
+                        image_data: this.customizedAvatarData,
+                    },
+                };
+            }
+            return {};
+        }
         const config = {
             avatar_name: "Piper",
         };
-    // Customized avatar config option (currently commented out in original specs):
-    // if (this.customizedAvatarData) {
-    //     config.customized_avatar = {
-    //         image_mime_type: this.customizedAvatarMimeType,
-    //         image_data: this.customizedAvatarData,
-        //     };
-        // }
         if (this.audioBitrate > 0) {
             config.audio_bitrate_bps = this.audioBitrate;
         }

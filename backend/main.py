@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import subprocess
 from typing import Any
 
 from aiohttp import web
@@ -17,9 +18,11 @@ import get_credentials
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Navigate to the frontend folder (assuming it's a sibling to the backend folder)
 FRONTEND_DIR = os.path.join(BASE_DIR, "..", "frontend")
+COMMON_BAG_PROXY_PAR = os.path.join(BASE_DIR, "common_bag_ws_proxy.par")
 # Constants
 DEBUG = False
 SERVICE_URL = "wss://{host}/ws/google.cloud.aiplatform.internal.LlmBidiService/BidiGenerateContent"
+COMMON_BAG_ENVIRONMENTS = frozenset({"autopush-common", "staging-common"})
 FR_SIMULATOR_MODEL = "gemini-2.5-pro"
 FR_SIMULATOR_PROMPT = """
 You're a function response simulator, your job is to provide a simulated function response, you'll be provided with all function names and their descriptions.
@@ -35,6 +38,11 @@ SESSION_MANAGER = session_management.SessionManager()
 
 # Flags
 PROJECT_ID = flags.DEFINE_string("project_id", None, "Google Cloud Project ID.")
+COMMON_BAG_WS_PORT = flags.DEFINE_integer(
+    "common_bag_ws_port",
+    8765,
+    "Local WebSocket port for the Beyond common BAG Stubby gateway.",
+)
 
 # --- ADAPTER CLASS ---
 
@@ -80,14 +88,19 @@ async def aiohttp_websocket_handler(request: web.Request) -> web.WebSocketRespon
     if not session_handler:
         return web.Response(text="No config record for session", status=404)
 
-    # Prepare aiohttp WS
-    ws = web.WebSocketResponse()
+    # Prepare aiohttp WS (64 MB max frame size for custom avatar images)
+    ws = web.WebSocketResponse(max_msg_size=64 * 1024 * 1024)
     await ws.prepare(request)
 
     # Wrap the aiohttp WS in the adapter to satisfy the shared dependency
     adapted_ws = AiohttpToWebsocketsAdapter(ws, request_path=request.path_qs)
 
-    liveapi_service_url = SERVICE_URL.format(host=session_handler.ws_host)
+    if session_handler.ws_host in COMMON_BAG_ENVIRONMENTS:
+        liveapi_service_url = (
+            f"ws://127.0.0.1:{COMMON_BAG_WS_PORT.value}/{session_handler.ws_host}"
+        )
+    else:
+        liveapi_service_url = SERVICE_URL.format(host=session_handler.ws_host)
     try:
         # Pass the ADAPTED websocket here
         wb_handler = websocket_handler.WebsocketHandler(
@@ -119,9 +132,9 @@ async def handle_fr_post_request(request: web.Request):
         request_body: dict[str, Any] = await request.json()
         # The entire body is the query for the function call simulation
         session_id = request_body.get("session_id")
-        chat_session: session_management.SessionBaseModel | None = (
-            await SESSION_MANAGER.search_item(session_id)
-        )
+        chat_session: (
+            session_management.SessionBaseModel | None
+        ) = await SESSION_MANAGER.search_item(session_id)
         if not chat_session:
             return web.json_response(
                 {"error": "Chat session not initialized"}, status=503
@@ -169,7 +182,10 @@ async def handle_control_request(request: web.Request):
             location = request_body.get("location")
             endpoint = request_body.get("endpoint")
 
-            ws_host = f"{location}-{endpoint}"
+            if endpoint in COMMON_BAG_ENVIRONMENTS:
+                ws_host = endpoint
+            else:
+                ws_host = f"{location}-{endpoint}"
 
             logging.info(
                 "Websocket host for session %s is set to: %s", session_id, ws_host
@@ -178,9 +194,21 @@ async def handle_control_request(request: web.Request):
             if session_handler and session_handler.websocket_handler:
                 return web.json_response({"error": "Already running"}, status=409)
 
-            gemini_chat_session, used_project_id = await asyncio.to_thread(
-                initialize_gemini_chat_session, location
-            )
+            try:
+                gemini_chat_session, used_project_id = await asyncio.to_thread(
+                    initialize_gemini_chat_session, location
+                )
+            except Exception as err:
+                if endpoint in COMMON_BAG_ENVIRONMENTS:
+                    logging.warning(
+                        "Skipping FR chat session init for common BAG (%s): %s",
+                        endpoint,
+                        err,
+                    )
+                    gemini_chat_session = None
+                    used_project_id = PROJECT_ID.value or "cloud-llm-preview1"
+                else:
+                    raise
             session_handler = session_management.SessionBaseModel(
                 session_id=session_id, ws_host=ws_host, fr_session=gemini_chat_session
             )
@@ -254,16 +282,34 @@ async def create_app():
 
 async def main_async():
     logging.set_verbosity(logging.DEBUG if DEBUG else logging.INFO)
+    proxy_proc = None
+    if os.path.exists(COMMON_BAG_PROXY_PAR):
+        logging.info(
+            "Starting local Common BAG Stubby gateway (%s) on port %d...",
+            COMMON_BAG_PROXY_PAR,
+            COMMON_BAG_WS_PORT.value,
+        )
+        proxy_proc = subprocess.Popen(
+            [
+                COMMON_BAG_PROXY_PAR,
+                f"--port={COMMON_BAG_WS_PORT.value}",
+            ]
+        )
+
     app = await create_app()
     port = int(os.environ.get("PORT", 8080))
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
+    site = web.TCPSite(runner, None, port)
     await site.start()
 
     logging.info(f"Server unified on port {port}")
-    await asyncio.Event().wait()
+    try:
+        await asyncio.Event().wait()
+    finally:
+        if proxy_proc is not None and proxy_proc.poll() is None:
+            proxy_proc.terminate()
 
 
 if __name__ == "__main__":

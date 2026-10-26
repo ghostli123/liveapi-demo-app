@@ -452,7 +452,31 @@ class LiveVideoOutputManager {
         });
     }
 
-    playVideoChunk(base64Chunk) {
+    playVideoChunk(base64Chunk, mimeType = "") {
+        if (
+            mimeType === "video/jpeg2000" ||
+            mimeType === "video/jpeg" ||
+            mimeType.startsWith("image/")
+        ) {
+            let imgEl = document.getElementById("avatar_frame_img");
+            const video = document.getElementById("video_player");
+            if (!imgEl && video && video.parentElement) {
+                imgEl = document.createElement("img");
+                imgEl.id = "avatar_frame_img";
+                imgEl.style.width = "100%";
+                imgEl.style.height = "100%";
+                imgEl.style.objectFit = "contain";
+                video.parentElement.appendChild(imgEl);
+            }
+            if (video) {
+                video.style.display = "none";
+            }
+            if (imgEl) {
+                imgEl.style.display = "block";
+                imgEl.src = `data:image/jpeg;base64,${base64Chunk}`;
+            }
+            return;
+        }
         const arrayBuffer = LiveVideoOutputManager.base64ToArrayBuffer(base64Chunk);
         this.chunkQueue.push(arrayBuffer);
         this.recordedChunks.push(arrayBuffer);
@@ -482,7 +506,22 @@ class LiveVideoOutputManager {
     }
 
     resetPlayer() {
-        this.mediaSource.endOfStream();
+        if (this.mediaSource && this.mediaSource.readyState === "open") {
+            try {
+                this.mediaSource.endOfStream();
+            } catch (e) {
+                console.warn("resetPlayer endOfStream warning:", e);
+            }
+        }
+        const imgEl = document.getElementById("avatar_frame_img");
+        if (imgEl) {
+            imgEl.style.display = "none";
+            imgEl.src = "";
+        }
+        const video = document.getElementById("video_player");
+        if (video) {
+            video.style.display = "block";
+        }
         this.chunkQueue = [];
         this.recordedChunks = [];
         this.sourceBuffer = null;
@@ -497,6 +536,287 @@ class LiveVideoOutputManager {
             bytes[i] = binaryString.charCodeAt(i);
         }
         return bytes.buffer;
+    }
+}
+
+class G3RtcWebRtcManager {
+    constructor(videoPlayerElement) {
+        this.videoPlayerElement = videoPlayerElement;
+        this.pc = null;
+        this.dataChannel = null;
+        this.audioSender = null;
+        this.videoSender = null;
+        this.remoteStream = null;
+        this.micStream = null;
+        this.statsInterval = null;
+        this.lastBytesReceived = 0;
+        this.lastBytesSent = 0;
+        this.lastStatsTimeMs = 0;
+    }
+
+    static applyG3rtcAttributesToSdp(sdp, midToGroupId) {
+        const lines = sdp.split("\r\n");
+        const resultLines = [];
+        for (const line of lines) {
+            resultLines.push(line);
+            if (line.startsWith("a=mid:")) {
+                const mid = line.substring(6).trim();
+                const groupId = midToGroupId.get(mid);
+                if (groupId) {
+                    resultLines.push(`a=g3rtc-attrs group-id:${groupId}`);
+                }
+            }
+        }
+        return resultLines.join("\r\n");
+    }
+
+    async initiateSession({ wantsVideo = true } = {}) {
+        this.close();
+
+        this.pc = new RTCPeerConnection({
+            iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+        });
+
+        this.pc.onconnectionstatechange = () => {
+            const state = this.pc ? this.pc.connectionState : "closed";
+            console.log("[WebRTC] connectionState:", state);
+            const stateEl = document.getElementById("webrtc-state");
+            if (stateEl) {
+                stateEl.textContent = state;
+            }
+        };
+
+        this.dataChannel = this.pc.createDataChannel("g3rtc-media-stats");
+
+        const transceiverToGroupId = new Map();
+        const sendStreamGroupId = crypto.randomUUID();
+
+        const sendAudioTransceiver = this.pc.addTransceiver("audio", {
+            direction: "sendonly",
+        });
+        this.audioSender = sendAudioTransceiver.sender;
+        transceiverToGroupId.set(sendAudioTransceiver, sendStreamGroupId);
+
+        const sendVideoTransceiver = this.pc.addTransceiver("video", {
+            direction: "sendonly",
+        });
+        this.videoSender = sendVideoTransceiver.sender;
+        transceiverToGroupId.set(sendVideoTransceiver, sendStreamGroupId);
+
+        this.remoteStream = new MediaStream();
+        const recvGroupId = this.remoteStream.id || crypto.randomUUID();
+
+        const recvAudioTransceiver = this.pc.addTransceiver("audio", {
+            direction: "recvonly",
+        });
+        this.remoteStream.addTrack(recvAudioTransceiver.receiver.track);
+        transceiverToGroupId.set(recvAudioTransceiver, recvGroupId);
+
+        if (wantsVideo) {
+            const recvVideoTransceiver = this.pc.addTransceiver("video", {
+                direction: "recvonly",
+            });
+            this.remoteStream.addTrack(recvVideoTransceiver.receiver.track);
+            transceiverToGroupId.set(recvVideoTransceiver, recvGroupId);
+        }
+
+        await this.pc.setLocalDescription();
+        await this.waitForIceGathering(3000);
+        await this.pc.setLocalDescription();
+
+        const midToGroupId = new Map();
+        for (const [transceiver, groupId] of transceiverToGroupId.entries()) {
+            if (transceiver.mid) {
+                midToGroupId.set(transceiver.mid, groupId);
+            }
+        }
+
+        const rawSdp = this.pc.localDescription ? this.pc.localDescription.sdp : "";
+        return G3RtcWebRtcManager.applyG3rtcAttributesToSdp(rawSdp, midToGroupId);
+    }
+
+    waitForIceGathering(timeoutMs = 3000) {
+        if (!this.pc || this.pc.iceGatheringState === "complete") {
+            return Promise.resolve();
+        }
+        return new Promise((resolve) => {
+            const timer = setTimeout(() => {
+                if (this.pc) {
+                    this.pc.removeEventListener("icegatheringstatechange", checkState);
+                }
+                resolve();
+            }, timeoutMs);
+            const checkState = () => {
+                if (!this.pc || this.pc.iceGatheringState === "complete") {
+                    clearTimeout(timer);
+                    if (this.pc) {
+                        this.pc.removeEventListener("icegatheringstatechange", checkState);
+                    }
+                    resolve();
+                }
+            };
+            this.pc.addEventListener("icegatheringstatechange", checkState);
+        });
+    }
+
+    async completeSession(answerSdp) {
+        if (!this.pc) {
+            throw new Error("RTCPeerConnection is not initialized");
+        }
+        await this.pc.setRemoteDescription({
+            type: "answer",
+            sdp: answerSdp,
+        });
+
+        const videoEl =
+            this.videoPlayerElement || document.getElementById("video_player");
+        if (videoEl && this.remoteStream) {
+            videoEl.src = "";
+            videoEl.srcObject = this.remoteStream;
+            videoEl.muted = false;
+            videoEl.play().catch((err) => {
+                console.warn("[WebRTC] Auto-play warning on video_player:", err);
+            });
+        }
+        this.startStatsPolling();
+    }
+
+    async startMicrophone(deviceId = null) {
+        this.stopMicrophone();
+        const audioConstraints = {
+            channelCount: 1,
+            sampleRate: 16000,
+        };
+        if (deviceId) {
+            audioConstraints.deviceId = { exact: deviceId };
+        }
+        this.micStream = await navigator.mediaDevices.getUserMedia({
+            audio: audioConstraints,
+        });
+        const audioTrack = this.micStream.getAudioTracks()[0] || null;
+        if (this.audioSender && audioTrack) {
+            await this.audioSender.replaceTrack(audioTrack);
+        }
+    }
+
+    stopMicrophone() {
+        if (this.micStream) {
+            this.micStream.getTracks().forEach((t) => t.stop());
+            this.micStream = null;
+        }
+        if (this.audioSender) {
+            this.audioSender.replaceTrack(null).catch(() => {});
+        }
+    }
+
+    async attachVideoStream(stream) {
+        if (!this.videoSender || !stream) return;
+        const videoTrack = stream.getVideoTracks()[0] || null;
+        await this.videoSender.replaceTrack(videoTrack);
+    }
+
+    detachVideoStream() {
+        if (this.videoSender) {
+            this.videoSender.replaceTrack(null).catch(() => {});
+        }
+    }
+
+    startStatsPolling() {
+        this.stopStatsPolling();
+        this.lastBytesReceived = 0;
+        this.lastBytesSent = 0;
+        this.lastStatsTimeMs = performance.now();
+
+        this.statsInterval = setInterval(async () => {
+            if (!this.pc) return;
+            try {
+                const stats = await this.pc.getStats();
+                let bytesReceived = 0;
+                let bytesSent = 0;
+                let packetsLost = 0;
+                let framesPerSecond = null;
+
+                stats.forEach((report) => {
+                    if (report.type === "inbound-rtp") {
+                        bytesReceived += report.bytesReceived || 0;
+                        packetsLost += report.packetsLost || 0;
+                        if (
+                            report.kind === "video" &&
+                            typeof report.framesPerSecond === "number"
+                        ) {
+                            framesPerSecond = report.framesPerSecond;
+                        }
+                    } else if (report.type === "outbound-rtp") {
+                        bytesSent += report.bytesSent || 0;
+                    }
+                });
+
+                const nowMs = performance.now();
+                const elapsedSec = Math.max(0.001, (nowMs - this.lastStatsTimeMs) / 1000);
+                const downKbps =
+                    Math.max(0, bytesReceived - this.lastBytesReceived) /
+                    1024 /
+                    elapsedSec;
+                const upKbps =
+                    Math.max(0, bytesSent - this.lastBytesSent) / 1024 / elapsedSec;
+
+                this.lastBytesReceived = bytesReceived;
+                this.lastBytesSent = bytesSent;
+                this.lastStatsTimeMs = nowMs;
+
+                const downEl = document.getElementById("download-speed");
+                const upEl = document.getElementById("upload-speed");
+                const fpsEl = document.getElementById("webrtc-fps");
+                const lossEl = document.getElementById("webrtc-packet-loss");
+
+                if (downEl) downEl.textContent = downKbps.toFixed(2);
+                if (upEl) upEl.textContent = upKbps.toFixed(2);
+                if (fpsEl) {
+                    fpsEl.textContent =
+                        framesPerSecond !== null ? framesPerSecond.toFixed(1) : "--";
+                }
+                if (lossEl) lossEl.textContent = String(packetsLost);
+            } catch (err) {
+                console.warn("[WebRTC] stats polling error:", err);
+            }
+        }, 2000);
+    }
+
+    stopStatsPolling() {
+        if (this.statsInterval) {
+            clearInterval(this.statsInterval);
+            this.statsInterval = null;
+        }
+    }
+
+    close() {
+        this.stopStatsPolling();
+        this.stopMicrophone();
+        this.detachVideoStream();
+        if (this.dataChannel) {
+            try {
+                this.dataChannel.close();
+            } catch (e) {}
+            this.dataChannel = null;
+        }
+        if (this.pc) {
+            try {
+                this.pc.close();
+            } catch (e) {}
+            this.pc = null;
+        }
+        this.audioSender = null;
+        this.videoSender = null;
+        this.remoteStream = null;
+        const videoEl =
+            this.videoPlayerElement || document.getElementById("video_player");
+        if (videoEl && videoEl.srcObject) {
+            videoEl.srcObject = null;
+        }
+        const stateEl = document.getElementById("webrtc-state");
+        if (stateEl) {
+            stateEl.textContent = "closed";
+        }
     }
 }
 
