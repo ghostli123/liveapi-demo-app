@@ -22,7 +22,14 @@ COMMON_BAG_PROXY_PAR = os.path.join(BASE_DIR, "common_bag_ws_proxy.par")
 # Constants
 DEBUG = False
 SERVICE_URL = "wss://{host}/ws/google.cloud.aiplatform.internal.LlmBidiService/BidiGenerateContent"
-COMMON_BAG_ENVIRONMENTS = frozenset({"autopush-common", "staging-common"})
+COMMON_BAG_ENVIRONMENTS = frozenset(
+    {
+        "autopush-common",
+        "staging-common",
+        "autopush-vertex-bidi",
+        "autopush-vertex-us-bidi",
+    }
+)
 FR_SIMULATOR_MODEL = "gemini-2.5-pro"
 FR_SIMULATOR_PROMPT = """
 You're a function response simulator, your job is to provide a simulated function response, you'll be provided with all function names and their descriptions.

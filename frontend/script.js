@@ -213,7 +213,10 @@ function handleEnvironmentChange() {
     const modelSelect = AppUI.getElement("liveApiModel");
     if (!modelSelect) return;
     const isCommon =
-        envVal === "autopush-common" || envVal === "staging-common";
+        envVal === "autopush-common" ||
+        envVal === "staging-common" ||
+        envVal === "autopush-vertex-bidi" ||
+        envVal === "autopush-vertex-us-bidi";
     const currentModel = modelSelect.value;
     if (!isCommon && COMMON_ONLY_MODELS.has(currentModel)) {
         modelSelect.value = "gemini-3.1-flash-live-preview-04-2026";
