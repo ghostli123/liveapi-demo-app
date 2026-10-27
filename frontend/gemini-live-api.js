@@ -330,6 +330,8 @@ class GeminiLiveAPI {
         switch (this.environment) {
             case "autopush-common":
             case "staging-common":
+            case "autopush-vertex-bidi":
+            case "autopush-vertex-us-bidi":
                 this.endPoint = this.environment;
                 break;
             case "autopush":
@@ -708,7 +710,9 @@ class GeminiLiveAPI {
 
         const isCommonBag =
             this.environment === "autopush-common" ||
-            this.environment === "staging-common";
+            this.environment === "staging-common" ||
+            this.environment === "autopush-vertex-bidi" ||
+            this.environment === "autopush-vertex-us-bidi";
         let resolvedModel = this.model;
         if (
             !isCommonBag &&
@@ -814,7 +818,9 @@ class GeminiLiveAPI {
     _buildAvatarConfig() {
         const isCommonBag =
             this.environment === "autopush-common" ||
-            this.environment === "staging-common";
+            this.environment === "staging-common" ||
+            this.environment === "autopush-vertex-bidi" ||
+            this.environment === "autopush-vertex-us-bidi";
         if (isCommonBag) {
             if (this.customizedAvatarData) {
                 return {
