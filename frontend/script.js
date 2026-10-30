@@ -221,7 +221,7 @@ function handleEnvironmentChange() {
     if (!isCommon && COMMON_ONLY_MODELS.has(currentModel)) {
         modelSelect.value = "gemini-3.1-flash-live-preview-04-2026";
     } else if (isCommon && !COMMON_ONLY_MODELS.has(currentModel)) {
-        modelSelect.value = "live_avatar_rev23_rc4";
+        modelSelect.value = "live_avatar_v2_rev25_rc2";
     }
 }
 

@@ -334,6 +334,11 @@ class GeminiLiveAPI {
             case "autopush-vertex-us-bidi":
                 this.endPoint = this.environment;
                 break;
+            case "autopush-us-rep":
+            case "autopush-aiplatform.us.rep.sandbox.googleapis.com":
+                this.endPoint =
+                    "autopush-aiplatform.us.rep.sandbox.googleapis.com";
+                break;
             case "autopush":
                 this.endPoint = "autopush-aiplatform.sandbox.googleapis.com";
                 break;
@@ -731,9 +736,12 @@ class GeminiLiveAPI {
             setup: {
                 model: modelUri,
                 generation_config: this._buildGenerationConfig(),
-                avatar_config: this._buildAvatarConfig(),
             },
         };
+        const avatarConfig = this._buildAvatarConfig();
+        if (avatarConfig && Object.keys(avatarConfig).length > 0) {
+            sessionSetupMessage.setup.avatar_config = avatarConfig;
+        }
 
         if (this.enableInputTranscript) {
             sessionSetupMessage.setup.input_audio_transcription = {};
@@ -816,25 +824,18 @@ class GeminiLiveAPI {
     }
 
     _buildAvatarConfig() {
-        const isCommonBag =
-            this.environment === "autopush-common" ||
-            this.environment === "staging-common" ||
-            this.environment === "autopush-vertex-bidi" ||
-            this.environment === "autopush-vertex-us-bidi";
-        if (isCommonBag) {
-            if (this.customizedAvatarData) {
-                return {
-                    customized_avatar: {
-                        image_mime_type: this.customizedAvatarMimeType,
-                        image_data: this.customizedAvatarData,
-                    },
-                };
-            }
-            return {};
+        if (!this.responseModalities.includes("VIDEO")) {
+            return null;
         }
-        const config = {
-            avatar_name: "Piper",
-        };
+        const config = {};
+        if (this.customizedAvatarData) {
+            config.customized_avatar = {
+                image_mime_type: this.customizedAvatarMimeType,
+                image_data: this.customizedAvatarData,
+            };
+        } else {
+            config.avatar_name = "Piper";
+        }
         if (this.audioBitrate > 0) {
             config.audio_bitrate_bps = this.audioBitrate;
         }
