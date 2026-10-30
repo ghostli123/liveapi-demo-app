@@ -198,6 +198,8 @@ async def handle_control_request(request: web.Request):
 
             if endpoint in COMMON_BAG_ENVIRONMENTS:
                 ws_host = endpoint
+            elif endpoint and (".rep." in endpoint or endpoint.startswith("global-")):
+                ws_host = endpoint
             else:
                 ws_host = f"{location}-{endpoint}"
 
@@ -208,21 +210,19 @@ async def handle_control_request(request: web.Request):
             if session_handler and session_handler.websocket_handler:
                 return web.json_response({"error": "Already running"}, status=409)
 
+            fr_location = "us-central1" if location in ("us", "global") else location
             try:
                 gemini_chat_session, used_project_id = await asyncio.to_thread(
-                    initialize_gemini_chat_session, location
+                    initialize_gemini_chat_session, fr_location
                 )
             except Exception as err:
-                if endpoint in COMMON_BAG_ENVIRONMENTS:
-                    logging.warning(
-                        "Skipping FR chat session init for common BAG (%s): %s",
-                        endpoint,
-                        err,
-                    )
-                    gemini_chat_session = None
-                    used_project_id = PROJECT_ID.value or "cloud-llm-preview1"
-                else:
-                    raise
+                logging.warning(
+                    "Skipping FR chat session init for endpoint %s: %s",
+                    endpoint,
+                    err,
+                )
+                gemini_chat_session = None
+                used_project_id = PROJECT_ID.value or "cloud-llm-preview1"
             session_handler = session_management.SessionBaseModel(
                 session_id=session_id, ws_host=ws_host, fr_session=gemini_chat_session
             )

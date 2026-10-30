@@ -507,7 +507,10 @@
         </md-outlined-select>
         <md-outlined-text-field id="location" label="Location" value="us-central1"></md-outlined-text-field>
         <md-outlined-select label="Environment" id="envApiHost">
-          <md-select-option selected value="autopush-vertex-us-bidi">
+          <md-select-option selected value="autopush-us-rep">
+            <div slot="headline">autopush-aiplatform.us.rep (Cardolan mREP)</div>
+          </md-select-option>
+          <md-select-option value="autopush-vertex-us-bidi">
             <div slot="headline">autopush-vertex-us-bidi (Vertex BAG Direct)</div>
           </md-select-option>
           <md-select-option value="autopush-common">
@@ -527,11 +530,11 @@
           </md-select-option>
         </md-outlined-select>
         <md-outlined-select label="Model" id="liveApiModel">
-          <md-select-option selected value="live_avatar_rev23_rc4">
-            <div slot="headline">live_avatar_rev23_rc4 (Common Avatar)</div>
-          </md-select-option>
-          <md-select-option value="live_avatar_v2_rev25_rc2">
+          <md-select-option selected value="live_avatar_v2_rev25_rc2">
             <div slot="headline">live_avatar_v2_rev25_rc2 (Common Avatar V2)</div>
+          </md-select-option>
+          <md-select-option value="live_avatar_rev23_rc4">
+            <div slot="headline">live_avatar_rev23_rc4 (Common Avatar)</div>
           </md-select-option>
           <md-select-option value="gemini_api_beyond_live_rev23_rc3">
             <div slot="headline">gemini_api_beyond_live_rev23_rc3 (Common Audio)</div>
