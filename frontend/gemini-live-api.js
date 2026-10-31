@@ -339,6 +339,11 @@ class GeminiLiveAPI {
                 this.endPoint =
                     "autopush-aiplatform.us.rep.sandbox.googleapis.com";
                 break;
+            case "staging-us-rep":
+            case "staging-aiplatform.us.rep.sandbox.googleapis.com":
+                this.endPoint =
+                    "staging-aiplatform.us.rep.sandbox.googleapis.com";
+                break;
             case "autopush":
                 this.endPoint = "autopush-aiplatform.sandbox.googleapis.com";
                 break;
