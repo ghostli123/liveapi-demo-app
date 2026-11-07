@@ -344,6 +344,10 @@ class GeminiLiveAPI {
                 this.endPoint =
                     "staging-aiplatform.us.rep.sandbox.googleapis.com";
                 break;
+            case "prod-us-rep":
+            case "aiplatform.us.rep.googleapis.com":
+                this.endPoint = "aiplatform.us.rep.googleapis.com";
+                break;
             case "autopush":
                 this.endPoint = "autopush-aiplatform.sandbox.googleapis.com";
                 break;
@@ -514,6 +518,8 @@ class GeminiLiveAPI {
                 this.environment === "autopush-vertex-us-bidi"
             ) {
                 this.setApiHost("autopush");
+            } else if (this.environment === "prod-us-rep") {
+                this.setApiHost("prod");
             }
         }
         const postRequestBody = {

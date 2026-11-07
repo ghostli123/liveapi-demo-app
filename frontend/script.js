@@ -226,6 +226,11 @@ function isCommonEnvironment(envVal) {
     );
 }
 
+// Prod endpoints do not support WebRTC yet, so they always use WebSocket.
+function isWebSocketOnlyEnvironment(envVal) {
+    return envVal === "prod" || envVal === "prod-us-rep";
+}
+
 function handleEnvironmentChange() {
     const envVal = AppUI.getValue("envApiHost");
     const modelSelect = AppUI.getElement("liveApiModel");
@@ -238,11 +243,13 @@ function handleEnvironmentChange() {
         modelSelect.value = "live_avatar_v2_rev25_rc2";
     } else if (
         US_CENTRAL1_REGIONAL_ONLY_MODELS.has(currentModel) &&
-        (envVal === "autopush-us-rep" || envVal === "staging-us-rep")
+        (envVal === "autopush-us-rep" ||
+            envVal === "staging-us-rep" ||
+            envVal === "prod-us-rep")
     ) {
         modelSelect.value = "gemini-3.1-flash-live-preview-04-2026";
     }
-    if (envVal === "prod") {
+    if (isWebSocketOnlyEnvironment(envVal)) {
         const transportSelect = AppUI.getElement("transportMode");
         if (transportSelect && transportSelect.value === "webrtc") {
             transportSelect.value = "websocket";
@@ -268,6 +275,8 @@ function handleModelChange() {
         envSelect.value = "staging";
     } else if (envVal === "autopush-us-rep" || isCommonEnvironment(envVal)) {
         envSelect.value = "autopush";
+    } else if (envVal === "prod-us-rep") {
+        envSelect.value = "prod";
     }
 }
 
@@ -802,7 +811,10 @@ function connectBtnClick() {
     handleModelChange();
 
     let transportMode = AppUI.getValue("transportMode", "webrtc");
-    if (AppUI.getValue("envApiHost") === "prod" && transportMode === "webrtc") {
+    if (
+        isWebSocketOnlyEnvironment(AppUI.getValue("envApiHost")) &&
+        transportMode === "webrtc"
+    ) {
         transportMode = "websocket";
         const transportSelect = AppUI.getElement("transportMode");
         if (transportSelect) {
