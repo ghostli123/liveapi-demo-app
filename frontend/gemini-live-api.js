@@ -753,7 +753,12 @@ class GeminiLiveAPI {
                 resolvedModel === "gemini_api_beyond_live_rev23_rc3" ||
                 resolvedModel === "gemini_live_rev25")
         ) {
-            resolvedModel = "gemini-3.1-flash-live-preview-04-2026";
+            // On prod mREP, gemini-3.8-live is served by the GRoot "bidi" pool,
+            // which supports WebRTC; gemini-3.1 models go to "genai-rapid".
+            resolvedModel =
+                this.environment === "prod-us-rep"
+                    ? "gemini-3.8-live"
+                    : "gemini-3.1-flash-live-preview-04-2026";
         }
         const modelUri = isCommonBag
             ? `models/${resolvedModel}`

@@ -231,21 +231,25 @@ function isWebSocketOnlyEnvironment(envVal) {
     return envVal === "prod";
 }
 
+// On prod mREP, gemini-3.8-live is served by the GRoot "bidi" pool, which
+// supports WebRTC; gemini-3.1 models go to "genai-rapid", which does not.
+const PROD_US_REP_MODEL = "gemini-3.8-live";
+
 function handleEnvironmentChange() {
     const envVal = AppUI.getValue("envApiHost");
     const modelSelect = AppUI.getElement("liveApiModel");
     if (!modelSelect) return;
     const isCommon = isCommonEnvironment(envVal);
     const currentModel = modelSelect.value;
-    if (!isCommon && COMMON_ONLY_MODELS.has(currentModel)) {
+    if (envVal === "prod-us-rep") {
+        modelSelect.value = PROD_US_REP_MODEL;
+    } else if (!isCommon && COMMON_ONLY_MODELS.has(currentModel)) {
         modelSelect.value = "gemini-3.1-flash-live-preview-04-2026";
     } else if (isCommon && !COMMON_ONLY_MODELS.has(currentModel)) {
         modelSelect.value = "live_avatar_v2_rev25_rc2";
     } else if (
         US_CENTRAL1_REGIONAL_ONLY_MODELS.has(currentModel) &&
-        (envVal === "autopush-us-rep" ||
-            envVal === "staging-us-rep" ||
-            envVal === "prod-us-rep")
+        (envVal === "autopush-us-rep" || envVal === "staging-us-rep")
     ) {
         modelSelect.value = "gemini-3.1-flash-live-preview-04-2026";
     }
