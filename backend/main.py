@@ -200,6 +200,19 @@ async def handle_control_request(request: web.Request):
                 ws_host = endpoint
             elif endpoint and (".rep." in endpoint or endpoint.startswith("global-")):
                 ws_host = endpoint
+            elif location in ("us", "eu") and endpoint in (
+                "autopush-aiplatform.sandbox.googleapis.com",
+                "staging-aiplatform.sandbox.googleapis.com",
+                "aiplatform.googleapis.com",
+            ):
+                prefix, rest = endpoint.split("aiplatform.", 1)
+                ws_host = f"{prefix}aiplatform.{location}.rep.{rest}"
+            elif location == "global" and endpoint in (
+                "autopush-aiplatform.sandbox.googleapis.com",
+                "staging-aiplatform.sandbox.googleapis.com",
+                "aiplatform.googleapis.com",
+            ):
+                ws_host = endpoint
             else:
                 ws_host = f"{location}-{endpoint}"
 

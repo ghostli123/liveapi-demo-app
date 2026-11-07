@@ -199,6 +199,11 @@ function initDOMEventListeners() {
     if (envSelect) {
         envSelect.addEventListener("change", handleEnvironmentChange);
     }
+
+    const modelSelect = AppUI.getElement("liveApiModel");
+    if (modelSelect) {
+        modelSelect.addEventListener("change", handleModelChange);
+    }
 }
 
 const COMMON_ONLY_MODELS = new Set([
@@ -208,20 +213,61 @@ const COMMON_ONLY_MODELS = new Set([
     "gemini_live_rev25",
 ]);
 
+const US_CENTRAL1_REGIONAL_ONLY_MODELS = new Set([
+    "gemini-3.5-live-early-exp",
+]);
+
+function isCommonEnvironment(envVal) {
+    return (
+        envVal === "autopush-common" ||
+        envVal === "staging-common" ||
+        envVal === "autopush-vertex-bidi" ||
+        envVal === "autopush-vertex-us-bidi"
+    );
+}
+
 function handleEnvironmentChange() {
     const envVal = AppUI.getValue("envApiHost");
     const modelSelect = AppUI.getElement("liveApiModel");
     if (!modelSelect) return;
-    const isCommon =
-        envVal === "autopush-common" ||
-        envVal === "staging-common" ||
-        envVal === "autopush-vertex-bidi" ||
-        envVal === "autopush-vertex-us-bidi";
+    const isCommon = isCommonEnvironment(envVal);
     const currentModel = modelSelect.value;
     if (!isCommon && COMMON_ONLY_MODELS.has(currentModel)) {
         modelSelect.value = "gemini-3.1-flash-live-preview-04-2026";
     } else if (isCommon && !COMMON_ONLY_MODELS.has(currentModel)) {
         modelSelect.value = "live_avatar_v2_rev25_rc2";
+    } else if (
+        US_CENTRAL1_REGIONAL_ONLY_MODELS.has(currentModel) &&
+        (envVal === "autopush-us-rep" || envVal === "staging-us-rep")
+    ) {
+        modelSelect.value = "gemini-3.1-flash-live-preview-04-2026";
+    }
+    if (envVal === "prod") {
+        const transportSelect = AppUI.getElement("transportMode");
+        if (transportSelect && transportSelect.value === "webrtc") {
+            transportSelect.value = "websocket";
+        }
+    }
+}
+
+function handleModelChange() {
+    const selectedModel = AppUI.getValue("liveApiModel");
+    if (!US_CENTRAL1_REGIONAL_ONLY_MODELS.has(selectedModel)) {
+        return;
+    }
+
+    const locationInput = AppUI.getElement("location");
+    if (locationInput && locationInput.value !== "us-central1") {
+        locationInput.value = "us-central1";
+    }
+
+    const envSelect = AppUI.getElement("envApiHost");
+    if (!envSelect) return;
+    const envVal = envSelect.value;
+    if (envVal === "staging-us-rep" || envVal === "staging-common") {
+        envSelect.value = "staging";
+    } else if (envVal === "autopush-us-rep" || isCommonEnvironment(envVal)) {
+        envSelect.value = "autopush";
     }
 }
 
@@ -753,7 +799,16 @@ function connectBtnClick() {
     setAppStatus("connecting");
     console.log("Connecting...");
 
-    const transportMode = AppUI.getValue("transportMode", "webrtc");
+    handleModelChange();
+
+    let transportMode = AppUI.getValue("transportMode", "webrtc");
+    if (AppUI.getValue("envApiHost") === "prod" && transportMode === "webrtc") {
+        transportMode = "websocket";
+        const transportSelect = AppUI.getElement("transportMode");
+        if (transportSelect) {
+            transportSelect.value = "websocket";
+        }
+    }
     AppState.geminiLiveApi.setTransportMode(transportMode);
     AppUI.setText(
         "active-transport",
