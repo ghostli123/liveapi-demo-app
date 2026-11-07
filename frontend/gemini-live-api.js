@@ -500,6 +500,22 @@ class GeminiLiveAPI {
      * @returns {Promise<void>}
      */
     async initBackendService() {
+        if (this.model === "gemini-3.5-live-early-exp") {
+            this.location = "us-central1";
+            if (
+                this.environment === "staging-us-rep" ||
+                this.environment === "staging-common"
+            ) {
+                this.setApiHost("staging");
+            } else if (
+                this.environment === "autopush-us-rep" ||
+                this.environment === "autopush-common" ||
+                this.environment === "autopush-vertex-bidi" ||
+                this.environment === "autopush-vertex-us-bidi"
+            ) {
+                this.setApiHost("autopush");
+            }
+        }
         const postRequestBody = {
             command: "connect",
             session_id: this.sessionId,
