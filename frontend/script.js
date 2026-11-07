@@ -226,9 +226,9 @@ function isCommonEnvironment(envVal) {
     );
 }
 
-// Prod endpoints do not support WebRTC yet, so they always use WebSocket.
+// Prod Vertex does not support WebRTC yet, so it always uses WebSocket.
 function isWebSocketOnlyEnvironment(envVal) {
-    return envVal === "prod" || envVal === "prod-us-rep";
+    return envVal === "prod";
 }
 
 function handleEnvironmentChange() {
