@@ -219,6 +219,10 @@ class GeminiLiveAPI {
         this.toolBehavior = "BLOCKING";
 
         // Avatar Customization Settings
+        // The default project (live-api-webrtc-testing) is not on the
+        // EnableCustomAvatar allowlist, so use the stock "Piper" avatar unless
+        // this is turned on or an image is set via setCustomizedAvatar().
+        this.useCustomizedAvatar = false;
         this.customizedAvatarData = "";
         this.customizedAvatarMimeType = "image/png";
 
@@ -476,10 +480,12 @@ class GeminiLiveAPI {
      * @returns {Promise<void>}
      */
     async prepare() {
-        console.log("prepare(): Loading custom avatar...");
-        await this.loadCustomAvatar();
+        if (this.useCustomizedAvatar) {
+            console.log("prepare(): Loading custom avatar...");
+            await this.loadCustomAvatar();
+        }
 
-        console.log("prepare(): Avatar loaded. Initializing backend service...");
+        console.log("prepare(): Initializing backend service...");
         await this.initBackendService();
 
         console.log("prepare(): initBackendService successful. Setting up function declarations...");
