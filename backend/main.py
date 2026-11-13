@@ -30,7 +30,7 @@ COMMON_BAG_ENVIRONMENTS = frozenset(
         "autopush-vertex-us-bidi",
     }
 )
-FR_SIMULATOR_MODEL = "gemini-2.5-pro"
+FR_SIMULATOR_MODEL = "gemini-3.1-pro-preview"
 FR_SIMULATOR_PROMPT = """
 You're a function response simulator, your job is to provide a simulated function response, you'll be provided with all function names and their descriptions.
 
@@ -223,7 +223,7 @@ async def handle_control_request(request: web.Request):
             if session_handler and session_handler.websocket_handler:
                 return web.json_response({"error": "Already running"}, status=409)
 
-            fr_location = "us-central1" if location in ("us", "global") else location
+            fr_location = "global" if location in ("us", "global") else location
             try:
                 gemini_chat_session, used_project_id = await asyncio.to_thread(
                     initialize_gemini_chat_session, fr_location
@@ -235,7 +235,7 @@ async def handle_control_request(request: web.Request):
                     err,
                 )
                 gemini_chat_session = None
-                used_project_id = PROJECT_ID.value or "cloud-llm-preview1"
+                used_project_id = PROJECT_ID.value or "live-api-webrtc-testing"
             session_handler = session_management.SessionBaseModel(
                 session_id=session_id, ws_host=ws_host, fr_session=gemini_chat_session
             )
@@ -257,7 +257,7 @@ def initialize_gemini_chat_session(location: str):
     if not project_id:
         _, project_id = get_credentials.get_credentials()
         if not project_id:
-            project_id = "cloud-llm-preview1"
+            project_id = "live-api-webrtc-testing"
             logging.info(f"Using hardcoded fallback project ID: {project_id}")
         else:
             logging.info(f"Auto-detected project ID: {project_id}")

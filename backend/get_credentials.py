@@ -31,7 +31,7 @@ def _get_loas_oauth_credentials():
     expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
         minutes=50
     )
-    return _SimpleCredentials(token=token, expiry=expiry), "cloud-llm-preview1"
+    return _SimpleCredentials(token=token, expiry=expiry), "live-api-webrtc-testing"
 
 
 def get_credentials():

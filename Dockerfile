@@ -11,7 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # This copies everything from your local liveapi-demo-app into /app
 COPY . .
 
-ENV PROJECT_ID "cloud-llm-preview1"
+ENV PROJECT_ID "live-api-webrtc-testing"
 ENV LOCATION "us-central1"
 
 
