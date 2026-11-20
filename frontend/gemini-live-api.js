@@ -206,6 +206,9 @@ class GeminiLiveAPI {
         this.history = []; // Array to store bandwidth history for display
         this.googleSearchEnabled = false; // Enable/disable Google Search tool
         this.isSetupComplete = false; // Whether the server confirmed the setup message
+        this.latestResumptionHandle = ""; // Last handle the server sent this session
+        // Called when the server restarts and the session can be resumed.
+        this.onReconnectNeeded = () => {};
         console.log("Created Gemini Live API object: ", this);
     }
 
@@ -453,6 +456,7 @@ class GeminiLiveAPI {
         // A fresh ID per connection, so cleanup of the previous connection on
         // the backend can't remove this one.
         this.sessionId = crypto.randomUUID();
+        this.latestResumptionHandle = "";
         try {
             await this.prepare();
             console.log("connect(): Preparation successful. Starting WebSocket connection...");
@@ -460,6 +464,15 @@ class GeminiLiveAPI {
         } catch (error) {
             console.error("connect(): Connection sequence failed.", error);
         }
+    }
+
+    /**
+     * Whether the current session can be resumed: resumption is on and the
+     * server has sent this session a handle.
+     * @returns {boolean}
+     */
+    canResume() {
+        return this.enableSessionResumption && !!this.latestResumptionHandle;
     }
 
     /**
@@ -471,6 +484,7 @@ class GeminiLiveAPI {
     async resume(handle) {
         const oldWebSocket = this.webSocket;
         this.webSocket = null;
+        this.isSetupComplete = false;
         this.stopUpdateBandwidthUsage();
         const closed = oldWebSocket
             ? new Promise((resolve) => {
@@ -523,7 +537,7 @@ class GeminiLiveAPI {
             location: this.location,
         };
         try {
-            const response = await this.sendPostRequest(this.controlUrl, postRequestBody);
+            const response = await this.postWithRetry(this.controlUrl, postRequestBody);
             if (response?.project_id) {
                 this.setProjectId(response.project_id);
             }
@@ -567,6 +581,7 @@ class GeminiLiveAPI {
         }
         const webSocket = this.webSocket;
         this.webSocket = null;
+        this.isSetupComplete = false;
         if (webSocket) {
             webSocket.onclose = null;
             webSocket.onerror = null;
@@ -609,6 +624,8 @@ class GeminiLiveAPI {
         for (const message of events) {
             if (message.type === "SETUP COMPLETE") {
                 this.isSetupComplete = true;
+            } else if (message.type === "RESUMPTION") {
+                this.latestResumptionHandle = message.data;
             }
             if (
                 message.type === "SETUP COMPLETE" &&
@@ -676,9 +693,17 @@ class GeminiLiveAPI {
                 return; // Superseded by disconnect() or resume().
             }
             this.webSocket = null;
+            this.isSetupComplete = false;
             this.stopUpdateBandwidthUsage();
+            // 1001 means the backend is restarting (e.g. a deploy); resume
+            // the session on a new connection if possible.
+            const resumable = event.code === 1001 && this.canResume();
             if (this.webRtcManager) {
-                this.webRtcManager.close();
+                this.webRtcManager.close({ keepLocalMedia: resumable });
+            }
+            if (resumable) {
+                this.onReconnectNeeded();
+                return;
             }
             this.onErrorMessage(GeminiLiveAPI.describeClose(event));
         };
@@ -1109,6 +1134,29 @@ class GeminiLiveAPI {
         }
         console.log("Received data:", receivedData);
         return receivedData;
+    }
+
+    /**
+     * Like sendPostRequest(), but retries network failures (not HTTP errors),
+     * e.g. while the backend restarts.
+     * @param {string} url
+     * @param {Object} data
+     * @param {number} [attempts=4]
+     * @returns {Promise<Object>}
+     */
+    async postWithRetry(url, data, attempts = 4) {
+        for (let attempt = 1; ; attempt++) {
+            try {
+                return await this.sendPostRequest(url, data);
+            } catch (error) {
+                // fetch() rejects with a TypeError when the server is unreachable.
+                if (!(error instanceof TypeError) || attempt >= attempts) {
+                    throw error;
+                }
+                console.warn(`POST ${url} failed (${error.message}); retrying...`);
+                await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+            }
+        }
     }
 
     /**

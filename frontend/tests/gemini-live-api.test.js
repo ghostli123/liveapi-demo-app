@@ -17,7 +17,8 @@ class FakeWebSocket {
 const { GeminiLiveAPI, GeminiLiveResponseMessage } = loadScript(
     "gemini-live-api.js",
     ["GeminiLiveAPI", "GeminiLiveResponseMessage"],
-    { WebSocket: FakeWebSocket }
+    // Inert timers: the bandwidth meter's interval would keep the test alive.
+    { WebSocket: FakeWebSocket, setInterval: () => 1, clearInterval: () => {} }
 );
 
 // Values created inside the VM context have that context's prototypes, which
@@ -137,6 +138,49 @@ test("onConnectionStarted runs on setupComplete", () => {
     assert.equal(started, 0);
     api.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) });
     assert.equal(started, 1);
+});
+
+function connectedApi() {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    api.transportMode = "websocket";
+    api.webRtcManager = null;
+    api.onReceiveResponse = () => {};
+    api.errors = [];
+    api.reconnects = 0;
+    api.onErrorMessage = (message) => api.errors.push(message);
+    api.onReconnectNeeded = () => api.reconnects++;
+    api.setupWebSocketToService();
+    return api;
+}
+
+test("a server restart (1001) resumes when the session has a handle", () => {
+    const api = connectedApi();
+    api.setResumption(true, "");
+    api.onReceiveMessage({ data: JSON.stringify({ sessionResumptionUpdate: { newHandle: "h1" } }) });
+    api.webSocket.onclose({ code: 1001, reason: "Server restarting" });
+    assert.equal(api.reconnects, 1);
+    assert.equal(api.errors.length, 0);
+    assert.equal(api.latestResumptionHandle, "h1");
+});
+
+test("a server restart without a handle is reported as an error", () => {
+    const api = connectedApi();
+    api.setResumption(true, "");
+    api.webSocket.onclose({ code: 1001, reason: "Server restarting" });
+    assert.equal(api.reconnects, 0);
+    assert.deepEqual(plain(api.errors), ["Connection closed (code 1001): Server restarting"]);
+});
+
+test("disconnect() closes quietly and stops realtime input", () => {
+    const api = connectedApi();
+    const webSocket = api.webSocket;
+    webSocket.close = () => {};
+    api.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) });
+    api.disconnect();
+    assert.equal(api.webSocket, null);
+    assert.equal(api.isSetupComplete, false);
+    assert.equal(webSocket.onclose, null);
+    assert.equal(api.errors.length, 0);
 });
 
 test("describeClose explains how the server ended the session", () => {
