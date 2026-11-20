@@ -680,3 +680,8 @@ video {
 .preview-placeholder[hidden] {
   display: none;
 }
+
+.selectable {
+  user-select: all;
+  font-family: monospace;
+}

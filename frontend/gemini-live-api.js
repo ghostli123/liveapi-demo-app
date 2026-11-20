@@ -32,6 +32,7 @@ class GeminiLiveResponseMessage {
             const rtc = field(setupComplete, "rtcSetupComplete", "rtc_setup_complete");
             add("SETUP COMPLETE", "", {
                 answerSdp: field(rtc, "answerSdp", "answer_sdp") || "",
+                sessionId: field(setupComplete, "sessionId", "session_id") || "",
             });
         }
 

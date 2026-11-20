@@ -67,10 +67,11 @@ test("parseAll emits one event per model turn part", () => {
 
 test("parseAll accepts snake_case and reads the WebRTC answer", () => {
     const events = GeminiLiveResponseMessage.parseAll({
-        setup_complete: { rtc_setup_complete: { answer_sdp: "v=0" } },
+        setup_complete: { session_id: "s-1", rtc_setup_complete: { answer_sdp: "v=0" } },
     });
     assert.deepEqual(types(events), ["SETUP COMPLETE"]);
     assert.equal(events[0].answerSdp, "v=0");
+    assert.equal(events[0].sessionId, "s-1");
 });
 
 test("parseAll handles the remaining server message types", () => {
