@@ -140,11 +140,11 @@ def resolve_ws_host(endpoint: Any, location: Any) -> str:
         Without this check, anyone who can reach the server could have it send
         its access token to a host of their choosing.
     """
-    if endpoint in COMMON_BAG_ENVIRONMENTS:
-        return endpoint
     if not isinstance(endpoint, str) or not endpoint:
         raise ValueError("Missing endpoint")
-    if not isinstance(location, str) or not _LOCATION_RE.match(location):
+    if endpoint in COMMON_BAG_ENVIRONMENTS:
+        return endpoint
+    if not isinstance(location, str) or not _LOCATION_RE.fullmatch(location):
         raise ValueError(f"Invalid location: {location!r}")
 
     if ".rep." in endpoint or endpoint.startswith("global-"):
@@ -157,7 +157,7 @@ def resolve_ws_host(endpoint: Any, location: Any) -> str:
     else:
         ws_host = f"{location}-{endpoint}"
 
-    if not _HOSTNAME_RE.match(ws_host) or not any(
+    if not _HOSTNAME_RE.fullmatch(ws_host) or not any(
         ws_host.endswith(suffix) for suffix in ALLOWED_HOST_SUFFIXES.value
     ):
         raise ValueError(
@@ -177,15 +177,18 @@ def _json_error(message: str, status: int) -> web.Response:
 
 
 async def _read_json_object(request: web.Request) -> dict[str, Any] | None:
+    # ValueError covers invalid JSON, invalid UTF-8 and integers over Python's
+    # digit limit; RecursionError deep nesting; LookupError an unknown charset.
     try:
         body = await request.json()
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (ValueError, RecursionError, LookupError):
         return None
     return body if isinstance(body, dict) else None
 
 
 def _is_valid_session_id(session_id: Any) -> TypeGuard[str]:
-    return isinstance(session_id, str) and bool(_SESSION_ID_RE.match(session_id))
+    # fullmatch: with match, "$" also matches before a trailing newline.
+    return isinstance(session_id, str) and bool(_SESSION_ID_RE.fullmatch(session_id))
 
 
 # --- ADAPTER CLASS ---
@@ -498,7 +501,10 @@ async def reject_cross_origin(request: web.Request, handler):
     Host.
     """
     if request.method != "GET" or request.path == "/ws":
-        host = urllib.parse.urlsplit("//" + request.host).hostname
+        try:
+            host = urllib.parse.urlsplit("//" + request.host).hostname
+        except ValueError:  # e.g. an unclosed IPv6 bracket
+            return web.Response(text="Invalid Host header", status=400)
         if not is_allowed_host(host):
             logging.warning(
                 "Rejected %s %s for host %s", request.method, request.path, host
@@ -509,16 +515,20 @@ async def reject_cross_origin(request: web.Request, handler):
             )
         origin = request.headers.get("Origin")
         if origin is not None:
-            parts = urllib.parse.urlsplit(origin)
+            try:
+                parts = urllib.parse.urlsplit(origin)
+                origin_netloc, origin_host = parts.netloc, parts.hostname
+            except ValueError:  # Unparsable, so it can't be this server.
+                origin_netloc, origin_host = None, None
             # Only an exact match or an explicit --allowed_hosts entry: the
             # defaults above (e.g. any IP address) are fine for Host but not
             # for the page making the request.
             extra = explicitly_allowed_hosts()
-            origin_host = _normalize_hostname(parts.hostname)
+            origin_host = _normalize_hostname(origin_host)
             explicitly_allowed = bool(origin_host) and (
                 "*" in extra or origin_host in extra
             )
-            if parts.netloc != request.host and not explicitly_allowed:
+            if origin_netloc != request.host and not explicitly_allowed:
                 logging.warning(
                     "Rejected %s %s from origin %s",
                     request.method,
