@@ -13,7 +13,7 @@
 // to that port. The mock sends no avatar video or WebRTC answer, so those
 // checks become checks of the audio-only and WebSocket-fallback paths; the
 // function-response simulator (a Gemini call) is answered in the browser; and
-// a GoAway scenario runs, since only the mock can be told to send one.
+// the GoAway scenarios run, since only the mock can be told to send one.
 
 /* global document, customElements, AppState, handleSessionResumptionReconnect -- used in
    page.evaluate() callbacks, which run in the app page */
@@ -243,6 +243,40 @@ const scenarios = {
         check((await dialog(page)) === null, `GoAway showed: ${await dialog(page)}`);
         check(page.errors.length === 0, `console errors: ${page.errors}`);
         await page.click("#disconnectBtn");
+    },
+
+    async "repeated GoAways stop resuming after the limit"(browser) {
+        if (!MOCK) return "skipped (needs --mock)";
+        const page = await newPage(browser);
+        await connect(page, { transport: "websocket", modality: "AUDIO" });
+        await waitConnected(page);
+        await say(page, "Hello.", 1000);
+        await page.waitForFunction(() => AppState.geminiLiveApi.latestResumptionHandle, null, { timeout: 15000 });
+        const sessionIds = [];
+        for (let i = 0; i < 4; i++) {
+            sessionIds.push(await page.evaluate(() => AppState.geminiLiveApi.sessionId));
+            // The last connection isn't resumed, so let the mock close it soon.
+            await say(page, i < 3 ? "/goaway 30" : "/goaway 1", 0);
+            if (i === 3) break;
+            await page.waitForFunction(
+                (old) => AppState.geminiLiveApi.sessionId !== old && AppState.geminiLiveApi.isSetupComplete,
+                sessionIds[i],
+                { timeout: 15000 }
+            );
+        }
+        await page.waitForFunction(() => document.getElementById("dialog").open, null, { timeout: 15000 });
+        check(
+            (await page.evaluate(() => AppState.geminiLiveApi.sessionId)) === sessionIds[3],
+            "the fourth GoAway in a minute resumed"
+        );
+        const lines = await chat(page);
+        check(
+            lines.some((l) => l.kind.includes("chat-error") && /won't be resumed/.test(l.text)),
+            "no error for the GoAway that wasn't resumed"
+        );
+        check(/code 1001/.test(await dialog(page)), `dialog: ${await dialog(page)}`);
+        check(!(await page.evaluate(() => document.getElementById("connectBtn").disabled)), "Connect is disabled");
+        check(page.errors.length === 0, `console errors: ${page.errors}`);
     },
 
     async "voice turn from the microphone"() {
