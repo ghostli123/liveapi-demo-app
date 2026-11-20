@@ -35,26 +35,49 @@ async function newPage(browser) {
     return page;
 }
 
-async function connect(page, { transport, modality = "VIDEO", model = MODEL, before }) {
+// Selects a value, first adding an option for it if the page has none: the
+// select ignores values it has no option for, which would silently run the
+// scenario with the default. The frontend handles the common BAG environments
+// (used with scripts/mock_live_api.py) but doesn't list them.
+async function choose(page, id, value) {
     await page.evaluate(
-        ([environment, model, transport, modality]) => {
-            document.getElementById("envApiHost").value = environment;
-            document.getElementById("liveApiModel").value = model;
-            document.getElementById("transportMode").value = transport;
-            for (const radio of document.querySelectorAll('md-radio[name="responseModality"]')) {
-                radio.checked = radio.value === modality;
+        ([id, value]) => {
+            const select = document.getElementById(id);
+            const options = [...select.querySelectorAll("md-select-option")];
+            if (!options.some((option) => option.value === value)) {
+                const option = document.createElement("md-select-option");
+                option.value = value;
+                select.appendChild(option);
             }
         },
-        [ENVIRONMENT, model, transport, modality]
+        [id, value]
     );
-    if (before) await page.evaluate(before);
-    if (model === "no-such-model" || before?.includes("no-such-model")) {
-        await page.waitForFunction(() => {
-            const select = document.getElementById("liveApiModel");
-            select.value = "no-such-model";
-            return select.value === "no-such-model";
+    // A new option registers with the select asynchronously.
+    await page
+        .waitForFunction(
+            ([id, value]) => {
+                const select = document.getElementById(id);
+                select.value = value;
+                return select.value === value;
+            },
+            [id, value],
+            { timeout: 5000 }
+        )
+        .catch(() => {
+            throw new Error(`couldn't select ${id}=${value}`);
         });
-    }
+}
+
+async function connect(page, { transport, modality = "VIDEO", model = MODEL, before }) {
+    await choose(page, "envApiHost", ENVIRONMENT);
+    await choose(page, "liveApiModel", model);
+    await choose(page, "transportMode", transport);
+    await page.evaluate((modality) => {
+        for (const radio of document.querySelectorAll('md-radio[name="responseModality"]')) {
+            radio.checked = radio.value === modality;
+        }
+    }, modality);
+    if (before) await page.evaluate(before);
     await page.click("#connectBtn");
 }
 
@@ -151,12 +174,7 @@ const scenarios = {
 
     async "upstream errors are shown with their reason"(browser) {
         const page = await newPage(browser);
-        await connect(page, {
-            transport: "websocket",
-            before: `const option = document.createElement("md-select-option");
-                     option.value = "no-such-model";
-                     document.getElementById("liveApiModel").appendChild(option);`,
-        });
+        await connect(page, { transport: "websocket", model: "no-such-model" });
         await page.waitForFunction(() => document.getElementById("dialog").open, null, { timeout: 20000 });
         const message = await dialog(page);
         check(/code 1008/.test(message) && /no-such-model/.test(message), `dialog: ${message}`);
