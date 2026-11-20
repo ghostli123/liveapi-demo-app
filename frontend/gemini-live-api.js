@@ -515,6 +515,19 @@ class GeminiLiveAPI {
     }
 
     /**
+     * Decides what to do about a GoAway. Resuming counts against the same
+     * limit as resumes after a server restart, so a server that sends GoAway
+     * right after every setup can't cause a reconnect loop.
+     * @returns {"resume"|"unavailable"|"limited"} "resume" if the caller
+     *     should resume now, "unavailable" if the session has no handle or
+     *     resumption is off, "limited" if too many resumes happened recently.
+     */
+    goAwayAction() {
+        if (!this.canResume()) return "unavailable";
+        return this.takeAutoResume() ? "resume" : "limited";
+    }
+
+    /**
      * Replaces the current connection with one that resumes the session from
      * `handle`, e.g. after a GoAway. The old connection is closed quietly.
      * @param {string} handle - Session resumption handle.
@@ -700,12 +713,19 @@ class GeminiLiveAPI {
             }
             try {
                 this.onReceiveResponse(message);
-                if (message.type === "SETUP COMPLETE") {
-                    // Only now does the server accept input.
-                    this.onConnectionStarted();
-                }
             } catch (error) {
                 console.error(`Error handling ${message.type} event:`, error);
+            }
+            if (message.type === "SETUP COMPLETE") {
+                // Only now does the server accept input. This runs even if
+                // the handler above failed, or the UI would stay "connecting".
+                try {
+                    this.onConnectionStarted();
+                } catch (error) {
+                    console.error("Error starting the connection:", error);
+                    this.onErrorMessage(`Could not start the session: ${error.message}`);
+                    return; // The session has ended; drop the rest.
+                }
             }
         }
     }

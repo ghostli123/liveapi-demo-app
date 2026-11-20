@@ -647,14 +647,22 @@ function handleReceiveResponse(messageResponse) {
         }
         case "GO_AWAY":
             console.log("GoAway message received. Time left: ", messageResponse.data);
-            if (AppState.geminiLiveApi.canResume()) {
-                newSystemMessage("Connection expiring. Reconnecting for session resumption...");
-                handleSessionResumptionReconnect();
-            } else {
-                newSystemMessage(
-                    "The server will close this connection soon. Enable session resumption " +
-                    "to continue the conversation on a new connection."
-                );
+            switch (AppState.geminiLiveApi.goAwayAction()) {
+                case "resume":
+                    newSystemMessage("Connection expiring. Reconnecting for session resumption...");
+                    handleSessionResumptionReconnect();
+                    break;
+                case "limited":
+                    newErrorMessage(
+                        "The server keeps closing connections, so the session won't be resumed " +
+                        "again; it ends when the server closes this connection."
+                    );
+                    break;
+                default:
+                    newSystemMessage(
+                        "The server will close this connection soon. Enable session resumption " +
+                        "to continue the conversation on a new connection."
+                    );
             }
             break;
         case "INPUT_TRANSCRIPTION":

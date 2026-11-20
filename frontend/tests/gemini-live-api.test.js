@@ -151,6 +151,33 @@ test("onConnectionStarted runs on setupComplete", () => {
     assert.equal(started, 1);
 });
 
+test("onConnectionStarted runs even if the setupComplete handler throws", () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    let started = 0;
+    api.onConnectionStarted = () => started++;
+    api.onReceiveResponse = () => {
+        throw new Error("UI handler failed");
+    };
+    api.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) });
+    assert.equal(started, 1);
+});
+
+test("a failing onConnectionStarted is reported, not left 'connecting'", () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    const errors = [];
+    const handled = [];
+    api.onErrorMessage = (message) => errors.push(message);
+    api.onReceiveResponse = (message) => handled.push(message.type);
+    api.onConnectionStarted = () => {
+        throw new Error("no buttons");
+    };
+    api.onReceiveMessage({
+        data: JSON.stringify({ setupComplete: {}, sessionResumptionUpdate: { newHandle: "h" } }),
+    });
+    assert.deepEqual(plain(errors), ["Could not start the session: no buttons"]);
+    assert.deepEqual(plain(handled), ["SETUP COMPLETE"]); // Nothing after the session ended.
+});
+
 function connectedApi() {
     const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
     api.transportMode = "websocket";
@@ -334,6 +361,40 @@ test("automatic resumes after 1001 are limited", () => {
     }
     assert.equal(api.reconnects, 3);
     assert.equal(api.errors.length, 1);
+});
+
+test("GoAway resumes are limited, sharing the budget with 1001 resumes", () => {
+    const api = connectedApi();
+    assert.equal(api.goAwayAction(), "unavailable"); // Resumption is off.
+    api.setResumption(true, "");
+    assert.equal(api.goAwayAction(), "unavailable"); // No handle yet.
+    api.latestResumptionHandle = "h";
+    assert.equal(api.goAwayAction(), "resume");
+    assert.equal(api.goAwayAction(), "resume");
+    // A server restart takes the third resume of the minute...
+    api.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) });
+    api.webSocket.onclose({ code: 1001, reason: "" });
+    assert.equal(api.reconnects, 1);
+    // ...so the next GoAway doesn't resume, and neither does the next restart.
+    assert.equal(api.goAwayAction(), "limited");
+    api.setupWebSocketToService();
+    api.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) });
+    api.webSocket.onclose({ code: 1001, reason: "" });
+    assert.equal(api.reconnects, 1);
+    assert.equal(api.errors.length, 1);
+});
+
+test("connect() restores the automatic resume budget", async () => {
+    const api = connectedApi();
+    api.setResumption(true, "");
+    api.latestResumptionHandle = "h";
+    for (let i = 0; i < 3; i++) assert.equal(api.goAwayAction(), "resume");
+    assert.equal(api.goAwayAction(), "limited");
+    api.postWithRetry = async () => ({});
+    api.setupWebSocketToService = () => {};
+    await api.connect();
+    api.latestResumptionHandle = "h2";
+    assert.equal(api.goAwayAction(), "resume");
 });
 
 test("1001 before setup completed is an error, not a resume", () => {
