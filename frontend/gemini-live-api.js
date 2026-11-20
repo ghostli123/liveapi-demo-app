@@ -1,161 +1,106 @@
 /**
- * Represents a parsed response message from the Gemini Live API WebSocket connection.
+ * One event from a Gemini Live API server message. A single server message can
+ * hold several events (e.g. a transcript and the end of the turn), so messages
+ * are parsed with GeminiLiveResponseMessage.parseAll().
  */
 class GeminiLiveResponseMessage {
     /**
-     * @param {Object} data - Raw JSON message received from the WebSocket.
+     * @param {string} type - Event type, e.g. "AUDIO" or "END_OF_TURN".
+     * @param {*} [data=""] - Event payload.
+     * @param {Object} [extra] - Extra fields such as mimeType, answerSdp, finished.
      */
-    constructor(data) {
-        this.data = "";
-        this.type = "";
-        this.mimeType = undefined;
-
-        const serverContent = data?.serverContent || data?.server_content;
-        this.endOfTurn = serverContent?.turnComplete || serverContent?.turn_complete;
-        this.interrupt = serverContent?.interrupted;
-
-        this._parseMessage(data, serverContent);
+    constructor(type, data = "", extra = {}) {
+        this.type = type;
+        this.data = data;
+        Object.assign(this, extra);
     }
 
     /**
-     * Internal method to parse and resolve the message type and data.
-     * @param {Object} data - Raw WebSocket message data.
-     * @param {Object} serverContent - Extracted server content object.
+     * Splits a raw server message into events, in the order the UI should
+     * handle them. Accepts both camelCase and snake_case field names.
+     * @param {Object} raw - Parsed JSON message from the WebSocket.
+     * @returns {GeminiLiveResponseMessage[]}
      */
-    _parseMessage(data, serverContent) {
-        if (this._parseSetupComplete(data)) return;
-        if (this._parseFunctionCall(data)) return;
-        if (this._parseVadSignal(data)) return;
-        if (this._parseModelTurn(serverContent)) return;
-        if (this._parseResumption(data)) return;
-        if (this._parseGoAway(data)) return;
-        if (this._parseInputTranscription(serverContent)) return;
-        if (this._parseOutputTranscription(serverContent)) return;
-        if (this._parseTurnEvents()) return;
-    }
+    static parseAll(raw) {
+        const events = [];
+        const add = (type, data, extra) =>
+            events.push(new GeminiLiveResponseMessage(type, data, extra));
+        const field = (obj, camel, snake) => obj?.[camel] ?? obj?.[snake];
 
-    _parseSetupComplete(data) {
-        const setupComplete = data?.setupComplete || data?.setup_complete;
+        const setupComplete = field(raw, "setupComplete", "setup_complete");
         if (setupComplete) {
-            this.type = "SETUP COMPLETE";
-            const rtcSetupComplete =
-                setupComplete.rtcSetupComplete || setupComplete.rtc_setup_complete;
-            this.answerSdp =
-                rtcSetupComplete?.answerSdp || rtcSetupComplete?.answer_sdp || "";
-            return true;
-        }
-        return false;
-    }
-
-    _parseFunctionCall(data) {
-        const toolCalls = data?.toolCall?.functionCalls || data?.tool_call?.function_calls;
-        if (toolCalls) {
-            this.data = toolCalls;
-            this.type = "FUNCTION_CALL";
-            return true;
-        }
-        return false;
-    }
-
-    _parseVadSignal(data) {
-        if (data?.voiceActivityDetectionSignal || data?.voice_activity_detection_signal) {
-            this.type = "VAD_SIGNAL";
-            return true;
-        }
-        return false;
-    }
-
-    _parseModelTurn(serverContent) {
-        const modelTurn = serverContent?.modelTurn || serverContent?.model_turn;
-        const parts = modelTurn?.parts;
-        if (!parts?.length) return false;
-
-        const firstPart = parts[0];
-        if (firstPart.text) {
-            this.data = firstPart.text;
-            this.type = "TEXT";
-            return true;
+            const rtc = field(setupComplete, "rtcSetupComplete", "rtc_setup_complete");
+            add("SETUP COMPLETE", "", {
+                answerSdp: field(rtc, "answerSdp", "answer_sdp") || "",
+            });
         }
 
-        const inlineData = firstPart.inlineData || firstPart.inline_data || firstPart.video;
-        if (inlineData) {
-            this.data = inlineData.data;
-            const mimeType = inlineData.mimeType || inlineData.mime_type;
-            if (mimeType && (mimeType.startsWith("video/") || mimeType.startsWith("image/"))) {
-                this.type = "VIDEO";
-                this.mimeType = mimeType;
-            } else {
-                this.type = "AUDIO";
-                if (mimeType) {
-                    this.mimeType = mimeType;
+        const toolCall = field(raw, "toolCall", "tool_call");
+        const functionCalls = field(toolCall, "functionCalls", "function_calls");
+        if (functionCalls) {
+            add("FUNCTION_CALL", functionCalls);
+        }
+        const cancellation = field(raw, "toolCallCancellation", "tool_call_cancellation");
+        if (cancellation) {
+            add("FUNCTION_CALL_CANCELLATION", cancellation.ids || []);
+        }
+
+        if (field(raw, "voiceActivityDetectionSignal", "voice_activity_detection_signal")) {
+            add("VAD_SIGNAL");
+        }
+
+        const content = field(raw, "serverContent", "server_content");
+        if (content) {
+            if (field(content, "generationStarted", "generation_started")) {
+                add("GENERATION_STARTED");
+            }
+            const inputTranscription = field(content, "inputTranscription", "input_transcription");
+            if (inputTranscription) {
+                add("INPUT_TRANSCRIPTION", inputTranscription.text || "", {
+                    finished: !!inputTranscription.finished,
+                });
+            }
+            for (const part of field(content, "modelTurn", "model_turn")?.parts || []) {
+                if (part.text) {
+                    add("TEXT", part.text);
+                }
+                const inline = part.inlineData || part.inline_data || part.video;
+                if (inline?.data) {
+                    const mimeType = inline.mimeType || inline.mime_type || "";
+                    const isVideo = mimeType.startsWith("video/") || mimeType.startsWith("image/");
+                    add(isVideo ? "VIDEO" : "AUDIO", inline.data, { mimeType });
                 }
             }
-            return true;
+            const outputTranscription = field(content, "outputTranscription", "output_transcription");
+            if (outputTranscription) {
+                add("OUTPUT_TRANSCRIPTION", outputTranscription.text || "", {
+                    finished: !!outputTranscription.finished,
+                });
+            }
+            if (content.interrupted) {
+                add("INTERRUPT");
+            }
+            if (field(content, "turnComplete", "turn_complete")) {
+                add("END_OF_TURN");
+            }
         }
 
-        return false;
-    }
-
-    _parseResumption(data) {
-        const resumption = data?.sessionResumptionUpdate || data?.session_resumption_update;
-        if (resumption) {
-            this.type = "RESUMPTION";
-            this.data = resumption.newHandle || resumption.new_handle;
-            return true;
+        const resumption = field(raw, "sessionResumptionUpdate", "session_resumption_update");
+        const newHandle = field(resumption, "newHandle", "new_handle");
+        if (newHandle) {
+            add("RESUMPTION", newHandle);
         }
-        return false;
-    }
 
-    _parseGoAway(data) {
-        const goAway = data?.goAway || data?.go_away;
+        const goAway = field(raw, "goAway", "go_away");
         if (goAway) {
-            this.type = "GO_AWAY";
-            this.data = goAway.timeLeft || goAway.time_left;
-            return true;
+            add("GO_AWAY", field(goAway, "timeLeft", "time_left") || "");
         }
-        return false;
-    }
 
-    _parseInputTranscription(serverContent) {
-        const transcription = serverContent?.inputTranscription || serverContent?.input_transcription;
-        if (transcription) {
-            this.type = "INPUT_TRANSCRIPTION";
-            if (transcription.text) {
-                this.data = transcription.text;
-            } else if (transcription.finished) {
-                this.data = transcription.finished;
-            }
-            return true;
+        const usage = field(raw, "usageMetadata", "usage_metadata");
+        if (usage) {
+            add("USAGE", usage);
         }
-        return false;
-    }
-
-    _parseOutputTranscription(serverContent) {
-        const transcription = serverContent?.outputTranscription || serverContent?.output_transcription;
-        if (transcription) {
-            this.type = "OUTPUT_TRANSCRIPTION";
-            if (transcription.text) {
-                this.data = transcription.text;
-            } else if (transcription.finished) {
-                this.data = "Finished: " + transcription.finished;
-            }
-            return true;
-        }
-        return false;
-    }
-
-    _parseTurnEvents() {
-        if (this.endOfTurn) {
-            this.data = "END OF TURN";
-            this.type = "END_OF_TURN";
-            return true;
-        }
-        if (this.interrupt) {
-            this.data = "INTERRUPT";
-            this.type = "INTERRUPT";
-            return true;
-        }
-        return false;
+        return events;
     }
 }
 
@@ -252,6 +197,7 @@ class GeminiLiveAPI {
         this.intervalId = null; // Timer ID for interval updates
         this.history = []; // Array to store bandwidth history for display
         this.googleSearchEnabled = false; // Enable/disable Google Search tool
+        this.isSetupComplete = false; // Whether the server confirmed the setup message
         console.log("Created Gemini Live API object: ", this);
     }
 
@@ -423,8 +369,8 @@ class GeminiLiveAPI {
      * @param {number} videoBitrate - Video bitrate in bits per second.
      */
     setBitrates(audioBitrate, videoBitrate) {
-        this.audioBitrate = audioBitrate;
-        this.videoBitrate = videoBitrate;
+        this.audioBitrate = Number(audioBitrate) || 0;
+        this.videoBitrate = Number(videoBitrate) || 0;
     }
 
     /**
@@ -496,6 +442,9 @@ class GeminiLiveAPI {
      * Initiates the overall connection process: prepares the session and establishes the WebSocket.
      */
     async connect() {
+        // A fresh ID per connection, so cleanup of the previous connection on
+        // the backend can't remove this one.
+        this.sessionId = crypto.randomUUID();
         try {
             await this.prepare();
             console.log("connect(): Preparation successful. Starting WebSocket connection...");
@@ -503,6 +452,37 @@ class GeminiLiveAPI {
         } catch (error) {
             console.error("connect(): Connection sequence failed.", error);
         }
+    }
+
+    /**
+     * Replaces the current connection with one that resumes the session from
+     * `handle`, e.g. after a GoAway. The old connection is closed quietly.
+     * @param {string} handle - Session resumption handle.
+     * @returns {Promise<void>} Rejects if the new session could not be prepared.
+     */
+    async resume(handle) {
+        const oldWebSocket = this.webSocket;
+        this.webSocket = null;
+        this.stopUpdateBandwidthUsage();
+        const closed = oldWebSocket
+            ? new Promise((resolve) => {
+                oldWebSocket.onmessage = null;
+                oldWebSocket.onclose = () => resolve();
+                oldWebSocket.onerror = () => resolve();
+                if (oldWebSocket.readyState === WebSocket.CLOSED) {
+                    resolve();
+                } else {
+                    oldWebSocket.close(1000);
+                }
+            })
+            : Promise.resolve();
+
+        this.setResumption(true, handle);
+        // A new session ID keeps the backend from mixing up the two connections.
+        this.sessionId = crypto.randomUUID();
+        // Close the old connection while the backend prepares the new session.
+        await Promise.all([closed, this.prepare()]);
+        this.setupWebSocketToService();
     }
 
     /**
@@ -541,7 +521,7 @@ class GeminiLiveAPI {
             }
         } catch (error) {
             console.error("Error in initBackendService:", error);
-            this.onErrorMessage("Error initializing backend service.");
+            this.onErrorMessage(`Could not start the session: ${error.message}`);
             throw error;
         }
     }
@@ -563,22 +543,28 @@ class GeminiLiveAPI {
             await this.sendPostRequest(this.frUrl, funcDeclarationMessage);
         } catch (error) {
             console.error("Error in setupFuncDeclarationToService:", error);
-            this.onErrorMessage("Error setting up function declaration.");
+            this.onErrorMessage(`Could not set up function declarations: ${error.message}`);
             throw error;
         }
     }
 
     /**
-     * Closes the active WebSocket connection and stops bandwidth tracking.
+     * Closes the connection at the user's request. Unlike a close initiated by
+     * the server, this doesn't report an error.
      */
     disconnect() {
+        this.stopUpdateBandwidthUsage();
         if (this.webRtcManager) {
             this.webRtcManager.close();
         }
-        if (this.webSocket) {
-            this.webSocket.close();
+        const webSocket = this.webSocket;
+        this.webSocket = null;
+        if (webSocket) {
+            webSocket.onclose = null;
+            webSocket.onerror = null;
+            webSocket.onmessage = null;
+            webSocket.close(1000);
         }
-        this.stopUpdateBandwidthUsage();
     }
 
     /**
@@ -598,8 +584,6 @@ class GeminiLiveAPI {
      * @param {MessageEvent} messageEvent - The WebSocket message event.
      */
     onReceiveMessage(messageEvent) {
-        console.log("Message received: ", messageEvent);
-
         this.bytesIn += this.calculateByteSize(messageEvent.data);
 
         if (typeof messageEvent.data !== "string") {
@@ -607,9 +591,17 @@ class GeminiLiveAPI {
             return;
         }
 
+        let events;
         try {
-            const messageData = JSON.parse(messageEvent.data);
-            const message = new GeminiLiveResponseMessage(messageData);
+            events = GeminiLiveResponseMessage.parseAll(JSON.parse(messageEvent.data));
+        } catch (error) {
+            console.error("Failed to parse incoming WebSocket message as JSON:", error);
+            return;
+        }
+        for (const message of events) {
+            if (message.type === "SETUP COMPLETE") {
+                this.isSetupComplete = true;
+            }
             if (
                 message.type === "SETUP COMPLETE" &&
                 this.transportMode === "webrtc" &&
@@ -631,11 +623,31 @@ class GeminiLiveAPI {
                         );
                     });
             }
-            console.log("onReceiveMessageCallBack this ", this);
-            this.onReceiveResponse(message);
-        } catch (error) {
-            console.error("Failed to parse incoming WebSocket message as JSON:", error);
+            try {
+                this.onReceiveResponse(message);
+                if (message.type === "SETUP COMPLETE") {
+                    // Only now does the server accept input.
+                    this.onConnectionStarted();
+                }
+            } catch (error) {
+                console.error(`Error handling ${message.type} event:`, error);
+            }
         }
+    }
+
+    /**
+     * Describes why the server closed the connection, for showing to the user.
+     * @param {CloseEvent} event
+     * @returns {string}
+     */
+    static describeClose(event) {
+        if (event.code === 1000 && !event.reason) {
+            return "The session was closed by the server.";
+        }
+        if (event.code === 1006) {
+            return "Lost the connection to the server.";
+        }
+        return `Connection closed (code ${event.code})${event.reason ? `: ${event.reason}` : "."}`;
     }
 
     /**
@@ -646,41 +658,44 @@ class GeminiLiveAPI {
 
         const wsUrl = new URL(this.proxyUrl);
         wsUrl.searchParams.append("session_id", this.sessionId);
-        this.webSocket = new WebSocket(wsUrl);
+        const webSocket = new WebSocket(wsUrl);
+        this.webSocket = webSocket;
+        this.isSetupComplete = false;
 
-        this.webSocket.onclose = (event) => {
-            console.log("websocket closed: ", event);
+        webSocket.onclose = (event) => {
+            console.log("websocket closed: ", event.code, event.reason);
+            if (this.webSocket !== webSocket) {
+                return; // Superseded by disconnect() or resume().
+            }
+            this.webSocket = null;
+            this.stopUpdateBandwidthUsage();
             if (this.webRtcManager) {
                 this.webRtcManager.close();
             }
-            const reason = event && event.reason ? `: ${event.reason}` : "";
-            this.onErrorMessage(`Connection closed${reason}`);
+            this.onErrorMessage(GeminiLiveAPI.describeClose(event));
         };
 
-        this.webSocket.onerror = (event) => {
-            console.log("websocket error: ", event);
-            if (this.webRtcManager) {
-                this.webRtcManager.close();
-            }
-            this.onErrorMessage("Connection error");
+        // An error is always followed by a close event, which reports it.
+        webSocket.onerror = (event) => {
+            console.warn("websocket error: ", event);
         };
 
-        this.webSocket.onopen = async (event) => {
-            console.log("websocket open: ", event);
+        webSocket.onopen = async () => {
+            console.log("websocket open");
             try {
+                // onConnectionStarted() runs when the server confirms setup.
                 await this.sendInitialSetupMessages();
-                this.onConnectionStarted();
             } catch (err) {
                 console.error("Failed during initial setup:", err);
                 this.onErrorMessage(`Setup failed: ${err.message}`);
             }
         };
 
-        this.webSocket.onmessage = this.onReceiveMessage.bind(this);
+        webSocket.onmessage = this.onReceiveMessage.bind(this);
 
         // Override send to track outbound bandwidth
-        const originalSend = this.webSocket.send.bind(this.webSocket);
-        this.webSocket.send = (data) => {
+        const originalSend = webSocket.send.bind(webSocket);
+        webSocket.send = (data) => {
             this.bytesOut += this.calculateByteSize(data);
             originalSend(data);
         };
@@ -744,7 +759,6 @@ class GeminiLiveAPI {
      */
     async sendInitialSetupMessages() {
         console.log("start setting up");
-        console.log("Setting up voice sample:" + this.customVoiceSample);
 
         const isCommonBag =
             this.environment === "autopush-common" ||
@@ -830,7 +844,15 @@ class GeminiLiveAPI {
             sessionSetupMessage.setup.enable_speech_to_speech_translation = true;
         }
 
-        console.log("setup message: ", JSON.stringify(sessionSetupMessage));
+        // Abbreviate base64 payloads (voice sample, avatar image) in the log.
+        console.log(
+            "setup message: ",
+            JSON.stringify(sessionSetupMessage, (key, value) =>
+                typeof value === "string" && value.length > 500
+                    ? `<${value.length} chars>`
+                    : value
+            )
+        );
         this.sendMessage(sessionSetupMessage);
     }
 
@@ -894,9 +916,16 @@ class GeminiLiveAPI {
             if (!fcDef) {
                 fcDef = [];
             }
+            const declarations = Array.isArray(this.functionCallDefinition)
+                ? this.functionCallDefinition
+                : [this.functionCallDefinition];
+            // `behavior` belongs to each FunctionDeclaration, not the Tool.
+            // BLOCKING is the default, so it is only sent for NON_BLOCKING.
             fcDef.push({
-                function_declarations: this.functionCallDefinition,
-                behavior: this.toolBehavior,
+                function_declarations:
+                    this.toolBehavior === "NON_BLOCKING"
+                        ? declarations.map((d) => ({ ...d, behavior: "NON_BLOCKING" }))
+                        : declarations,
             });
         }
         return fcDef;
@@ -1015,6 +1044,11 @@ class GeminiLiveAPI {
      * @param {boolean} [isVideo=false] - Whether the input should be formatted as a video frame or media chunk.
      */
     sendRealtimeInputMessage(data, mimeType, isVideo = false) {
+        if (!this.isSetupComplete) {
+            // The server rejects input before setup completes, e.g. while
+            // reconnecting for session resumption. Drop it.
+            return;
+        }
         const message = {
             realtime_input: isVideo
                 ? { video: { mime_type: mimeType, data: data } }
@@ -1047,27 +1081,26 @@ class GeminiLiveAPI {
      * @returns {Promise<Object>} Parsed JSON response.
      */
     async sendPostRequest(url, data) {
+        const response = await fetch(url, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify(data),
+        });
+
+        let receivedData = null;
         try {
-            const response = await fetch(url, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify(data),
-            });
-
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-
-            const receivedData = await response.json();
-            console.log("Received data:", receivedData);
-            return receivedData;
-        } catch (error) {
-            console.error("Error sending POST request:", error);
-            this.onErrorMessage(`Error sending POST request: ${error.message}`);
-            throw error;
+            receivedData = await response.json();
+        } catch {
+            // Not JSON; fall through to the status check.
         }
+        if (!response.ok) {
+            const detail = receivedData?.error || response.statusText;
+            throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+        }
+        console.log("Received data:", receivedData);
+        return receivedData;
     }
 
     /**

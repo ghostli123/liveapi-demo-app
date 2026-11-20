@@ -90,30 +90,8 @@ function initApplicationManagers() {
 
     AppState.geminiLiveApi.onErrorMessage = (message) => {
         AppUI.showModal(message);
-        setAppStatus("disconnected");
-        stopAudioInput();
-
-        AppUI.setHidden("micBtn", true);
-        AppUI.setHidden("micOffBtn", false);
-        const micOffBtn = AppUI.getElement("micOffBtn");
-        if (micOffBtn) {
-            const iconBtn = micOffBtn.querySelector("md-filled-icon-button");
-            if (iconBtn) iconBtn.disabled = true;
-        }
-
-        AppUI.setHidden("cameraBtn", true);
-        AppUI.setHidden("cameraOffBtn", false);
-        const cameraOffBtn = AppUI.getElement("cameraOffBtn");
-        if (cameraOffBtn) {
-            const iconBtn = cameraOffBtn.querySelector("md-filled-icon-button");
-            if (iconBtn) iconBtn.disabled = true;
-        }
-
-        const screenBtn = AppUI.getElement("screenBtn");
-        if (screenBtn) {
-            const iconBtn = screenBtn.querySelector("md-filled-icon-button");
-            if (iconBtn) iconBtn.disabled = true;
-        }
+        newErrorMessage(message);
+        endSession();
     };
 
     AppState.geminiLiveApi.onReceiveResponse = handleReceiveResponse;
@@ -154,8 +132,10 @@ window.addEventListener("load", () => {
     console.log("Hello Gemini Realtime Demo!");
 
     initDOMEventListeners();
-    setAvailableCamerasOptions();
-    setAvailableMicrophoneOptions();
+    refreshDeviceLists();
+    if (navigator.mediaDevices) {
+        navigator.mediaDevices.addEventListener("devicechange", refreshDeviceLists);
+    }
     toggleAvatarMode();
 });
 
@@ -203,6 +183,16 @@ function initDOMEventListeners() {
     const modelSelect = AppUI.getElement("liveApiModel");
     if (modelSelect) {
         modelSelect.addEventListener("change", handleModelChange);
+    }
+
+    const textMessage = AppUI.getElement("text-message");
+    if (textMessage) {
+        textMessage.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+                event.preventDefault();
+                newUserMessage();
+            }
+        });
     }
 }
 
@@ -332,26 +322,26 @@ function getSelectedResponseModality() {
 }
 
 // --- Live API Response Coordinator ---
-function handleReceiveResponse(messageResponse) {
-    console.log("Message response received, type: " + messageResponse.type);
+function isWebRtcTransport() {
+    return AppState.geminiLiveApi && AppState.geminiLiveApi.transportMode === "webrtc";
+}
 
+function handleReceiveResponse(messageResponse) {
     switch (messageResponse.type) {
         case "SETUP COMPLETE":
-            if (
-                AppState.geminiLiveApi &&
-                AppState.geminiLiveApi.transportMode === "webrtc" &&
-                messageResponse.answerSdp
-            ) {
-                newModelMessage("Setup complete (WebRTC SDP answer negotiated).");
+            if (isWebRtcTransport() && messageResponse.answerSdp) {
+                newSystemMessage("Setup complete (WebRTC SDP answer negotiated).");
             } else {
-                newModelMessage("Setup complete.");
+                newSystemMessage("Setup complete.");
             }
             break;
+        case "GENERATION_STARTED":
+            closeTranscriptLine("input");
+            setModelSpeaking(true);
+            break;
         case "AUDIO":
-            if (
-                AppState.geminiLiveApi &&
-                AppState.geminiLiveApi.transportMode === "webrtc"
-            ) {
+            setModelSpeaking(true);
+            if (isWebRtcTransport()) {
                 break;
             }
             if (AppState.liveAudioOutputManager) {
@@ -359,10 +349,7 @@ function handleReceiveResponse(messageResponse) {
             }
             break;
         case "VIDEO":
-            if (
-                AppState.geminiLiveApi &&
-                AppState.geminiLiveApi.transportMode === "webrtc"
-            ) {
+            if (isWebRtcTransport()) {
                 break;
             }
             if (AppState.liveVideoOutputManager) {
@@ -373,46 +360,58 @@ function handleReceiveResponse(messageResponse) {
             }
             break;
         case "TEXT":
-            console.log("Gemini said: ", messageResponse.data);
-            newModelMessage(messageResponse.data);
+            closeTranscriptLine("input");
+            setModelSpeaking(true);
+            appendTranscript("output", messageResponse.data);
             break;
-        case "RESUMPTION":
+        case "RESUMPTION": {
             console.log("Resumption handle received: ", messageResponse.data);
             const enableResumption = AppUI.getElement("resumption");
             if (enableResumption) enableResumption.checked = true;
 
             const resumptionHandle = AppUI.getElement("handle");
             if (resumptionHandle) resumptionHandle.value = messageResponse.data;
-
-            newModelMessage("New Resumption Handle ID: " + messageResponse.data);
             break;
+        }
         case "GO_AWAY":
             console.log("GoAway message received. Time left: ", messageResponse.data);
-            newModelMessage("Connection expiring. Reconnecting for session resumption...");
+            newSystemMessage("Connection expiring. Reconnecting for session resumption...");
             handleSessionResumptionReconnect();
             break;
         case "INPUT_TRANSCRIPTION":
-            console.log("Input transcription received: ", messageResponse.data);
-            newModelMessage("Input Transcription: " + messageResponse.data);
+            appendTranscript("input", messageResponse.data);
+            if (messageResponse.finished) closeTranscriptLine("input");
             break;
         case "OUTPUT_TRANSCRIPTION":
-            console.log("Output transcription received: ", messageResponse.data);
-            newModelMessage("Output Transcription: " + messageResponse.data);
+            closeTranscriptLine("input");
+            setModelSpeaking(true);
+            appendTranscript("output", messageResponse.data);
+            if (messageResponse.finished) closeTranscriptLine("output");
             break;
         case "END_OF_TURN":
-            console.log("End of turn");
-            newModelMessage("End of turn!");
+            closeTranscriptLine("output");
+            setModelSpeaking(false);
             break;
         case "INTERRUPT":
-            console.log("Interrupted!");
-            newModelMessage("Interrupted!");
+            if (AppState.liveAudioOutputManager) {
+                AppState.liveAudioOutputManager.clear();
+            }
+            closeTranscriptLine("output");
+            setModelSpeaking(false);
+            newSystemMessage("Interrupted.");
             break;
         case "VAD_SIGNAL":
             console.log("VAD signal");
-            newModelMessage("VAD signal received");
             break;
         case "FUNCTION_CALL":
+            closeTranscriptLine("input");
             handleFunctionCallRequest(messageResponse.data);
+            break;
+        case "FUNCTION_CALL_CANCELLATION":
+            newSystemMessage("Function calls cancelled: " + messageResponse.data.join(", "));
+            break;
+        case "USAGE":
+            showUsage(messageResponse.data);
             break;
         default:
             console.warn("Unhandled message type:", messageResponse.type);
@@ -420,123 +419,129 @@ function handleReceiveResponse(messageResponse) {
     }
 }
 
+function showUsage(usage) {
+    const prompt = usage.promptTokenCount ?? usage.prompt_token_count ?? 0;
+    const total = usage.totalTokenCount ?? usage.total_token_count ?? 0;
+    AppUI.setText("usage-tokens", `${prompt.toLocaleString()} in / ${total.toLocaleString()} total`);
+}
+
 async function handleSessionResumptionReconnect() {
     const api = AppState.geminiLiveApi;
     if (!api) return;
 
     setAppStatus("connecting");
-    newModelMessage("Reconnecting for session resumption...");
-
-    // 1. Start cleanly closing the old WebSocket in the background (preventing the disconnect handler from showing error)
-    let closePromise = Promise.resolve();
-    if (api.webSocket) {
-        const oldWs = api.webSocket;
-        closePromise = new Promise((resolve) => {
-            if (oldWs.readyState === WebSocket.CLOSED) {
-                resolve();
-                return;
-            }
-            oldWs.onclose = () => resolve();
-            oldWs.onerror = () => resolve();
-            oldWs.close();
-        });
-    }
-
-    // Stop bandwidth updates for the old connection
-    api.stopUpdateBandwidthUsage();
-
-    // 2. Prepare the new session parameters
-    api.setResumption(true, AppUI.getValue("handle"));
-    
-    // Generate a new session ID for the new connection to avoid backend race conditions/collisions
-    api.sessionId = crypto.randomUUID();
-
-    // 3. Start preparing the new session (avatar loading, backend initialization, and tools configuration) in parallel
-    const preparePromise = api.prepare();
-
-    // 4. Wait for both the old connection to close and the new session preparation to complete
-    try {
-        await Promise.all([closePromise, preparePromise]);
-    } catch (error) {
-        console.error("Session resumption preparation failed: ", error);
-        api.onErrorMessage("Session resumption failed.");
-        return;
-    }
-
-    // 5. Tear down old reference
-    api.webSocket = null;
-
-    // 6. Re-initialize video output manager to reset the MediaSource and player state for the new stream
-    if (AppState.liveVideoOutputManager) {
+    closeTranscriptLine("input");
+    closeTranscriptLine("output");
+    if (api.transportMode !== "webrtc" && AppState.liveVideoOutputManager) {
+        // The new connection streams a new MP4, which needs a fresh MediaSource.
         AppState.liveVideoOutputManager.initMediaSource();
     }
-
-    // 7. Establish the new WebSocket connection immediately
-    console.log("handleSessionResumptionReconnect(): Opening new WebSocket connection...");
-    api.setupWebSocketToService();
+    try {
+        await api.resume(AppUI.getValue("handle"));
+    } catch (error) {
+        console.error("Session resumption failed: ", error);
+        api.onErrorMessage(`Session resumption failed: ${error.message}`);
+    }
 }
 
-function handleFunctionCallRequest(functionCalls) {
+async function simulateFunctionResponse(funcCall) {
+    try {
+        return {
+            result: await AppState.geminiLiveApi.sendPostRequest(AppState.geminiLiveApi.frUrl, {
+                objective: "fr_generate",
+                session_id: AppState.geminiLiveApi.sessionId,
+                functionName: funcCall.name,
+                functionArgs: funcCall.args,
+            }),
+        };
+    } catch (error) {
+        console.error(`Simulating ${funcCall.name} failed:`, error);
+        newErrorMessage(`Function ${funcCall.name} failed: ${error.message}`);
+        // Answer anyway: with BLOCKING tools the model waits for a response.
+        return { error: error.message };
+    }
+}
+
+async function handleFunctionCallRequest(functionCalls) {
     console.log("Function call requested: ", functionCalls);
-    newModelMessage("Function Call: " + JSON.stringify(functionCalls));
+    for (const funcCall of functionCalls) {
+        newSystemMessage(`Function call: ${funcCall.name}(${JSON.stringify(funcCall.args || {})})`);
+    }
 
     const schedulingVal = AppUI.getValue("fcScheduling", "WHEN_IDLE");
-    console.log("Processing function calls with scheduling:", schedulingVal);
-
-    const allResponsesPromise = functionCalls.reduce(
-        (promiseChain, funcCall) => {
-            return promiseChain.then((allResponses) => {
-                const postData = {
-                    objective: "fr_generate",
-                    functionName: funcCall.name,
-                    functionArgs: funcCall.args,
-                };
-
-                return AppState.geminiLiveApi
-                    .sendPostRequest(AppState.geminiLiveApi.frUrl, postData)
-                    .then((result) => {
-                        allResponses.push({
-                            id: funcCall.id,
-                            name: funcCall.name,
-                            response: {
-                                result: result,
-                                scheduling: schedulingVal,
-                            },
-                        });
-                        return allResponses;
-                    });
-            });
-        },
-        Promise.resolve([])
-    );
-
-    allResponsesPromise
-        .then((fcResponseList) => {
-            const responseDict = {
-                toolResponse: {
-                    functionResponses: fcResponseList,
-                },
-            };
-            AppState.geminiLiveApi.sendMessage(responseDict);
-        })
-        .catch((error) => {
-            console.error("Error processing function calls:", error);
-            newModelMessage("Error processing function calls: " + error.message);
-        });
+    // Sequential, since the simulator is one chat session per connection.
+    const functionResponses = [];
+    for (const funcCall of functionCalls) {
+        const response = await simulateFunctionResponse(funcCall);
+        response.scheduling = schedulingVal;
+        functionResponses.push({ id: funcCall.id, name: funcCall.name, response });
+    }
+    AppState.geminiLiveApi.sendMessage({ toolResponse: { functionResponses } });
 }
 
 // --- Chat Interface Helpers ---
-function addMessageToChat(message) {
-    const textChat = AppUI.getElement("text-chat");
-    if (!textChat) return;
+const ChatState = {
+    // The chat line each transcript stream is appending to, if any.
+    transcriptLines: { input: null, output: null },
+};
 
-    const newParagraph = document.createElement("p");
-    newParagraph.textContent = message; // Secure against XSS
-    textChat.appendChild(newParagraph);
+const TRANSCRIPT_LABELS = { input: "You: ", output: "Gemini: " };
+
+/**
+ * Appends a line to the chat log and keeps it scrolled to the bottom, unless
+ * the user has scrolled up to read earlier messages.
+ * @param {string} text
+ * @param {"user"|"model"|"system"|"error"} kind
+ * @returns {HTMLElement|null} The new line.
+ */
+function addMessageToChat(text, kind = "system") {
+    const textChat = AppUI.getElement("text-chat");
+    if (!textChat) return null;
+
+    const atBottom = textChat.scrollHeight - textChat.scrollTop - textChat.clientHeight < 24;
+    const line = document.createElement("p");
+    line.className = `chat-line chat-${kind}`;
+    line.textContent = text; // Secure against XSS
+    textChat.appendChild(line);
+    if (atBottom) {
+        textChat.scrollTop = textChat.scrollHeight;
+    }
+    return line;
 }
 
+function newSystemMessage(message) {
+    return addMessageToChat(message, "system");
+}
+
+function newErrorMessage(message) {
+    return addMessageToChat(message, "error");
+}
+
+// Kept for callers outside this file.
 function newModelMessage(message) {
-    addMessageToChat(">> " + message);
+    return newSystemMessage(message);
+}
+
+/** Streams transcript text into one chat line per utterance. */
+function appendTranscript(stream, text) {
+    if (!text) return;
+    let line = ChatState.transcriptLines[stream];
+    if (!line || !line.isConnected) {
+        line = addMessageToChat(TRANSCRIPT_LABELS[stream], stream === "input" ? "user" : "model");
+        ChatState.transcriptLines[stream] = line;
+    }
+    if (!line) return;
+    const textChat = AppUI.getElement("text-chat");
+    const atBottom = textChat.scrollHeight - textChat.scrollTop - textChat.clientHeight < 24;
+    line.textContent += text;
+    if (atBottom) {
+        textChat.scrollTop = textChat.scrollHeight;
+    }
+}
+
+/** Ends the current utterance, so the next transcript text starts a new line. */
+function closeTranscriptLine(stream) {
+    ChatState.transcriptLines[stream] = null;
 }
 
 function newUserMessage() {
@@ -546,31 +551,63 @@ function newUserMessage() {
     const val = textMessage.value;
     if (val.trim() === "") return;
 
-    addMessageToChat("User: " + val);
-    AppState.geminiLiveApi.sendTextMessage(val);
+    const api = AppState.geminiLiveApi;
+    if (!api.webSocket || api.webSocket.readyState !== WebSocket.OPEN) {
+        AppUI.showModal("Connect before sending a message.");
+        return;
+    }
+    closeTranscriptLine("input");
+    closeTranscriptLine("output");
+    addMessageToChat("You: " + val, "user");
+    api.sendTextMessage(val);
 
     textMessage.value = "";
 }
 
 // --- Audio Input Operations ---
-function startAudioInput() {
-    if (
-        AppState.geminiLiveApi &&
-        AppState.geminiLiveApi.transportMode === "webrtc" &&
-        AppState.geminiLiveApi.webRtcManager
-    ) {
-        const micVal = AppUI.getValue("audioSource") || null;
-        AppState.geminiLiveApi.webRtcManager
-            .startMicrophone(micVal)
-            .catch((err) => {
-                console.error("[WebRTC] Failed to start microphone:", err);
-                AppUI.showModal(`Could not start WebRTC microphone: ${err.message}`);
-            });
-        return;
-    }
-    const intervalVal = AppUI.getValue("audioInterval", "1000");
-    if (AppState.liveAudioInputManager) {
-        AppState.liveAudioInputManager.updateAudioInterval(intervalVal);
+function webRtcManagerIfActive() {
+    return isWebRtcTransport() ? AppState.geminiLiveApi.webRtcManager : null;
+}
+
+function isMicOn() {
+    const micBtn = AppUI.getElement("micBtn");
+    return !!micBtn && !micBtn.hidden;
+}
+
+function isCameraOn() {
+    const cameraBtn = AppUI.getElement("cameraBtn");
+    return !!cameraBtn && !cameraBtn.hidden;
+}
+
+function showMicState(on) {
+    AppUI.setHidden("micBtn", !on);
+    AppUI.setHidden("micOffBtn", on);
+}
+
+function showCameraState(on) {
+    AppUI.setHidden("cameraBtn", !on);
+    AppUI.setHidden("cameraOffBtn", on);
+}
+
+async function startAudioInput() {
+    const deviceId = AppUI.getValue("audioSource") || null;
+    try {
+        const webRtcManager = webRtcManagerIfActive();
+        if (webRtcManager) {
+            await webRtcManager.startMicrophone(deviceId);
+        } else {
+            AppState.liveAudioInputManager.deviceId = deviceId;
+            await AppState.liveAudioInputManager.updateAudioInterval(
+                AppUI.getValue("audioInterval", "1000")
+            );
+        }
+        // Device names are only visible once the user has granted access.
+        refreshDeviceLists();
+    } catch (err) {
+        console.error("Failed to start microphone:", err);
+        AppUI.showModal(`Could not start the microphone: ${err.message}`);
+        stopAudioInput();
+        showMicState(false);
     }
 }
 
@@ -587,17 +624,13 @@ function stopAudioInput() {
 }
 
 function micBtnClick() {
-    console.log("micBtnClick");
     stopAudioInput();
-    AppUI.setHidden("micBtn", true);
-    AppUI.setHidden("micOffBtn", false);
+    showMicState(false);
 }
 
 function micOffBtnClick() {
-    console.log("micOffBtnClick");
+    showMicState(true);
     startAudioInput();
-    AppUI.setHidden("micBtn", false);
-    AppUI.setHidden("micOffBtn", true);
 }
 
 function audioStartButtonClick() {
@@ -611,142 +644,113 @@ function audioEndButtonClick() {
 }
 
 // --- Video & Screen Capturing ---
+function videoIntervalMs() {
+    return parseInt(AppUI.getValue("videoInterval", "5000"), 10) || 5000;
+}
+
 async function startCameraCapture() {
-    if (AppState.liveScreenManager) {
-        AppState.liveScreenManager.stopCapture();
-    }
-    if (
-        AppState.geminiLiveApi &&
-        AppState.geminiLiveApi.transportMode === "webrtc" &&
-        AppState.geminiLiveApi.webRtcManager &&
-        AppState.liveVideoManager
-    ) {
-        await AppState.liveVideoManager.startWebcam();
-        if (AppState.liveVideoManager.interval) {
-            clearInterval(AppState.liveVideoManager.interval);
-            AppState.liveVideoManager.interval = null;
+    AppState.liveScreenManager.stopCapture();
+    const camera = AppState.liveVideoManager;
+    camera.stopWebcam();
+    camera.deviceId = AppUI.getValue("cameraSource") || null;
+    camera.intervalMs = videoIntervalMs();
+    try {
+        const webRtcManager = webRtcManagerIfActive();
+        // WebRTC sends the camera track itself; WebSocket sends JPEG frames.
+        await camera.startWebcam({ sendFrames: !webRtcManager });
+        if (webRtcManager) {
+            await webRtcManager.attachVideoStream(camera.stream);
         }
-        if (AppState.liveVideoManager.stream) {
-            await AppState.geminiLiveApi.webRtcManager.attachVideoStream(
-                AppState.liveVideoManager.stream
-            );
-        }
-        return;
-    }
-    const intervalVal = AppUI.getValue("videoInterval", "5000");
-    if (AppState.liveVideoManager) {
-        AppState.liveVideoManager.updateVideoInterval(intervalVal);
+        refreshDeviceLists();
+    } catch (err) {
+        console.error("Failed to start camera:", err);
+        AppUI.showModal(`Could not start the camera: ${err.message}`);
+        camera.stopWebcam();
+        showCameraState(false);
     }
 }
 
 async function startScreenCapture() {
-    if (AppState.liveVideoManager) {
-        AppState.liveVideoManager.stopWebcam();
-    }
-    if (
-        AppState.geminiLiveApi &&
-        AppState.geminiLiveApi.transportMode === "webrtc" &&
-        AppState.geminiLiveApi.webRtcManager &&
-        AppState.liveScreenManager
-    ) {
-        await AppState.liveScreenManager.startCapture();
-        if (AppState.liveScreenManager.interval) {
-            clearInterval(AppState.liveScreenManager.interval);
-            AppState.liveScreenManager.interval = null;
-        }
-        if (AppState.liveScreenManager.stream) {
-            await AppState.geminiLiveApi.webRtcManager.attachVideoStream(
-                AppState.liveScreenManager.stream
-            );
+    const screen = AppState.liveScreenManager;
+    const webRtcManager = webRtcManagerIfActive();
+    screen.intervalMs = videoIntervalMs();
+    try {
+        await screen.startCapture({ sendFrames: !webRtcManager });
+    } catch (err) {
+        // NotAllowedError means the user closed the picker.
+        if (err.name !== "NotAllowedError") {
+            AppUI.showModal(`Could not share the screen: ${err.message}`);
         }
         return;
     }
-    const intervalVal = AppUI.getValue("videoInterval", "5000");
-    if (AppState.liveScreenManager) {
-        AppState.liveScreenManager.updateVideoInterval(intervalVal);
+    // The camera and the screen share the preview, so only one runs at a time.
+    AppState.liveVideoManager.stopWebcam();
+    showCameraState(false);
+    if (webRtcManager) {
+        await webRtcManager.attachVideoStream(screen.stream);
     }
 }
 
 function cameraBtnClick() {
-    if (
-        AppState.geminiLiveApi &&
-        AppState.geminiLiveApi.webRtcManager
-    ) {
-        AppState.geminiLiveApi.webRtcManager.detachVideoStream();
+    const webRtcManager = webRtcManagerIfActive();
+    if (webRtcManager) {
+        webRtcManager.detachVideoStream();
     }
-    if (AppState.liveVideoManager) {
-        AppState.liveVideoManager.stopWebcam();
-    }
-    AppUI.setHidden("cameraBtn", true);
-    AppUI.setHidden("cameraOffBtn", false);
-    console.log("Camera turned off");
+    AppState.liveVideoManager.stopWebcam();
+    showCameraState(false);
 }
 
 function cameraOffBtnClick() {
+    showCameraState(true);
     startCameraCapture();
-    AppUI.setHidden("cameraBtn", false);
-    AppUI.setHidden("cameraOffBtn", true);
-    console.log("Camera turned on");
 }
 
 function screenShareBtnClick() {
     startScreenCapture();
-    console.log("screenShareBtnClick");
 }
 
 function newCameraSelected() {
-    const camVal = AppUI.getValue("cameraSource");
-    console.log("newCameraSelected ", camVal);
-    if (AppState.liveVideoManager) {
-        AppState.liveVideoManager.updateWebcamDevice(camVal);
+    AppState.liveVideoManager.deviceId = AppUI.getValue("cameraSource") || null;
+    if (isCameraOn()) {
+        startCameraCapture();
     }
 }
 
 function newMicSelected() {
-    const micVal = AppUI.getValue("audioSource");
-    console.log("newMicSelected", micVal);
-    if (AppState.liveAudioInputManager) {
-        AppState.liveAudioInputManager.updateMicrophoneDevice(micVal);
+    AppState.liveAudioInputManager.deviceId = AppUI.getValue("audioSource") || null;
+    if (isMicOn()) {
+        startAudioInput();
     }
 }
 
 // --- Device Enumeration ---
-async function getAvailableDevices(deviceType) {
+async function getAvailableDevices(deviceType, fallbackName) {
     if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
         return [];
     }
     try {
         const allDevices = await navigator.mediaDevices.enumerateDevices();
-        const devices = [];
-        allDevices.forEach((device) => {
-            if (device.kind === deviceType) {
-                devices.push({
-                    id: device.deviceId,
-                    name: device.label || device.deviceId,
-                });
-            }
-        });
-        return devices;
+        return allDevices
+            .filter((device) => device.kind === deviceType)
+            .map((device, index) => ({
+                id: device.deviceId,
+                // Labels (and IDs) are blank until the user grants access.
+                name: device.label || `${fallbackName} ${index + 1}`,
+            }));
     } catch (error) {
         console.error("Error enumerating media devices:", error);
         return [];
     }
 }
 
-async function getAvailableCameras() {
-    return await getAvailableDevices("videoinput");
-}
-
-async function getAvailableAudioInputs() {
-    return await getAvailableDevices("audioinput");
-}
-
 function setMaterialSelect(allOptions, selectElement) {
     if (!selectElement) return;
+    const previousValue = selectElement.value;
     selectElement.replaceChildren(); // Clean old options securely
     allOptions.forEach((optionData) => {
         const option = document.createElement("md-select-option");
         option.value = optionData.id;
+        option.selected = optionData.id === previousValue;
 
         const slotDiv = document.createElement("div");
         slotDiv.slot = "headline";
@@ -757,16 +761,13 @@ function setMaterialSelect(allOptions, selectElement) {
     });
 }
 
-async function setAvailableCamerasOptions() {
-    const cameras = await getAvailableCameras();
-    const videoSelect = AppUI.getElement("cameraSource");
-    setMaterialSelect(cameras, videoSelect);
-}
-
-async function setAvailableMicrophoneOptions() {
-    const mics = await getAvailableAudioInputs();
-    const audioSelect = AppUI.getElement("audioSource");
-    setMaterialSelect(mics, audioSelect);
+async function refreshDeviceLists() {
+    const [cameras, mics] = await Promise.all([
+        getAvailableDevices("videoinput", "Camera"),
+        getAvailableDevices("audioinput", "Microphone"),
+    ]);
+    setMaterialSelect(cameras, AppUI.getElement("cameraSource"));
+    setMaterialSelect(mics, AppUI.getElement("audioSource"));
 }
 
 // --- App Lifecycle Handlers (Connect / Disconnect) ---
@@ -808,9 +809,48 @@ function setAppStatus(status) {
     }
 }
 
+/** Switches between the "connected" and "model speaking" badges. */
+function setModelSpeaking(speaking) {
+    const connected = !AppUI.getElement("connected").hidden;
+    const speakingNow = !AppUI.getElement("speaking").hidden;
+    if (speaking && connected) {
+        setAppStatus("speaking");
+    } else if (!speaking && speakingNow) {
+        setAppStatus("connected");
+    }
+}
+
+function setMediaButtonsEnabled(enabled) {
+    for (const id of ["micOffBtn", "cameraOffBtn", "screenBtn"]) {
+        const element = AppUI.getElement(id);
+        const iconBtn = element && element.querySelector("md-filled-icon-button");
+        if (iconBtn) iconBtn.disabled = !enabled;
+    }
+}
+
+/** Tears down media and UI state when a session ends, for whatever reason. */
+function endSession() {
+    AppState.geminiLiveApi.disconnect();
+    stopAudioInput();
+    AppState.liveVideoManager.stopWebcam();
+    AppState.liveScreenManager.stopCapture();
+    showMicState(false);
+    showCameraState(false);
+    setMediaButtonsEnabled(false);
+    closeTranscriptLine("input");
+    closeTranscriptLine("output");
+    AppState.liveAudioOutputManager.clear();
+    // Before resetPlayer(), which discards the recorded video this saves.
+    setAppStatus("disconnected");
+    AppState.liveVideoOutputManager.resetPlayer();
+}
+
 function connectBtnClick() {
     setAppStatus("connecting");
     console.log("Connecting...");
+    // Runs inside the click, so the browser's autoplay policy allows audio.
+    AppState.liveAudioOutputManager.resume();
+    AppUI.setText("usage-tokens", "--");
 
     handleModelChange();
 
@@ -835,19 +875,13 @@ function connectBtnClick() {
         transportMode === "webrtc" ? "negotiating" : "n/a"
     );
 
-    if (
-        transportMode === "websocket" &&
-        AppState.liveVideoOutputManager
-    ) {
+    AppState.liveVideoOutputManager.recordingEnabled = AppUI.getChecked("saveAvatarVideo");
+    if (transportMode === "websocket") {
         AppState.liveVideoOutputManager.initMediaSource();
     }
-    
-    AppState.geminiLiveApi.responseModalities = [getSelectedResponseModality()];
 
-    const sysInstructions = AppUI.getValue("systemInstructions");
-    if (sysInstructions !== "") {
-        AppState.geminiLiveApi.systemInstructions = sysInstructions;
-    }
+    AppState.geminiLiveApi.responseModalities = [getSelectedResponseModality()];
+    AppState.geminiLiveApi.systemInstructions = AppUI.getValue("systemInstructions");
 
     AppState.geminiLiveApi.setModel(AppUI.getValue("liveApiModel"));
     AppState.geminiLiveApi.setTranscript(
@@ -885,48 +919,26 @@ function connectBtnClick() {
     AppState.geminiLiveApi.avatarMode = AppUI.getChecked("enableAvatarMode");
     AppState.geminiLiveApi.googleSearchEnabled = AppUI.getChecked("enableGoogleSearch");
 
-    AppState.geminiLiveApi.connect();
-
     AppState.geminiLiveApi.onConnectionStarted = () => {
-        const micOffBtn = AppUI.getElement("micOffBtn");
-        if (micOffBtn) {
-            const iconBtn = micOffBtn.querySelector("md-filled-icon-button");
-            if (iconBtn) iconBtn.disabled = false;
-        }
-
-        const cameraOffBtn = AppUI.getElement("cameraOffBtn");
-        if (cameraOffBtn) {
-            const iconBtn = cameraOffBtn.querySelector("md-filled-icon-button");
-            if (iconBtn) iconBtn.disabled = false;
-        }
-
-        const screenBtn = AppUI.getElement("screenBtn");
-        if (screenBtn) {
-            const iconBtn = screenBtn.querySelector("md-filled-icon-button");
-            if (iconBtn) iconBtn.disabled = false;
-        }
-
+        setMediaButtonsEnabled(true);
         setAppStatus("connected");
     };
+    AppState.geminiLiveApi.connect();
 }
 
 function disconnectBtnClick() {
-    AppState.geminiLiveApi.disconnect();
-    stopAudioInput();
+    endSession();
 
     AppState.customVoiceBase64 = "";
     AppState.functionCallDefinition = null;
 
-    const audioFileInput = AppUI.getElement("audioFileInput");
-    if (audioFileInput) audioFileInput.value = "";
+    for (const id of ["audioFileInput", "fcFileInput"]) {
+        const input = AppUI.getElement(id);
+        if (input) input.value = "";
+    }
 
     AppUI.setText("fileName", "");
     AppUI.setText("fcFileName", "");
-
-    if (AppState.liveVideoOutputManager) {
-        AppState.liveVideoOutputManager.resetPlayer();
-    }
-    setAppStatus("disconnected");
 }
 
 // --- Branded Voice / Reference Voice Modal Operations ---

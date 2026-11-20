@@ -1,34 +1,41 @@
 /**
  * @class PCMProcessor
  * @extends AudioWorkletProcessor
- * @description Processes PCM audio data in a Web Audio API context
+ * @description Plays Float32 PCM chunks posted from the main thread, in order.
+ * Posting the string "clear" drops everything not yet played, which is how
+ * playback stops when the user interrupts the model.
  */
 class PCMProcessor extends AudioWorkletProcessor {
     constructor() {
         super();
-        this.buffer = new Float32Array();
+        this.queue = [];
+        this.offset = 0; // Read position in this.queue[0].
 
         this.port.onmessage = (e) => {
-            const newData = e.data;
-            const newBuffer = new Float32Array(
-                this.buffer.length + newData.length,
-            );
-            newBuffer.set(this.buffer);
-            newBuffer.set(newData, this.buffer.length);
-            this.buffer = newBuffer;
+            if (e.data === "clear") {
+                this.queue = [];
+                this.offset = 0;
+                return;
+            }
+            this.queue.push(e.data);
         };
     }
 
     process(inputs, outputs, parameters) {
-        const output = outputs[0];
-        const channelData = output[0];
-
-        if (this.buffer.length >= channelData.length) {
-            channelData.set(this.buffer.slice(0, channelData.length));
-            this.buffer = this.buffer.slice(channelData.length);
-            return true;
+        const channelData = outputs[0][0];
+        let written = 0;
+        while (written < channelData.length && this.queue.length > 0) {
+            const chunk = this.queue[0];
+            const count = Math.min(channelData.length - written, chunk.length - this.offset);
+            channelData.set(chunk.subarray(this.offset, this.offset + count), written);
+            written += count;
+            this.offset += count;
+            if (this.offset >= chunk.length) {
+                this.queue.shift();
+                this.offset = 0;
+            }
         }
-
+        // Samples past `written` stay zero, i.e. silence on underrun.
         return true;
     }
 }

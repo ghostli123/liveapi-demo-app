@@ -5,6 +5,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Vertex AI - Gemini Live (Branded Voice App)</title>
+  <link rel="icon"
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='45' fill='%231A73E8'/%3E%3C/svg%3E">
   <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
   <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
   <link rel="stylesheet"
@@ -452,6 +454,7 @@
             <p>Upload: <span id="upload-speed">0.00</span> KB/s</p>
             <p>Video FPS: <span id="webrtc-fps">--</span> | Pkts Lost: <span id="webrtc-packet-loss">0</span></p>
             <p>Recommended Video Bitrate: <span id="recommended-video-bitrate"></span> bps</p>
+            <p>Tokens (last turn): <span id="usage-tokens">--</span></p>
           </div>
         </div>
       </div>
@@ -484,7 +487,7 @@
       </div>
 
       <div id="chat-container" style="margin-top: 18px; flex-grow: 1;">
-        <div id="text-chat" style="height: auto; flex-grow: 1; max-height: 100px; overflow-y: auto;"></div>
+        <div id="text-chat" aria-live="polite"></div>
         <div class="text-input-area">
           <md-outlined-text-field id="text-message" label="Send a text message"></md-outlined-text-field>
           <md-icon-button onclick="newUserMessage()"><md-icon>send</md-icon></md-icon-button>
@@ -704,6 +707,10 @@
           <md-checkbox id="enableAvatarMode" touch-target="wrapper" checked onchange="toggleAvatarMode()"></md-checkbox>
           <label for="enableAvatarMode">Enable Avatar Mode (Side-by-side view)</label>
         </div>
+        <div class="checkbox-row">
+          <md-checkbox id="saveAvatarVideo" touch-target="wrapper"></md-checkbox>
+          <label for="saveAvatarVideo">Save avatar video (WebSocket) as MP4 on disconnect</label>
+        </div>
       </div>
 
       <div class="config-section">
@@ -786,7 +793,6 @@
 
       </div>
       <details class="config-section">
-        <details class="config-section">
           <summary>
             <h3>Advanced Settings</h3>
           </summary>
@@ -854,8 +860,8 @@
               </md-select-option>
             </md-outlined-select>
           </div>
-  </div>
-  </aside>
+      </details>
+    </aside>
   </div>
 
   <md-dialog id="dialog" close>
