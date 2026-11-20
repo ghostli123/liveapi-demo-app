@@ -119,6 +119,25 @@ class SessionManager:
         logging.info("Released session %s while it closes", session_id)
         return True
 
+    async def remove_pending(self, session_id: str) -> bool:
+        """Removes and ends session_id's record if it has no WebSocket yet.
+
+        For a browser that gave up before connecting, so the record doesn't
+        hold a max_sessions slot until it expires. A connected session ends
+        when its WebSocket closes instead.
+
+        Returns:
+            Whether a record was removed.
+        """
+        async with self._lock:
+            record = self._sessions.get(session_id)
+            if record is None or record.websocket_handler:
+                return False
+            del self._sessions[session_id]
+        logging.info("Removed session %s before it connected", session_id)
+        await record.del_session()
+        return True
+
     async def delete_item(self, session_id: str, record: SessionBaseModel) -> None:
         """Removes record if it is still session_id's record, and ends it.
 

@@ -212,8 +212,12 @@ test("setupComplete cancels the setup timeout", () => {
 
 test("disconnect() during connect() stops it from opening a WebSocket", async () => {
     const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    const bodies = [];
     let release;
-    api.sendPostRequest = () => new Promise((resolve) => (release = resolve));
+    api.sendPostRequest = (url, body) => {
+        bodies.push(body);
+        return bodies.length === 1 ? new Promise((resolve) => (release = resolve)) : Promise.resolve({});
+    };
     let opened = 0;
     api.setupWebSocketToService = () => opened++;
     const connecting = api.connect();
@@ -222,6 +226,69 @@ test("disconnect() during connect() stops it from opening a WebSocket", async ()
     release({ project_id: "p" });
     await connecting;
     assert.equal(opened, 0);
+    // The backend set the session up, so it is told to drop it; otherwise it
+    // holds a --max_sessions slot until it expires.
+    assert.deepEqual(plain(bodies.map((b) => [b.command, b.session_id])), [
+        ["connect", bodies[0].session_id],
+        ["disconnect", bodies[0].session_id],
+    ]);
+});
+
+test("a failed function declaration releases the session it set up", async () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    const errors = [];
+    api.onErrorMessage = (message) => errors.push(message);
+    api.setFunctionCall([{ name: "f" }]);
+    const posts = [];
+    api.sendPostRequest = (url, body) => {
+        posts.push([url, body.command || body.objective]);
+        return body.objective === "fc_definition"
+            ? Promise.reject(Object.assign(new Error("HTTP 400: bad"), { status: 400 }))
+            : Promise.resolve({ project_id: "p" });
+    };
+    let opened = 0;
+    api.setupWebSocketToService = () => opened++;
+    await api.connect();
+    assert.equal(opened, 0);
+    assert.deepEqual(errors, ["Could not set up function declarations: HTTP 400: bad"]);
+    assert.deepEqual(plain(posts), [
+        ["/api/control", "connect"],
+        ["/api/post_endpoint", "fc_definition"],
+        ["/api/control", "disconnect"],
+    ]);
+});
+
+test("a control request that fails releases nothing", async () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    api.onErrorMessage = () => {};
+    const commands = [];
+    api.sendPostRequest = (url, body) => {
+        commands.push(body.command);
+        return Promise.reject(Object.assign(new Error("HTTP 400: bad"), { status: 400 }));
+    };
+    await api.connect();
+    assert.deepEqual(commands, ["connect"]);
+});
+
+test("disconnect() while a resume waits for the old WebSocket releases the new session", async () => {
+    const api = connectedApi();
+    const oldWebSocket = api.webSocket;
+    oldWebSocket.close = () => {}; // Its close event arrives later.
+    const bodies = [];
+    api.sendPostRequest = (url, body) => {
+        bodies.push(body);
+        return Promise.resolve({ project_id: "p" });
+    };
+    let opened = 0;
+    api.setupWebSocketToService = () => opened++;
+    const resuming = api.resume("h");
+    await new Promise((resolve) => setImmediate(resolve)); // prepare() finishes.
+    api.disconnect();
+    oldWebSocket.onclose({ code: 1000, reason: "" });
+    await resuming;
+    assert.equal(opened, 0);
+    assert.deepEqual(plain(bodies.map((b) => b.command)), ["connect", "disconnect"]);
+    assert.equal(bodies[1].session_id, bodies[0].session_id);
 });
 
 test("a cancelled connect's failure doesn't end the next connection", async () => {

@@ -421,17 +421,23 @@ class GeminiLiveAPI {
     /**
      * Performs all asynchronous HTTP and media initialization steps required before
      * establishing the WebSocket connection.
-     * @returns {Promise<void>}
+     * @returns {Promise<boolean>} Whether the session is ready for its
+     *     WebSocket; false if disconnect() abandoned the attempt meanwhile.
      */
     async prepare(attempt = this.connectAttempt) {
         // An attempt that disconnect() abandoned must neither report errors
         // (which would end the next attempt's session) nor touch its state.
         const isCurrent = () => attempt === this.connectAttempt;
         const sessionId = this.sessionId;
+        let created = false;
         try {
             console.log("prepare(): Initializing backend service...");
             const projectId = await this.initBackendService(sessionId);
-            if (!isCurrent()) return;
+            created = true;
+            if (!isCurrent()) {
+                this.abandonSession(sessionId);
+                return false;
+            }
             if (projectId) {
                 this.setProjectId(projectId);
             }
@@ -439,11 +445,30 @@ class GeminiLiveAPI {
             console.log("prepare(): Setting up function declarations...");
             await this.setupFuncDeclarationToService(sessionId);
         } catch (error) {
+            if (created) {
+                this.abandonSession(sessionId);
+            }
             if (isCurrent()) {
                 this.onErrorMessage(error.message);
             }
             throw error;
         }
+        if (!isCurrent()) {
+            this.abandonSession(sessionId);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Tells the backend that a session it set up will never open its
+     * WebSocket, so the session doesn't count against the server's session
+     * limit until it expires.
+     * @param {string} sessionId
+     */
+    abandonSession(sessionId) {
+        this.sendPostRequest(this.controlUrl, { command: "disconnect", session_id: sessionId })
+            .catch((error) => console.warn(`Could not release session ${sessionId}:`, error));
     }
 
     /**
@@ -457,8 +482,7 @@ class GeminiLiveAPI {
         const attempt = ++this.connectAttempt;
         this.autoResumeTimes = [];
         try {
-            await this.prepare(attempt);
-            if (attempt !== this.connectAttempt) return; // Cancelled by disconnect().
+            if (!(await this.prepare(attempt))) return; // Cancelled by disconnect().
             console.log("connect(): Preparation successful. Starting WebSocket connection...");
             this.setupWebSocketToService();
         } catch (error) {
@@ -517,11 +541,17 @@ class GeminiLiveAPI {
 
         this.setResumption(true, handle);
         // A new session ID keeps the backend from mixing up the two connections.
-        this.sessionId = crypto.randomUUID();
+        const sessionId = crypto.randomUUID();
+        this.sessionId = sessionId;
         const attempt = ++this.connectAttempt;
         // Close the old connection while the backend prepares the new session.
-        await Promise.all([closed, this.prepare(attempt)]);
-        if (attempt !== this.connectAttempt) return; // Cancelled by disconnect().
+        const [, ready] = await Promise.all([closed, this.prepare(attempt)]);
+        if (!ready) return; // Cancelled by disconnect().
+        if (attempt !== this.connectAttempt) {
+            // Cancelled while the old connection was still closing.
+            this.abandonSession(sessionId);
+            return;
+        }
         this.setupWebSocketToService();
     }
 
