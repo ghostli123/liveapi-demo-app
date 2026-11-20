@@ -94,6 +94,7 @@ gcloud run deploy SERVICE_NAME \
 ```sh
 pip install -r backend/requirements-dev.txt
 python -m pytest                          # backend tests
+ruff check backend scripts && ruff format --check backend scripts
 node --test frontend/tests/*.test.js      # frontend tests (Node 18+)
 ```
 

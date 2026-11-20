@@ -279,7 +279,9 @@ async def handle_fr_post_request(request: web.Request):
             503,
         )
     current_content = []
-    send_definitions = chat_session.fc_definitions and not chat_session.fc_definitions_sent
+    send_definitions = (
+        chat_session.fc_definitions and not chat_session.fc_definitions_sent
+    )
     if send_definitions:
         current_content += [
             genai.types.Part(text="The definition of the functions are:"),
@@ -397,7 +399,9 @@ async def revalidate_static_files(request: web.Request, handler):
 
 @functools.cache
 def _machine_hostnames() -> frozenset[str]:
-    return frozenset({"localhost", socket.gethostname().lower(), socket.getfqdn().lower()})
+    return frozenset(
+        {"localhost", socket.gethostname().lower(), socket.getfqdn().lower()}
+    )
 
 
 def is_allowed_host(hostname: str | None) -> bool:
@@ -434,7 +438,9 @@ async def reject_cross_origin(request: web.Request, handler):
     if request.method != "GET" or request.path == "/ws":
         host = urllib.parse.urlsplit("//" + request.host).hostname
         if not is_allowed_host(host):
-            logging.warning("Rejected %s %s for host %s", request.method, request.path, host)
+            logging.warning(
+                "Rejected %s %s for host %s", request.method, request.path, host
+            )
             return web.Response(
                 text=f"Host {host!r} is not allowed; start the server with --allowed_hosts={host}",
                 status=403,
@@ -450,7 +456,10 @@ async def reject_cross_origin(request: web.Request, handler):
             } or "*" in ALLOWED_HOSTS.value
             if parts.netloc != request.host and not explicitly_allowed:
                 logging.warning(
-                    "Rejected %s %s from origin %s", request.method, request.path, origin
+                    "Rejected %s %s from origin %s",
+                    request.method,
+                    request.path,
+                    origin,
                 )
                 return web.Response(text="Cross-origin request rejected", status=403)
     return await handler(request)
@@ -534,9 +543,11 @@ async def main_async():
     # it comes from the gcloud fallback). Failures are retried per session.
     prefetch = asyncio.create_task(asyncio.to_thread(get_credentials.get_access_token))
     prefetch.add_done_callback(
-        lambda task: task.cancelled()
-        or task.exception() is None
-        or logging.warning("Token prefetch failed: %s", task.exception())
+        lambda task: (
+            task.cancelled()
+            or task.exception() is None
+            or logging.warning("Token prefetch failed: %s", task.exception())
+        )
     )
     stop = asyncio.Event()
 
