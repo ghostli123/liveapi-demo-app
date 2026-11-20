@@ -1,0 +1,194 @@
+<!doctype html>
+<!-- Gemini Live API over WebRTC: avatar video, camera, a tool call, text input,
+     and session resumption. Serve over http://localhost. -->
+<html>
+<head><meta charset="utf-8"><title>Gemini Live API over WebRTC: avatar</title></head>
+<body>
+  <button id="start">Start</button>
+  <button id="stop" disabled>Stop</button>
+  <button id="reconnect" disabled>Reconnect</button>
+  <button id="screen" disabled>Share screen</button>
+  <input id="text" placeholder="Type a message"><button id="send" disabled>Send</button>
+  <video id="avatar" autoplay playsinline width="360"></video>
+  <pre id="log"></pre>
+
+<script>
+// ---- Configuration -------------------------------------------------------
+const PROJECT_ID = "your-project-id";
+const LOCATION = "us";  // "us" or "eu"
+const MODEL = "gemini-3.8-live";
+
+// Option A (recommended): a backend proxy that adds the Authorization header,
+// such as ws_proxy.py in this folder.
+const WS_URL = "ws://localhost:8080";
+// Option B: connect directly with a short-lived token minted by your backend.
+// const ACCESS_TOKEN = "ya29...";
+// const WS_URL = `wss://aiplatform.${LOCATION}.rep.googleapis.com/ws/` +
+//   "google.cloud.aiplatform.v1.LlmBidiService/BidiGenerateContent" +
+//   `?access_token=${encodeURIComponent(ACCESS_TOKEN)}`;
+
+const TOOLS = [{
+  function_declarations: [{
+    name: "get_weather",
+    description: "Returns the current weather for a city.",
+    parameters: { type: "OBJECT", properties: { city: { type: "STRING" } }, required: ["city"] },
+  }],
+}];
+
+let ws = null;
+let pc = null;
+let cameraSender = null;
+let localMedia = null;        // Mic and camera. Kept across reconnects.
+let resumptionHandle = null;  // Latest handle from sessionResumptionUpdate.
+
+function log(...args) {
+  document.getElementById("log").textContent += args.join(" ") + "\n";
+}
+
+function waitForIceGathering(peer, timeoutMs = 2000) {
+  if (peer.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((resolve) => {
+    peer.addEventListener("icegatheringstatechange", () => {
+      if (peer.iceGatheringState === "complete") resolve();
+    });
+    setTimeout(resolve, timeoutMs);
+  });
+}
+
+// Opens one session: a new peer connection, a new offer, and a new WebSocket.
+async function connect() {
+  // Send mic and camera; receive the avatar's voice and video.
+  const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+  peer.addTransceiver(localMedia.getAudioTracks()[0], { direction: "sendonly" });
+  cameraSender = peer.addTransceiver(localMedia.getVideoTracks()[0], { direction: "sendonly" }).sender;
+  const recvAudio = peer.addTransceiver("audio", { direction: "recvonly" });
+  const recvVideo = peer.addTransceiver("video", { direction: "recvonly" });
+  peer.onconnectionstatechange = () => {
+    log("[webrtc]", peer.connectionState);
+    if (peer === pc && peer.connectionState === "failed") teardown();
+  };
+  await peer.setLocalDescription();
+  await waitForIceGathering(peer);
+
+  const socket = new WebSocket(WS_URL);
+  ws = socket;
+  pc = peer;
+
+  socket.onopen = () => {
+    socket.send(JSON.stringify({
+      setup: {
+        model: `projects/${PROJECT_ID}/locations/${LOCATION}/publishers/google/models/${MODEL}`,
+        generation_config: { response_modalities: ["VIDEO"] },
+        avatar_config: { avatar_name: "Piper" },
+        system_instruction: { parts: [{ text: "Keep answers to one sentence." }] },
+        tools: TOOLS,
+        output_audio_transcription: {},
+        // Send the last handle to resume; an empty object turns on handles for a new session.
+        session_resumption: resumptionHandle ? { handle: resumptionHandle } : {},
+        rtc_setup: { offer_sdp: peer.localDescription.sdp },
+      },
+    }));
+  };
+
+  socket.onmessage = async (event) => {
+    if (socket !== ws) return;  // Ignore a socket that has been replaced.
+    const text = typeof event.data === "string" ? event.data : await event.data.text();
+    const msg = JSON.parse(text);
+
+    if (msg.setupComplete) {
+      log("[setup] session", msg.setupComplete.sessionId, resumptionHandle ? "(resumed)" : "");
+      await peer.setRemoteDescription({ type: "answer", sdp: msg.setupComplete.rtcSetupComplete.answerSdp });
+      // The avatar's audio and video tracks don't share a stream, so combine them.
+      const video = document.getElementById("avatar");
+      video.srcObject = new MediaStream([recvAudio.receiver.track, recvVideo.receiver.track]);
+      await video.play();
+      for (const id of ["send", "reconnect", "screen"]) document.getElementById(id).disabled = false;
+    }
+
+    // Tool calls and tool responses use the WebSocket, exactly as before.
+    if (msg.toolCall) {
+      const functionResponses = msg.toolCall.functionCalls.map((call) => {
+        log("[tool]", call.name, JSON.stringify(call.args));
+        return { id: call.id, name: call.name, response: { forecast: "sunny", temperature_c: 21 } };
+      });
+      socket.send(JSON.stringify({ tool_response: { function_responses: functionResponses } }));
+    }
+
+    if (msg.sessionResumptionUpdate?.resumable && msg.sessionResumptionUpdate.newHandle) {
+      resumptionHandle = msg.sessionResumptionUpdate.newHandle;
+    }
+    if (msg.goAway) {
+      log("[goAway] time left", msg.goAway.timeLeft);
+      reconnect();
+    }
+
+    const content = msg.serverContent;
+    if (content?.outputTranscription?.text) log("[model]", content.outputTranscription.text);
+    if (content?.turnComplete) log("[turn complete]");
+  };
+
+  socket.onclose = (event) => {
+    log("[ws] closed", event.code, event.reason);
+    if (socket === ws) teardown();
+  };
+}
+
+// Closes the current WebSocket and peer connection. Keeps the mic and camera.
+function teardown() {
+  const oldWs = ws;
+  ws = null;
+  oldWs?.close();
+  pc?.close();
+  pc = null;
+  for (const id of ["send", "reconnect", "screen"]) document.getElementById(id).disabled = true;
+}
+
+// Resumes the session on a new WebSocket and a new peer connection.
+async function reconnect() {
+  teardown();
+  await connect();
+}
+
+// Replaces the camera with the screen. No renegotiation is needed.
+async function shareScreen() {
+  const screen = await navigator.mediaDevices.getDisplayMedia({ video: true });
+  await cameraSender.replaceTrack(screen.getVideoTracks()[0]);
+  log("[screen] sharing");
+}
+
+async function start() {
+  document.getElementById("start").disabled = true;
+  document.getElementById("stop").disabled = false;
+  localMedia = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    video: { width: 640, height: 480, frameRate: 15 },
+  });
+  await connect();
+}
+
+function stop() {
+  teardown();
+  localMedia?.getTracks().forEach((track) => track.stop());
+  localMedia = null;
+  resumptionHandle = null;
+  document.getElementById("stop").disabled = true;
+  document.getElementById("start").disabled = false;
+}
+
+function sendText() {
+  const input = document.getElementById("text");
+  ws.send(JSON.stringify({
+    client_content: { turns: [{ role: "user", parts: [{ text: input.value }] }], turn_complete: true },
+  }));
+  log("[you, text]", input.value);
+  input.value = "";
+}
+
+document.getElementById("start").onclick = () => start().catch((err) => { log("[error]", err.message); stop(); });
+document.getElementById("stop").onclick = stop;
+document.getElementById("reconnect").onclick = () => reconnect().catch((err) => log("[error]", err.message));
+document.getElementById("screen").onclick = () => shareScreen().catch((err) => log("[error]", err.message));
+document.getElementById("send").onclick = sendText;
+</script>
+</body>
+</html>

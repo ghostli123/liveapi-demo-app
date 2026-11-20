@@ -21,6 +21,10 @@ Two transports are available:
 
 Both transports are tested in Chrome and Firefox. Safari support is intended but untested.
 
+## Coding agent skill
+
+`.agents/skills/gemini-live-webrtc/` is an agent skill for adding Live API WebRTC to your own app: the integration steps, common mistakes, troubleshooting, and small voice and avatar examples. Coding agents that read `SKILL.md` skills, such as Antigravity, pick it up when you open this repository. To use it in another project, copy the folder into that project's `.agents/skills/`.
+
 ## Run locally
 
 Requires Python 3.11 or later.
@@ -156,3 +160,4 @@ GitHub Actions runs lint, the unit tests, the browser e2e checks against the moc
 | `frontend/live-media-manager.js` | Microphone, camera, screen, audio and video playback, WebRTC. |
 | `frontend/pcm-processor.js`, `frontend/input-processor.js` | Audio worklets for playback and capture. |
 | `feature/Live_API_Branded_Voice.ipynb` | Notebook showing branded voice through the API directly. |
+| `.agents/skills/gemini-live-webrtc/` | Agent skill for adding Live API WebRTC to other apps. |
