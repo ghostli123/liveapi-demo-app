@@ -1,112 +1,118 @@
-# Multimodal Live API Demo
+# Gemini Live API Demo
 
-In this tutorial, you will be building a web application that enables you to use your voice and camera to talk to Gemini 3.1 through the Gemini Live API.
-
-The Gemini Live API is a low-latency bidirectional streaming API that supports audio and video streaming inputs and can output audio.
-
-## Architecture
-
--   **Backend (Python WebSockets Server):** Handles authentication and acts as an intermediary between your frontend and the Gemini API.
--   **Frontend (HTML/JavaScript):** Provides the user interface and interacts with the backend via WebSockets.
-
-## Pre-requisites
-
-While some web development experience, particularly with localhost, port numbers, and the distinction between WebSockets and HTTP requests, can be beneficial for this tutorial, don't worry if you're not familiar with these concepts. We'll provide guidance along the way to ensure you can successfully follow along.
-
-### File Structure
-
--   `backend/main.py`: The Python backend code
--   `backend/requirements.txt`: Lists the required Python dependencies
-
--   `frontend/index.html`: The frontend HTML app
--   `frontend/script.js`: Main frontend JavaScript code
--   `frontend/gemini-live-api.js`: Script for interacting with the Gemini API
--   `frontend/live-media-manager.js`: Script for handling media input and output
--   `frontend/pcm-processor.js`: Script for processing PCM audio
--   `frontend/cookieJar.js`: Script for managing cookies
+A web app for talking to Gemini through the [Gemini Live API](https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/multimodal-live) with your voice, camera, or screen. The model can answer with audio, text, or a talking avatar video.
 
 ![Demo](/img/ui.jpg)
 
-## Setup instructions
+## Architecture
 
-You can set up this app locally or via Cloud Shell.
+- **Frontend** (`frontend/`): plain HTML and JavaScript with Material Web components. It captures the microphone, camera, or screen, plays the model's audio and video, and shows the conversation.
+- **Backend** (`backend/`): an aiohttp server that serves the frontend and proxies each session's WebSocket to the Live API, adding the OAuth token. The browser never sees the token.
 
-### Setup locally
+Two transports are available:
 
-1. Clone the repository and cd into the correct directory
+- **WebSocket**: audio, camera frames (JPEG), and the model's audio and MP4 video all travel as JSON over the WebSocket.
+- **WebRTC**: the WebSocket only carries setup and control messages; media flows over a WebRTC peer connection, which gives lower latency. Not every endpoint supports it.
 
-1. Create a new virtual environment and activate it. The code is tested under `Python 3.9.6` and `Python 3.11`.
+## Run locally
 
-    ```sh
-    python3 -m venv env
-    source env/bin/activate
-    ```
+Requires Python 3.11 or later.
 
 1. Install dependencies:
 
     ```sh
+    python3 -m venv .venv
+    source .venv/bin/activate
     pip install -r backend/requirements.txt
     ```
 
-1. Set google project on your local device:
-   Run the following command in a terminal with gcloud installed to set your project.
+1. Set up Application Default Credentials for an account with access to Vertex AI:
 
     ```sh
-    gcloud components update
-    gcloud components install beta
-    gcloud config set project YOUR-PROJECT-ID
+    gcloud auth application-default login
     ```
 
-1. Start the service:
+1. Start the server:
 
     ```sh
-    python3 backend/main.py --project_id=$PROJECT_ID --alsologtostderr 
+    python backend/main.py --project_id=YOUR_PROJECT_ID
     ```
 
-1. Open your browser and navigate to `localhost:8080`.
+1. Open http://localhost:8080 and click **Connect**.
 
-1. Connect and interact with the demo:
+### Server options
 
-    - You should type your project ID and location into the corresponding fields, select the LiveAPI model and environment you want to test.
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--project_id` | `$GOOGLE_CLOUD_PROJECT`, then `live-api-webrtc-testing` | Project used for Live API sessions and the function-call simulator. |
+| `--allowed_host_suffixes` | `.googleapis.com` | Upstream hosts the proxy may connect to. The proxy sends its access token to these hosts, so keep the list tight. |
+| `--debug` | off | Debug logging, including a preview of every proxied message. |
+| `PORT` (env) | `8080` | Port to listen on. |
 
-    - Press the connect button to connect your web app. Now you should be able to interact with the Multimodal Live API.
+### Credentials
 
-    - **Caution**: to enable `branded voice` by uploading a `.wav` file, make sure you upload the file when the app is at `Disconnected` state, and then click
-      the `connect` button. This restriction is because our code instantite the client only when the `Connect` button is clicked, during which it sends LiveAPI a setup message with the sample voice.
-      This is also true if you want to record you own voice as "branded voice".
+The backend tries, in order: Application Default Credentials through google-auth, then `gcloud auth application-default print-access-token`, then the LOAS helper `backend/common_bag_ws_proxy.par` if present. The gcloud fallback matters on machines with certificate-based access, where google-auth's own token refresh fails with "Account restricted" but gcloud works. The server log says which source it used.
 
-    - For function call, you can provide a json file with list of function definitions, following OpenAI FC format, check example json `f`c_definition.json` as example.
+## Using the app
 
-1. To interact with the app, you can do the following:
+- **Connection**: pick the transport, location, environment (endpoint), and model, then **Connect**. Changing the environment adjusts the model to one it serves.
+- **Text**: type in the message box and press Enter.
+- **Voice**: click the microphone button to start or stop sending audio. Turn on input and output transcripts in **Advanced Settings** to see what was heard and said.
+- **Camera and screen**: the camera button sends your camera; the screen button shares a screen or window. Only one runs at a time.
+- **Response type** (in **Model Behavior**): Video (avatar), Audio, or Text.
+- **Branded voice**: upload a `.wav` file, or record one with **Create a new branded voice**, *before* clicking Connect. The voice sample is sent in the session's setup message, so changes apply to the next connection.
+- **Function calling**: upload a JSON list of function declarations before connecting; `fc_definition.json` is an example. When the model calls a function, the backend asks `gemini-3.1-pro-preview` to simulate a plausible response and sends it back to the model.
+- **Session resumption**: on by default. When the server announces it will close the connection (GoAway), the app reconnects with the latest resumption handle and the conversation continues.
+- **Saving the avatar video**: with **Save avatar video** checked, the avatar's MP4 stream (WebSocket transport) is downloaded when you disconnect.
+- **Metrics**: hover over 📊 to see transport, bandwidth, frame rate, packet loss, and token usage for the last turn.
 
-    - Text input: You can write a text prompt to send to the model by entering your message in the box and pressing the send arrow. The model will then respond via audio (turn up your volume!).
-    - Voice input: Press the microphone button to stop speaking. The model will respond via audio. If you would like to mute your microphone, press the button with a slash through the microphone.
-    - Video input: The model will also capture your camera input and send it to Gemini. You can ask questions about current or previous video footage. For more details on how this works, visit the [documentation page for the Multimodal Live API](https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/multimodal-live).
-    - Avatar Output: The application supports real-time video streaming of an avatar, providing a more immersive interaction experience.
+If the server ends a session, the app shows the close code and the reason the Live API gave, such as a missing model or a permission error.
 
-### Setup in Cloud Run
+## Deploy to Cloud Run
 
-1.  Clone the repository and `cd` into the correct directory.
+```sh
+gcloud run deploy SERVICE_NAME \
+  --source . \
+  --region us-central1 \
+  --project YOUR_PROJECT_ID \
+  --set-env-vars PROJECT_ID=YOUR_PROJECT_ID \
+  --timeout 3600 \
+  --concurrency 10 \
+  --session-affinity
+```
 
-2.  Make sure you have set your default project and are logged in:
-    ```sh
-    gcloud config set project YOUR_PROJECT_ID
-    gcloud auth login
-    ```
+- `--timeout 3600`: Cloud Run ends a request, including a WebSocket, after the timeout. The default of 300 seconds cuts every session at 5 minutes.
+- `--session-affinity`: keeps a browser's control request and WebSocket on the same instance, which holds the session state.
+- The service account needs the Vertex AI User role (`roles/aiplatform.user`) in `PROJECT_ID`.
+- Anyone who can reach the service can start sessions billed to your project. Add `--no-allow-unauthenticated` or put it behind IAP unless the demo is meant to be public.
 
-3.  **Update gcloud components**: Ensure your `gcloud` tool is up-to-date to recognize all deployment flags.
+## Development
 
-    ```sh
-    gcloud components update
-    ```
+```sh
+pip install -r backend/requirements-dev.txt
+python -m pytest                          # backend tests
+node --test frontend/tests/*.test.js      # frontend tests (Node 18+)
+```
 
-3.  Execute the following command in your terminal. This single command will build your container image from the source code and deploy it to Cloud Run. Replace `service-name` with your desired service name (e.g., `live-api-demo`).
+`scripts/smoke_test.py` runs a real session through a running server, the way the browser does, and reports setup latency, media received, and the transcript:
 
-    ```sh
-    gcloud run deploy chndu-cloudrun-test-v1 \
-    --source . \
-    --region us-central1 \
-    --concurrency=10 \
-    --session-affinity
-    ```
+```sh
+python scripts/smoke_test.py --environment=prod-us-rep --model=gemini-3.8-live --modality=VIDEO
+```
 
+GitHub Actions runs the tests and builds the container on every push.
+
+### Files
+
+| Path | Contents |
+| --- | --- |
+| `backend/main.py` | HTTP routes, endpoint validation, function-call simulator. |
+| `backend/websocket_handler.py` | Proxy between the browser and Live API WebSockets. |
+| `backend/get_credentials.py` | Access token sources and caching. |
+| `backend/session_management.py` | Per-session state. |
+| `frontend/index.html` | Page layout and settings. |
+| `frontend/script.js` | UI logic: connect, media controls, chat. |
+| `frontend/gemini-live-api.js` | Live API client: setup message, message parsing, reconnects. |
+| `frontend/live-media-manager.js` | Microphone, camera, screen, audio and video playback, WebRTC. |
+| `frontend/pcm-processor.js`, `frontend/input-processor.js` | Audio worklets for playback and capture. |
+| `feature/Live_API_Branded_Voice.ipynb` | Notebook showing branded voice through the API directly. |
