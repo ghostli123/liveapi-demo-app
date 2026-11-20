@@ -716,3 +716,10 @@ video {
   user-select: all;
   font-family: monospace;
 }
+
+.file-note {
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--gcp-text-secondary);
+}

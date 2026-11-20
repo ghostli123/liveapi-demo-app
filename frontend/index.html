@@ -333,7 +333,7 @@
       </div>
 
       <div class="config-section">
-        <h3>Avatar Mode</h3>
+        <h3>Avatar</h3>
         <div class="checkbox-row">
           <md-checkbox id="enableAvatarMode" touch-target="wrapper" checked onchange="toggleAvatarMode()"></md-checkbox>
           <label for="enableAvatarMode">Show input and avatar side by side</label>
@@ -342,6 +342,16 @@
           <md-checkbox id="saveAvatarVideo" touch-target="wrapper"></md-checkbox>
           <label for="saveAvatarVideo">Save avatar video (WebSocket) as MP4 on disconnect</label>
         </div>
+        <div class="button-group">
+          <input type="file" id="avatarFileInput" accept="image/png,image/jpeg,image/webp" style="display: none;">
+          <md-outlined-button onclick="document.getElementById('avatarFileInput').click()">Custom avatar image
+          </md-outlined-button>
+        </div>
+        <span id="avatarName" class="file-note">Avatar: Piper (stock)</span>
+        <span id="avatarSampleLink" class="create-voice-link" onclick="useSampleAvatar()">Use the sample image</span>
+        <span id="avatarStockLink" class="create-voice-link" hidden onclick="useStockAvatar()">Use the stock avatar</span>
+        <p class="file-note">Custom images need a project allowlisted for custom avatars; they apply from the next
+          connection.</p>
       </div>
 
       <div class="config-section">
