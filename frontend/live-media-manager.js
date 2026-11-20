@@ -580,6 +580,9 @@ class LiveVideoOutputManager {
     }
 }
 
+// How long a WebRTC session may take to connect after the SDP answer.
+const WEBRTC_CONNECT_TIMEOUT_MS = 15000;
+
 class G3RtcWebRtcManager {
     constructor(videoPlayerElement) {
         this.videoPlayerElement = videoPlayerElement;
@@ -591,6 +594,8 @@ class G3RtcWebRtcManager {
         this.micStream = null;
         this.videoTrack = null;
         this.statsInterval = null;
+        // Called when the peer connection fails, e.g. UDP is blocked.
+        this.onConnectionFailed = () => {};
         this.lastBytesReceived = 0;
         this.lastBytesSent = 0;
         this.lastStatsTimeMs = 0;
@@ -620,12 +625,17 @@ class G3RtcWebRtcManager {
             iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
         });
 
-        this.pc.onconnectionstatechange = () => {
-            const state = this.pc ? this.pc.connectionState : "closed";
+        const pc = this.pc;
+        pc.onconnectionstatechange = () => {
+            const state = pc.connectionState;
             console.log("[WebRTC] connectionState:", state);
+            if (this.pc !== pc) return; // A newer session replaced this one.
             const stateEl = document.getElementById("webrtc-state");
             if (stateEl) {
                 stateEl.textContent = state;
+            }
+            if (state === "failed") {
+                this.onConnectionFailed();
             }
         };
 
@@ -730,6 +740,17 @@ class G3RtcWebRtcManager {
             });
         }
         this.startStatsPolling();
+
+        // If no candidate pair works, the connection can sit in "connecting"
+        // without ever reaching "failed", so give up after a timeout.
+        const pc = this.pc;
+        clearTimeout(this.connectTimer);
+        this.connectTimer = setTimeout(() => {
+            if (this.pc === pc && pc.connectionState !== "connected") {
+                console.warn("[WebRTC] Not connected after", WEBRTC_CONNECT_TIMEOUT_MS, "ms");
+                this.onConnectionFailed();
+            }
+        }, WEBRTC_CONNECT_TIMEOUT_MS);
     }
 
     async startMicrophone(deviceId = null) {
@@ -851,6 +872,7 @@ class G3RtcWebRtcManager {
      */
     close({ keepLocalMedia = false } = {}) {
         this.stopStatsPolling();
+        clearTimeout(this.connectTimer);
         if (!keepLocalMedia) {
             this.stopMicrophone();
             this.detachVideoStream();

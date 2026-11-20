@@ -189,6 +189,14 @@ class GeminiLiveAPI {
             typeof G3RtcWebRtcManager !== "undefined"
                 ? new G3RtcWebRtcManager()
                 : null;
+        if (this.webRtcManager) {
+            this.webRtcManager.onConnectionFailed = () => {
+                this.onErrorMessage(
+                    "The WebRTC connection failed. UDP may be blocked on this network; " +
+                    "try the WebSocket transport."
+                );
+            };
+        }
 
         // Real-time bandwidth usage statistics
         this.intervalMs = 2000; // Update interval in milliseconds (2 seconds)
