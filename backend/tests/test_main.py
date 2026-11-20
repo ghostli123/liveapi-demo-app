@@ -4,8 +4,11 @@ import hashlib
 import html.parser
 import json
 import os
+import signal
+import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 from unittest import mock
@@ -971,6 +974,62 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             collector = Collector()
             collector.feed(f.read())
         self.assertEqual(collector.problems, [])
+
+
+class MainAsyncTest(unittest.IsolatedAsyncioTestCase):
+    """main_async with a fake Common BAG gateway subprocess."""
+
+    def setUp(self):
+        gateway = tempfile.NamedTemporaryFile(suffix=".par")
+        self.addCleanup(gateway.close)
+        self.gateway = mock.Mock(spec=subprocess.Popen)
+        self.gateway.poll.return_value = None
+        popen = mock.patch.object(main.subprocess, "Popen", return_value=self.gateway)
+        self.popen = popen.start()
+        self.addCleanup(popen.stop)
+        for patcher in [
+            mock.patch.object(main, "COMMON_BAG_PROXY_PAR", gateway.name),
+            mock.patch.object(
+                main.get_credentials, "get_access_token", return_value="token"
+            ),
+        ]:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    async def test_gateway_stopped_when_port_is_in_use(self):
+        with socket.socket() as busy:
+            busy.bind(("", 0))
+            busy.listen()
+            port = busy.getsockname()[1]
+            with mock.patch.dict("os.environ", {"PORT": str(port)}):
+                with self.assertRaises(OSError):
+                    await main.main_async()
+        self.popen.assert_called_once()
+        self.gateway.terminate.assert_called_once()
+
+    async def test_gateway_stopped_on_sigterm(self):
+        with socket.socket() as probe:
+            probe.bind(("", 0))
+            port = probe.getsockname()[1]
+        with mock.patch.dict("os.environ", {"PORT": str(port)}):
+            server = asyncio.create_task(main.main_async())
+            async with aiohttp.ClientSession() as session:
+                for _ in range(100):
+                    try:
+                        async with session.get(
+                            f"http://127.0.0.1:{port}/healthz"
+                        ) as resp:
+                            self.assertEqual(resp.status, 200)
+                            break
+                    except aiohttp.ClientConnectionError:
+                        self.assertFalse(server.done())
+                        await asyncio.sleep(0.05)
+                else:
+                    self.fail("server didn't start")
+            self.gateway.terminate.assert_not_called()
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.wait_for(server, timeout=10)
+        self.gateway.terminate.assert_called_once()
 
 
 class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
