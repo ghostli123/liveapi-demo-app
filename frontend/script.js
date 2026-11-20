@@ -709,7 +709,17 @@ function addMessageToChat(text, kind = "system") {
 }
 
 function newSystemMessage(message) {
-    return addMessageToChat(message, "system");
+    // Collapse repeats (e.g. several interruptions in a row) into a count.
+    const textChat = AppUI.getElement("text-chat");
+    const last = textChat && textChat.lastElementChild;
+    if (last && last.classList.contains("chat-system") && last.dataset.message === message) {
+        last.dataset.count = String(Number(last.dataset.count || 1) + 1);
+        last.textContent = `${message} (×${last.dataset.count})`;
+        return last;
+    }
+    const line = addMessageToChat(message, "system");
+    if (line) line.dataset.message = message;
+    return line;
 }
 
 function newErrorMessage(message) {
@@ -727,6 +737,10 @@ function appendTranscript(stream, text) {
     if (!line) return;
     const textChat = AppUI.getElement("text-chat");
     const atBottom = textChat.scrollHeight - textChat.scrollTop - textChat.clientHeight < 24;
+    // Fragments don't always carry the space after a sentence ("dog.She").
+    if (/[.!?,;:]$/.test(line.textContent) && /^[^\s.!?,;:]/.test(text)) {
+        text = " " + text;
+    }
     line.textContent += text;
     if (atBottom) {
         textChat.scrollTop = textChat.scrollHeight;
