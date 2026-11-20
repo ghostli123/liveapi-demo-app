@@ -489,13 +489,15 @@ function isWebRtcTransport() {
 
 function handleReceiveResponse(messageResponse) {
     switch (messageResponse.type) {
-        case "SETUP COMPLETE":
-            if (isWebRtcTransport() && messageResponse.answerSdp) {
-                newSystemMessage("Setup complete (WebRTC SDP answer negotiated).");
-            } else {
-                newSystemMessage("Setup complete.");
-            }
+        case "SETUP COMPLETE": {
+            const api = AppState.geminiLiveApi;
+            const transport = isWebRtcTransport() ? "WebRTC" : "WebSocket";
+            // The server's session ID finds this session in server-side logs.
+            const session = messageResponse.sessionId ? `, session ${messageResponse.sessionId}` : "";
+            newSystemMessage(`Setup complete: ${api.model} on ${api.endPoint} over ${transport}${session}.`);
+            AppUI.setText("server-session-id", messageResponse.sessionId || "--");
             break;
+        }
         case "GENERATION_STARTED":
             closeTranscriptLine("input");
             setModelSpeaking(true);
@@ -1127,6 +1129,7 @@ function connectBtnClick() {
     }
     AppUI.setText("usage-tokens", "--");
     AppUI.setText("response-latency", "--");
+    AppUI.setText("server-session-id", "--");
     LatencyState.turnEndedAt = null;
 
     handleModelChange();
