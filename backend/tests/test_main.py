@@ -4,6 +4,8 @@ import hashlib
 import html.parser
 import json
 import os
+import subprocess
+import sys
 import threading
 import unittest
 from unittest import mock
@@ -11,6 +13,7 @@ import urllib.parse
 
 import aiohttp
 from aiohttp import test_utils, web
+from absl import flags
 from absl.testing import flagsaver
 import websockets
 
@@ -868,6 +871,42 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(main.is_allowed_host("demo.example.com"))
             self.assertTrue(main.is_allowed_host("proxy.example"))
             self.assertFalse(main.is_allowed_host(""))
+
+    def test_invalid_allowed_hosts_entries_are_rejected(self):
+        for entry in [
+            "[",
+            "demo.example:http",
+            "demo.example:99999",
+            "https://demo.example",
+            "demo.example/app",
+            "user@demo.example",
+            "demo example",
+            ":8443",
+        ]:
+            with self.assertRaises(flags.IllegalFlagValueError, msg=entry):
+                with flagsaver.flagsaver(allowed_hosts=["demo.example.com", entry]):
+                    pass
+        with flagsaver.flagsaver(allowed_hosts=["myhost", "[::1]:8080", "*", ""]):
+            self.assertEqual(
+                main.explicitly_allowed_hosts(), frozenset({"myhost", "::1", "*"})
+            )
+
+    def test_server_refuses_to_start_with_invalid_allowed_hosts(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(os.path.dirname(main.__file__), "main.py"),
+                "--allowed_hosts=demo.example,[",
+            ],
+            env={**os.environ, "PORT": "0"},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--allowed_hosts", result.stderr)
+        self.assertIn("invalid entry '['", result.stderr)
+        self.assertNotIn("Serving on port", result.stderr)
 
     def test_is_allowed_host(self):
         for host in ["localhost", "127.0.0.1", "::1", "10.1.2.3", "app.localhost"]:
