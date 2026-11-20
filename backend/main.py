@@ -1,6 +1,11 @@
+"""Backend for the Gemini Live API demo: serves the frontend and proxies sessions."""
+
 import asyncio
+import functools
 import json
 import os
+import re
+import signal
 import subprocess
 from typing import Any
 
@@ -8,19 +13,17 @@ from aiohttp import web
 import aiohttp_cors
 from absl import app, flags, logging
 from google import genai
-import google.genai.chats
 import websockets
 
+import get_credentials
 import session_management
 import websocket_handler
-import get_credentials
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Navigate to the frontend folder (assuming it's a sibling to the backend folder)
 FRONTEND_DIR = os.path.join(BASE_DIR, "..", "frontend")
 COMMON_BAG_PROXY_PAR = os.path.join(BASE_DIR, "common_bag_ws_proxy.par")
 # Constants
-DEBUG = False
 SERVICE_URL = "wss://{host}/ws/google.cloud.aiplatform.internal.LlmBidiService/BidiGenerateContent"
 COMMON_BAG_ENVIRONMENTS = frozenset(
     {
@@ -30,7 +33,20 @@ COMMON_BAG_ENVIRONMENTS = frozenset(
         "autopush-vertex-us-bidi",
     }
 )
+# Global Vertex hosts. For the "us" and "eu" multi-regions they map to
+# {prefix}aiplatform.{location}.rep.{rest}.
+VERTEX_HOSTS = frozenset(
+    {
+        "autopush-aiplatform.sandbox.googleapis.com",
+        "staging-aiplatform.sandbox.googleapis.com",
+        "aiplatform.googleapis.com",
+    }
+)
+DEFAULT_PROJECT_ID = "live-api-webrtc-testing"
 FR_SIMULATOR_MODEL = "gemini-3.1-pro-preview"
+# Preview models are served from the global endpoint only, whatever the
+# Live API session's location.
+FR_SIMULATOR_LOCATION = "global"
 FR_SIMULATOR_PROMPT = """
 You're a function response simulator, your job is to provide a simulated function response, you'll be provided with all function names and their descriptions.
 
@@ -40,39 +56,124 @@ If a function response should follow a specific format, it will be described in 
 If there are any issues with the arguments, such as type is incorrect, required arguments not provided, in these kind of cases, you should return a string like raise Exception.
 
 """
+# Max size of one WebSocket message from the browser (custom avatar images are large).
+MAX_CLIENT_MESSAGE_BYTES = 64 * 1024 * 1024
+
+_LOCATION_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 SESSION_MANAGER = session_management.SessionManager()
 
 # Flags
-PROJECT_ID = flags.DEFINE_string("project_id", None, "Google Cloud Project ID.")
+PROJECT_ID = flags.DEFINE_string(
+    "project_id",
+    None,
+    "Google Cloud project for Live API sessions. Defaults to $GOOGLE_CLOUD_PROJECT, "
+    f"then {DEFAULT_PROJECT_ID}.",
+)
 COMMON_BAG_WS_PORT = flags.DEFINE_integer(
     "common_bag_ws_port",
     8765,
     "Local WebSocket port for the Beyond common BAG Stubby gateway.",
 )
+ALLOWED_HOST_SUFFIXES = flags.DEFINE_list(
+    "allowed_host_suffixes",
+    [".googleapis.com"],
+    "Upstream hosts the proxy may connect to. The proxy sends its access token "
+    "to these hosts, so keep this list tight.",
+)
+DEBUG = flags.DEFINE_bool(
+    "debug", False, "Log at debug level, including a preview of every proxied message."
+)
+
+
+def project_id() -> str:
+    return (
+        PROJECT_ID.value or os.environ.get("GOOGLE_CLOUD_PROJECT") or DEFAULT_PROJECT_ID
+    )
+
+
+def resolve_ws_host(endpoint: Any, location: Any) -> str:
+    """Maps the frontend's endpoint and location to the upstream WebSocket host.
+
+    Raises:
+      ValueError: the result would be a host outside --allowed_host_suffixes.
+        Without this check, anyone who can reach the server could have it send
+        its access token to a host of their choosing.
+    """
+    if endpoint in COMMON_BAG_ENVIRONMENTS:
+        return endpoint
+    if not isinstance(endpoint, str) or not endpoint:
+        raise ValueError("Missing endpoint")
+    if not isinstance(location, str) or not _LOCATION_RE.match(location):
+        raise ValueError(f"Invalid location: {location!r}")
+
+    if ".rep." in endpoint or endpoint.startswith("global-"):
+        ws_host = endpoint
+    elif endpoint in VERTEX_HOSTS and location in ("us", "eu"):
+        prefix, rest = endpoint.split("aiplatform.", 1)
+        ws_host = f"{prefix}aiplatform.{location}.rep.{rest}"
+    elif endpoint in VERTEX_HOSTS and location == "global":
+        ws_host = endpoint
+    else:
+        ws_host = f"{location}-{endpoint}"
+
+    if not _HOSTNAME_RE.match(ws_host) or not any(
+        ws_host.endswith(suffix) for suffix in ALLOWED_HOST_SUFFIXES.value
+    ):
+        raise ValueError(
+            f"{ws_host!r} is not an allowed Live API host (see --allowed_host_suffixes)"
+        )
+    return ws_host
+
+
+def upstream_url(ws_host: str) -> str:
+    if ws_host in COMMON_BAG_ENVIRONMENTS:
+        return f"ws://127.0.0.1:{COMMON_BAG_WS_PORT.value}/{ws_host}"
+    return SERVICE_URL.format(host=ws_host)
+
+
+def _json_error(message: str, status: int) -> web.Response:
+    return web.json_response({"error": message}, status=status)
+
+
+async def _read_json_object(request: web.Request) -> dict[str, Any] | None:
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _is_valid_session_id(session_id: Any) -> bool:
+    return isinstance(session_id, str) and bool(_SESSION_ID_RE.match(session_id))
+
 
 # --- ADAPTER CLASS ---
 
 
 class AiohttpToWebsocketsAdapter:
-    """Adapts an aiohttp WebSocketResponse to look like a websockets.LegacyProtocol"""
+    """Gives an aiohttp WebSocketResponse the send/recv interface of a websockets connection."""
 
     def __init__(self, aio_ws: web.WebSocketResponse, request_path="/ws"):
         self.aio_ws = aio_ws
         self._path = request_path
 
     async def send(self, data):
-        await self.aio_ws.send_str(data)
+        if isinstance(data, bytes):
+            await self.aio_ws.send_bytes(data)
+        else:
+            await self.aio_ws.send_str(data)
 
     async def recv(self):
         msg = await self.aio_ws.receive()
-        if msg.type in (
-            web.WSMsgType.CLOSE,
-            web.WSMsgType.CLOSING,
-            web.WSMsgType.CLOSED,
-        ):
-            raise websockets.exceptions.ConnectionClosed(None, None)
-        return msg.data
+        if msg.type in (web.WSMsgType.TEXT, web.WSMsgType.BINARY):
+            return msg.data
+        # CLOSE, CLOSING, CLOSED or ERROR: the browser side is gone.
+        raise websockets.exceptions.ConnectionClosed(None, None)
 
     async def close(self, code=1000, reason=""):
         await self.aio_ws.close(code=code, message=reason.encode())
@@ -85,195 +186,151 @@ class AiohttpToWebsocketsAdapter:
 # --- HANDLERS ---
 
 
-async def aiohttp_websocket_handler(request: web.Request) -> web.WebSocketResponse:
-    """Bridge between Cloud Run (aiohttp) and the shared WebsocketHandler."""
+async def aiohttp_websocket_handler(request: web.Request) -> web.StreamResponse:
+    """Bridges a browser WebSocket to the upstream Live API session."""
     session_id = request.query.get("session_id")
-    if not session_id:
-        return web.Response(text="Missing session_id", status=400)
+    if not _is_valid_session_id(session_id):
+        return web.Response(text="Missing or invalid session_id", status=400)
 
     session_handler = await SESSION_MANAGER.search_item(session_id)
     if not session_handler:
         return web.Response(text="No config record for session", status=404)
+    if session_handler.websocket_handler:
+        return web.Response(text="Session already has a WebSocket", status=409)
 
-    # Prepare aiohttp WS (64 MB max frame size for custom avatar images)
-    ws = web.WebSocketResponse(max_msg_size=64 * 1024 * 1024)
+    ws = web.WebSocketResponse(max_msg_size=MAX_CLIENT_MESSAGE_BYTES)
     await ws.prepare(request)
 
-    # Wrap the aiohttp WS in the adapter to satisfy the shared dependency
-    adapted_ws = AiohttpToWebsocketsAdapter(ws, request_path=request.path_qs)
-
-    if session_handler.ws_host in COMMON_BAG_ENVIRONMENTS:
-        liveapi_service_url = (
-            f"ws://127.0.0.1:{COMMON_BAG_WS_PORT.value}/{session_handler.ws_host}"
-        )
-    else:
-        liveapi_service_url = SERVICE_URL.format(host=session_handler.ws_host)
+    wb_handler = websocket_handler.WebsocketHandler(
+        upstream_url(session_handler.ws_host),
+        session_id,
+        AiohttpToWebsocketsAdapter(ws, request_path=request.path_qs),
+        debug_mode=DEBUG.value,
+    )
+    session_handler.websocket_handler = wb_handler
     try:
-        # Pass the ADAPTED websocket here
-        wb_handler = websocket_handler.WebsocketHandler(
-            liveapi_service_url, session_id, adapted_ws, debug_mode=DEBUG
-        )
-
-        # This starts the internal proxy tasks in your shared handler
-        session_handler.websocket_handler = wb_handler
         await wb_handler.start_websocket()
-
+        close_code, close_reason = wb_handler.client_close_frame()
     except Exception as e:
         logging.exception("Error in bridged websocket handler")
-        try:
-            await ws.close(
-                code=1011,
-                message=f"{type(e).__name__}: {e}".encode("utf-8")[:120],
-            )
-        except Exception:
-            pass
+        close_code = 1011
+        close_reason = websocket_handler.truncate_close_reason(
+            f"{type(e).__name__}: {e}"
+        )
     finally:
         logging.info("WebSocket connection cleanup for session %s", session_id)
         # Always clean up the session to prevent memory leaks if the client
         # disconnects without sending a 'disconnect' command.
         await SESSION_MANAGER.delete_item(session_id)
 
+    # Relay how upstream ended the session (e.g. a quota or permission error),
+    # which the frontend shows to the user.
+    if not ws.closed:
+        await ws.close(code=close_code, message=close_reason.encode("utf-8"))
     return ws
 
 
 async def handle_fr_post_request(request: web.Request):
-    """
-    Handles incoming POST requests, forwards the content to the Gemini chat session,
-    and returns the model's response.
-    """
+    """Forwards a function-call simulation request to the session's Gemini chat."""
+    request_body = await _read_json_object(request)
+    if request_body is None:
+        return _json_error("Request body must be a JSON object", 400)
+
+    chat_session = await SESSION_MANAGER.search_item(
+        request_body.pop("session_id", None)
+    )
+    if not chat_session:
+        return _json_error("Unknown session", 404)
+    if not chat_session.fr_session:
+        return _json_error(
+            f"Function response simulator unavailable: {chat_session.fr_error or 'not initialized'}",
+            503,
+        )
+
+    query_object = request_body.pop("objective", None)
+    query = json.dumps(request_body)
+    logging.debug("Received %s query for Gemini:\n%s", query_object, query)
+    if query_object == "fr_generate":
+        current_content = [
+            genai.types.Part(text="Now generate function response this function call."),
+            genai.types.Part(text=query),
+        ]
+    elif query_object == "fc_definition":
+        current_content = [
+            genai.types.Part(text="The definition of the functions are:"),
+            genai.types.Part(text=query),
+        ]
+    else:
+        return _json_error(f"Unknown query objective type {query_object!r}", 400)
 
     try:
-        request_body: dict[str, Any] = await request.json()
-        # The entire body is the query for the function call simulation
-        session_id = request_body.get("session_id")
-        chat_session: (
-            session_management.SessionBaseModel | None
-        ) = await SESSION_MANAGER.search_item(session_id)
-        if not chat_session:
-            return web.json_response(
-                {"error": "Chat session not initialized"}, status=503
-            )
-
-        fr_chat_session = chat_session.fr_session
-        query_object = request_body.pop("objective")
-        logging.debug("query object:\n%s", query_object)
-
-        query = json.dumps(request_body)
-        logging.debug("Received query for Gemini:\n%s", query)
-
-        if query_object == "fr_generate":
-            current_content = [
-                genai.types.Part(
-                    text="Now generate function response this function call."
-                ),
-                genai.types.Part(text=query),
-            ]
-        elif query_object == "fc_definition":
-            current_content = [
-                genai.types.Part(text="The definition of the functions are:"),
-                genai.types.Part(text=query),
-            ]
-        else:
-            raise Exception(f"Unknown query objective type {query_object}")
-
-        response = await fr_chat_session.send_message(current_content)
-        logging.debug("Sending back frontend with response:\n%s", response.text)
-        return web.json_response({"response": response.text})
+        response = await chat_session.fr_session.send_message(current_content)
     except Exception as e:
-        logging.exception(f"Error processing POST request")
-        return web.json_response({"error": str(e)}, status=500)
+        logging.exception("Function response simulator request failed")
+        return _json_error(f"Function response simulator failed: {e}", 502)
+    logging.debug("Sending back frontend with response:\n%s", response.text)
+    return web.json_response({"response": response.text})
 
 
 async def handle_control_request(request: web.Request):
-    """Your existing control logic."""
+    """Creates the server-side record for a session before its WebSocket opens."""
+    request_body = await _read_json_object(request)
+    if request_body is None:
+        return _json_error("Request body must be a JSON object", 400)
+    session_id = request_body.get("session_id")
+    if not _is_valid_session_id(session_id):
+        return _json_error("Missing or invalid session_id", 400)
+    if request_body.get("command") != "connect":
+        return _json_error("Invalid command", 400)
+
+    location = request_body.get("location")
+    if isinstance(location, str):
+        location = location.strip().lower()
+    endpoint = request_body.get("endpoint")
     try:
-        request_body = await request.json()
-        command = request_body.get("command")
-        session_id = request_body.get("session_id")
-        session_handler = await SESSION_MANAGER.search_item(session_id)
+        ws_host = resolve_ws_host(endpoint, location)
+    except ValueError as e:
+        return _json_error(str(e), 400)
+    logging.info("Websocket host for session %s is set to: %s", session_id, ws_host)
 
-        if command == "connect":
-            location = request_body.get("location")
-            endpoint = request_body.get("endpoint")
+    session_handler = await SESSION_MANAGER.search_item(session_id)
+    if session_handler and session_handler.websocket_handler:
+        return _json_error("Already running", 409)
 
-            if endpoint in COMMON_BAG_ENVIRONMENTS:
-                ws_host = endpoint
-            elif endpoint and (".rep." in endpoint or endpoint.startswith("global-")):
-                ws_host = endpoint
-            elif location in ("us", "eu") and endpoint in (
-                "autopush-aiplatform.sandbox.googleapis.com",
-                "staging-aiplatform.sandbox.googleapis.com",
-                "aiplatform.googleapis.com",
-            ):
-                prefix, rest = endpoint.split("aiplatform.", 1)
-                ws_host = f"{prefix}aiplatform.{location}.rep.{rest}"
-            elif location == "global" and endpoint in (
-                "autopush-aiplatform.sandbox.googleapis.com",
-                "staging-aiplatform.sandbox.googleapis.com",
-                "aiplatform.googleapis.com",
-            ):
-                ws_host = endpoint
-            else:
-                ws_host = f"{location}-{endpoint}"
-
-            logging.info(
-                "Websocket host for session %s is set to: %s", session_id, ws_host
-            )
-
-            if session_handler and session_handler.websocket_handler:
-                return web.json_response({"error": "Already running"}, status=409)
-
-            fr_location = "global" if location in ("us", "global") else location
-            try:
-                gemini_chat_session, used_project_id = await asyncio.to_thread(
-                    initialize_gemini_chat_session, fr_location
-                )
-            except Exception as err:
-                logging.warning(
-                    "Skipping FR chat session init for endpoint %s: %s",
-                    endpoint,
-                    err,
-                )
-                gemini_chat_session = None
-                used_project_id = PROJECT_ID.value or "live-api-webrtc-testing"
-            session_handler = session_management.SessionBaseModel(
-                session_id=session_id, ws_host=ws_host, fr_session=gemini_chat_session
-            )
-            await SESSION_MANAGER.add_item(session_id, session_handler)
-            return web.json_response(
-                {
-                    "status": "Session initialized.",
-                    "project_id": used_project_id,
-                }
-            )
-
-        return web.json_response({"error": "Invalid command"}, status=400)
-    except Exception as e:
-        return web.json_response({"error": str(e)}, status=500)
-
-
-def initialize_gemini_chat_session(location: str):
-    project_id = PROJECT_ID.value
-    if not project_id:
-        _, project_id = get_credentials.get_credentials()
-        if not project_id:
-            project_id = "live-api-webrtc-testing"
-            logging.info(f"Using hardcoded fallback project ID: {project_id}")
-        else:
-            logging.info(f"Auto-detected project ID: {project_id}")
-
-    logging.info(
-        f"Initializing Gemini chat session with project {project_id}, location {location}..."
+    fr_session, fr_error = None, ""
+    try:
+        fr_session = await asyncio.to_thread(initialize_gemini_chat_session)
+    except Exception as err:
+        fr_error = f"{type(err).__name__}: {err}"
+        logging.warning(
+            "Skipping FR chat session init for endpoint %s: %s", endpoint, fr_error
+        )
+    session_handler = session_management.SessionBaseModel(
+        session_id=session_id, ws_host=ws_host, fr_session=fr_session, fr_error=fr_error
     )
-    client = genai.Client(vertexai=True, project=project_id, location=location)
-    return (
-        client.aio.chats.create(
-            model=FR_SIMULATOR_MODEL,
-            config=genai.types.GenerateContentConfig(
-                system_instruction=FR_SIMULATOR_PROMPT
-            ),
+    await SESSION_MANAGER.add_item(session_id, session_handler)
+    return web.json_response(
+        {"status": "Session initialized.", "project_id": project_id()}
+    )
+
+
+@functools.cache
+def _genai_client() -> genai.Client:
+    return genai.Client(
+        vertexai=True,
+        project=project_id(),
+        location=FR_SIMULATOR_LOCATION,
+        credentials=get_credentials.ChainCredentials(),
+    )
+
+
+def initialize_gemini_chat_session():
+    logging.info("Initializing Gemini chat session with project %s...", project_id())
+    return _genai_client().aio.chats.create(
+        model=FR_SIMULATOR_MODEL,
+        config=genai.types.GenerateContentConfig(
+            system_instruction=FR_SIMULATOR_PROMPT
         ),
-        project_id,
     )
 
 
@@ -281,8 +338,21 @@ async def serve_index(request):
     return web.FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
 
 
+async def health_check(request):
+    return web.Response(text="ok")
+
+
+@web.middleware
+async def revalidate_static_files(request: web.Request, handler):
+    """Makes browsers revalidate the frontend so they never run stale JS after a deploy."""
+    response = await handler(request)
+    if request.path == "/" or request.path.startswith("/frontend/"):
+        response.headers.setdefault("Cache-Control", "no-cache")
+    return response
+
+
 async def create_app():
-    app = web.Application()
+    app = web.Application(middlewares=[revalidate_static_files])
     cors = aiohttp_cors.setup(
         app,
         defaults={
@@ -299,6 +369,7 @@ async def create_app():
     cors.add(app.router.add_post("/api/post_endpoint", handle_fr_post_request))
     cors.add(app.router.add_post("/api/control", handle_control_request))
     app.router.add_get("/ws", aiohttp_websocket_handler)
+    app.router.add_get("/healthz", health_check)
 
     # Static Files
     app.router.add_get("/", serve_index)
@@ -308,7 +379,7 @@ async def create_app():
 
 
 async def main_async():
-    logging.set_verbosity(logging.DEBUG if DEBUG else logging.INFO)
+    logging.set_verbosity(logging.DEBUG if DEBUG.value else logging.INFO)
     proxy_proc = None
     if os.path.exists(COMMON_BAG_PROXY_PAR):
         logging.info(
@@ -331,10 +402,21 @@ async def main_async():
     site = web.TCPSite(runner, None, port)
     await site.start()
 
-    logging.info(f"Server unified on port {port}")
+    logging.info(
+        "Serving on port %d; project %s; allowed upstream hosts: %s",
+        port,
+        project_id(),
+        ", ".join(ALLOWED_HOST_SUFFIXES.value),
+    )
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
     try:
-        await asyncio.Event().wait()
+        await stop.wait()
+        logging.info("Shutting down...")
     finally:
+        await runner.cleanup()
         if proxy_proc is not None and proxy_proc.poll() is None:
             proxy_proc.terminate()
 
