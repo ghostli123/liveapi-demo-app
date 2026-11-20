@@ -310,6 +310,56 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resp.status, 200)
 
+    async def test_rejects_dns_rebinding_and_foreign_ip_origins(self):
+        body = {
+            "command": "connect",
+            "session_id": "s11",
+            "endpoint": "autopush-common",
+            "location": "us-central1",
+        }
+        # DNS rebinding: the attacker's name, pointed at this server.
+        resp = await self.client.post(
+            "/api/control",
+            json=body,
+            headers={"Host": "evil.example:8080", "Origin": "http://evil.example:8080"},
+        )
+        self.assertEqual(resp.status, 403)
+        self.assertIn("--allowed_hosts", await resp.text())
+        # A page served from some other IP address.
+        resp = await self.client.post(
+            "/api/control", json=body, headers={"Origin": "http://203.0.113.7:8080"}
+        )
+        self.assertEqual(resp.status, 403)
+
+    async def test_allowed_hosts_flag_admits_a_proxy(self):
+        body = {
+            "command": "connect",
+            "session_id": "s12",
+            "endpoint": "autopush-common",
+            "location": "us-central1",
+        }
+        headers = {"Host": "demo.example.com", "Origin": "https://demo.example.com"}
+        resp = await self.client.post("/api/control", json=body, headers=headers)
+        self.assertEqual(resp.status, 403)
+        with flagsaver.flagsaver(allowed_hosts=["demo.example.com"]):
+            resp = await self.client.post("/api/control", json=body, headers=headers)
+            self.assertEqual(resp.status, 200)
+            # A proxy that rewrites Host to localhost but keeps the Origin.
+            resp = await self.client.post(
+                "/api/control",
+                json={**body, "session_id": "s13"},
+                headers={"Origin": "https://demo.example.com"},
+            )
+            self.assertEqual(resp.status, 200)
+
+    def test_is_allowed_host(self):
+        for host in ["localhost", "127.0.0.1", "::1", "10.1.2.3", "app.localhost"]:
+            self.assertTrue(main.is_allowed_host(host), host)
+        for host in ["evil.example", "", None, "foo.run.app"]:
+            self.assertFalse(main.is_allowed_host(host), host)
+        with mock.patch.dict("os.environ", {"K_SERVICE": "demo"}):
+            self.assertTrue(main.is_allowed_host("demo-abc123-uc.a.run.app"))
+
     async def test_static_files_revalidate(self):
         resp = await self.client.get("/frontend/script.js")
         self.assertEqual(resp.status, 200)

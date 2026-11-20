@@ -32,7 +32,9 @@ class LiveAudioOutputManager {
         // Through the same promise as playAudioChunk(), so chunks queued
         // before this call are posted (and dropped) before the clear.
         if (this.ready) {
-            this.ready.then(() => this.workletNode.port.postMessage("clear"));
+            this.ready
+                .then(() => this.workletNode.port.postMessage("clear"))
+                .catch(() => {}); // The worklet failed to load; nothing to clear.
         }
     }
 

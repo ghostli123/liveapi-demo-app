@@ -46,10 +46,11 @@ Requires Python 3.11 or later.
 | --- | --- | --- |
 | `--project_id` | `$GOOGLE_CLOUD_PROJECT`, then `live-api-webrtc-testing` | Project used for Live API sessions and the function-call simulator. |
 | `--allowed_host_suffixes` | `.googleapis.com` | Upstream hosts the proxy may connect to. The proxy sends its access token to these hosts, so keep the list tight. |
+| `--allowed_hosts` | none | Extra host names browsers may use to reach the server, such as a custom domain or the public host of a proxy that rewrites `Host`. localhost, IP addresses, this machine's names, and `*.run.app` on Cloud Run are always allowed. |
 | `--debug` | off | Debug logging, including a preview of every proxied message. |
 | `PORT` (env) | `8080` | Port to listen on. |
 
-The API and WebSocket only accept browser requests from the app's own pages, so other websites can't use the server's credentials. Clients that send no `Origin` header, such as `scripts/smoke_test.py`, are allowed.
+The API and WebSocket only accept browser requests from the app's own pages, under an allowed host name, so other websites (including through DNS rebinding) can't use the server's credentials. Clients that send no `Origin` header, such as `scripts/smoke_test.py`, are allowed.
 
 ### Credentials
 
