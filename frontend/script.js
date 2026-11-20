@@ -162,6 +162,12 @@ const PERSISTED_FIELDS = [
     "voiceLocale",
     "systemInstructions",
 ];
+const PERSISTED_CHECKBOXES = [
+    "enableGoogleSearch",
+    "enableAvatarMode",
+    "inputTranscript",
+    "outputTranscript",
+];
 const SETTINGS_KEY = "liveapi-demo-settings";
 
 function loadSavedSettings() {
@@ -188,6 +194,11 @@ function saveSettings() {
         const element = AppUI.getElement(id);
         if (element) settings[id] = element.value;
     }
+    for (const id of PERSISTED_CHECKBOXES) {
+        const element = AppUI.getElement(id);
+        if (element) settings[id] = element.checked;
+    }
+    settings.responseModality = getSelectedResponseModality();
     try {
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
     } catch (error) {
@@ -198,10 +209,23 @@ function saveSettings() {
 async function restoreSettings() {
     const saved = loadSavedSettings();
     await Promise.all(
-        ["md-outlined-select", "md-outlined-text-field"].map((name) =>
+        ["md-outlined-select", "md-outlined-text-field", "md-checkbox", "md-radio"].map((name) =>
             customElements.whenDefined(name)
         )
     );
+    for (const id of PERSISTED_CHECKBOXES) {
+        const element = AppUI.getElement(id);
+        if (!element) continue;
+        if (typeof saved[id] === "boolean") element.checked = saved[id];
+        element.addEventListener("change", saveSettings);
+    }
+    for (const radio of document.querySelectorAll('md-radio[name="responseModality"]')) {
+        if (typeof saved.responseModality === "string") {
+            radio.checked = radio.value === saved.responseModality;
+        }
+        radio.addEventListener("change", saveSettings);
+    }
+    toggleAvatarMode(); // Apply the restored avatar-mode layout.
     for (const id of PERSISTED_FIELDS) {
         const element = AppUI.getElement(id);
         if (!element) continue;
