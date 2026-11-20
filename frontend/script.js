@@ -28,6 +28,7 @@ const AppState = {
     mediaRecorder: null,
     audioChunks: [],
     isRecording: false,
+    userTurnActive: false, // Between "Start speaking" and "Done speaking"
     recordingStartTime: null,
 };
 
@@ -715,11 +716,6 @@ function newErrorMessage(message) {
     return addMessageToChat(message, "error");
 }
 
-// Kept for callers outside this file.
-function newModelMessage(message) {
-    return newSystemMessage(message);
-}
-
 /** Streams transcript text into one chat line per utterance. */
 function appendTranscript(stream, text) {
     if (!text) return;
@@ -832,14 +828,22 @@ function micOffBtnClick() {
     startAudioInput();
 }
 
-function audioStartButtonClick() {
-    console.log("start voice activity...");
-    AppState.geminiLiveApi.sendVoiceActivityMessage(true);
+// With automatic activity detection disabled, the server only knows where a
+// spoken turn starts and ends from activity_start/activity_end messages.
+function setUserTurnActive(active) {
+    AppState.userTurnActive = active;
+    AppUI.setText("turnBtn", active ? "Done speaking" : "Start speaking");
 }
 
-function audioEndButtonClick() {
-    console.log("end voice activity...");
-    AppState.geminiLiveApi.sendVoiceActivityMessage(false);
+function turnBtnClick() {
+    if (!AppState.userTurnActive) {
+        if (!isMicOn()) micOffBtnClick();
+        AppState.geminiLiveApi.sendVoiceActivityMessage(true);
+        setUserTurnActive(true);
+    } else {
+        AppState.geminiLiveApi.sendVoiceActivityMessage(false);
+        setUserTurnActive(false);
+    }
 }
 
 // --- Video & Screen Capturing ---
@@ -1060,6 +1064,8 @@ function endSession() {
     showMicState(false);
     showCameraState(false);
     setMediaButtonsEnabled(false);
+    AppUI.setHidden("turnBtnWrap", true);
+    setUserTurnActive(false);
     closeTranscriptLine("input");
     closeTranscriptLine("output");
     AppState.liveAudioOutputManager.clear();
@@ -1162,6 +1168,7 @@ function connectBtnClick() {
 
     AppState.geminiLiveApi.onConnectionStarted = () => {
         setMediaButtonsEnabled(true);
+        AppUI.setHidden("turnBtnWrap", !AppState.geminiLiveApi.disableDetection);
         setAppStatus("connected");
     };
     AppState.geminiLiveApi.connect();
@@ -1372,6 +1379,7 @@ window.connectBtnClick = connectBtnClick;
 window.disconnectBtnClick = disconnectBtnClick;
 window.micBtnClick = micBtnClick;
 window.micOffBtnClick = micOffBtnClick;
+window.turnBtnClick = turnBtnClick;
 window.cameraBtnClick = cameraBtnClick;
 window.cameraOffBtnClick = cameraOffBtnClick;
 window.screenShareBtnClick = screenShareBtnClick;
