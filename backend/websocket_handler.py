@@ -233,10 +233,13 @@ class WebsocketHandler:
         await self.connection_handler
 
     async def end_websocket(self) -> None:
-        if self.connection_handler:
-            self.connection_handler.cancel()
-            try:
-                await self.connection_handler
-            except asyncio.CancelledError:
-                pass  # Cancellation is expected.
-            self.connection_handler = None
+        task, self.connection_handler = self.connection_handler, None
+        # A finished task's outcome already went to start_websocket's caller;
+        # awaiting it again would re-raise its error during cleanup.
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass  # Cancellation is expected.
