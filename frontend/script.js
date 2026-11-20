@@ -259,6 +259,11 @@ function initDOMEventListeners() {
         recordButton.addEventListener("click", handleRecordClick);
     }
 
+    const voiceDropdown = AppUI.getElement("voice-dropdown");
+    if (voiceDropdown) {
+        voiceDropdown.addEventListener("change", selectBrandedVoice);
+    }
+
     const envSelect = AppUI.getElement("envApiHost");
     if (envSelect) {
         envSelect.addEventListener("change", handleEnvironmentChange);
@@ -359,20 +364,83 @@ function handleModelChange() {
 }
 
 // --- Input Handlers ---
-function handleAudioFileInputChange(event) {
+// --- Branded voice samples ---
+// Samples are sent as 24 kHz mono 16-bit WAV, the format used by
+// feature/Live_API_Branded_Voice.ipynb, whatever format the user provides.
+const VOICE_SAMPLE_RATE = 24000;
+const MIN_VOICE_SAMPLE_S = 10;
+const BrandedVoices = new Map(); // voice-dropdown value -> base64 WAV
+
+function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(String(reader.result).split(",")[1] || "");
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+    });
+}
+
+/**
+ * Converts any audio the browser can decode to a 24 kHz mono WAV sample.
+ * @param {ArrayBuffer} audioData
+ * @returns {Promise<{base64: string, durationS: number}>}
+ */
+async function toVoiceSample(audioData) {
+    // Offline contexts can decode too, and need no closing; Chrome limits how
+    // many realtime AudioContexts a page may hold.
+    const decoded = await new OfflineAudioContext(1, 1, VOICE_SAMPLE_RATE).decodeAudioData(
+        audioData
+    );
+    const offline = new OfflineAudioContext(
+        1, // Mixing to a mono destination downmixes stereo input.
+        Math.ceil(decoded.duration * VOICE_SAMPLE_RATE),
+        VOICE_SAMPLE_RATE
+    );
+    const source = offline.createBufferSource();
+    source.buffer = decoded;
+    source.connect(offline.destination);
+    source.start();
+    const rendered = await offline.startRendering();
+    return { base64: await blobToBase64(bufferToWave(rendered)), durationS: decoded.duration };
+}
+
+/** Adds a voice to the Branded Voice dropdown and selects it. */
+function addBrandedVoice(name, base64) {
+    const dropdown = AppUI.getElement("voice-dropdown");
+    const id = `custom-${BrandedVoices.size + 1}`;
+    BrandedVoices.set(id, base64);
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = name;
+    dropdown.appendChild(option);
+    dropdown.value = id;
+    selectBrandedVoice();
+}
+
+function selectBrandedVoice() {
+    const dropdown = AppUI.getElement("voice-dropdown");
+    AppState.customVoiceBase64 = (dropdown && BrandedVoices.get(dropdown.value)) || "";
+}
+
+async function handleAudioFileInputChange(event) {
     const file = event.target.files[0];
     if (!file) return;
+    event.target.value = ""; // So choosing the same file again fires change.
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-        if (typeof e.target.result === "string") {
-            AppState.customVoiceBase64 = e.target.result.split(",")[1] || "";
-            AppUI.setText("fileName", `File: ${file.name}`);
-        }
-    };
-    reader.readAsDataURL(file);
-
-    AppUI.showModal(`New branded voice "${file.name}" has been successfully uploaded.`);
+    try {
+        const { base64, durationS } = await toVoiceSample(await file.arrayBuffer());
+        addBrandedVoice(file.name, base64);
+        AppUI.setText("fileName", `File: ${file.name} (${durationS.toFixed(1)} s)`);
+        AppUI.showModal(
+            durationS < MIN_VOICE_SAMPLE_S
+                ? `"${file.name}" is ${durationS.toFixed(1)} s long. It is selected, but a ` +
+                  `sample of at least ${MIN_VOICE_SAMPLE_S} s gives a more faithful voice.`
+                : `Branded voice "${file.name}" is selected. It applies from the next connection.`
+        );
+    } catch (error) {
+        console.error("Could not read voice sample:", error);
+        AppUI.showModal(`Could not read "${file.name}" as audio: ${error.message}`);
+    }
 }
 
 function handleFcFileInputChange(event) {
@@ -1102,15 +1170,10 @@ function connectBtnClick() {
 function disconnectBtnClick() {
     endSession();
 
-    AppState.customVoiceBase64 = "";
+    // Branded voices stay in their dropdown, which also turns them off.
     AppState.functionCallDefinition = null;
-
-    for (const id of ["audioFileInput", "fcFileInput"]) {
-        const input = AppUI.getElement(id);
-        if (input) input.value = "";
-    }
-
-    AppUI.setText("fileName", "");
+    const fcFileInput = AppUI.getElement("fcFileInput");
+    if (fcFileInput) fcFileInput.value = "";
     AppUI.setText("fcFileName", "");
 }
 
@@ -1177,50 +1240,24 @@ async function handleRecordClick() {
             };
 
             AppState.mediaRecorder.onstop = async () => {
+                // Release the microphone; otherwise the browser keeps showing
+                // it as in use.
+                stream.getTracks().forEach((track) => track.stop());
                 const audioBlob = new Blob(AppState.audioChunks, { type: mimeType });
-                console.log("Audio resampling started...");
-
-                const targetSampleRate = 24000;
-                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                const decodedBuffer = await audioContext.decodeAudioData(
-                    await audioBlob.arrayBuffer()
-                );
-
-                const offlineContext = new OfflineAudioContext(
-                    decodedBuffer.numberOfChannels,
-                    decodedBuffer.duration * targetSampleRate,
-                    targetSampleRate
-                );
-                const source = offlineContext.createBufferSource();
-                source.buffer = decodedBuffer;
-                source.connect(offlineContext.destination);
-                source.start();
-                const resampledBuffer = await offlineContext.startRendering();
-
-                const wavBlob = bufferToWave(resampledBuffer);
-                console.log("Audio resampling finished.");
-
-                const reader = new FileReader();
-                reader.onloadend = () => {
-                    if (typeof reader.result === "string") {
-                        AppState.customVoiceBase64 = reader.result.split(",")[1] || "";
-                    }
-
-                    const newOption = document.createElement("option");
-                    newOption.value = voiceName.toLowerCase().replace(/\s/g, "-");
-                    newOption.textContent = voiceName;
-                    newOption.selected = true;
-
-                    const voiceDropdown = AppUI.getElement("voice-dropdown");
-                    if (voiceDropdown) voiceDropdown.appendChild(newOption);
-
+                AppState.audioChunks = [];
+                try {
+                    const { base64 } = await toVoiceSample(await audioBlob.arrayBuffer());
+                    addBrandedVoice(voiceName, base64);
                     AppUI.showModal(
-                        `New branded voice "${voiceName}" has been successfully created and selected!`
+                        `New branded voice "${voiceName}" has been created and selected. ` +
+                        "It applies from the next connection."
                     );
                     closeModal();
-                    AppState.audioChunks = [];
-                };
-                reader.readAsDataURL(wavBlob);
+                } catch (error) {
+                    console.error("Could not process the recording:", error);
+                    AppUI.showModal(`Could not process the recording: ${error.message}`);
+                    openModal();
+                }
             };
 
             AppState.mediaRecorder.start();
