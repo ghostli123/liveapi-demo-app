@@ -421,16 +421,37 @@ def _machine_hostnames() -> frozenset[str]:
     )
 
 
+def _normalize_hostname(hostname: str | None) -> str:
+    return (hostname or "").strip().lower().rstrip(".")
+
+
+def explicitly_allowed_hosts() -> frozenset[str]:
+    """--allowed_hosts as bare host names, ignoring blanks and ports.
+
+    Dropping blanks matters: a trailing comma would otherwise add "", which
+    matches the empty host of `Origin: null` (sent by sandboxed iframes).
+    """
+    hosts = set()
+    for entry in ALLOWED_HOSTS.value:
+        entry = entry.strip()
+        if entry == "*":
+            hosts.add("*")
+        elif entry:
+            hosts.add(_normalize_hostname(urllib.parse.urlsplit("//" + entry).hostname))
+    hosts.discard("")
+    return frozenset(hosts)
+
+
 def is_allowed_host(hostname: str | None) -> bool:
     """Whether browsers may reach this server under `hostname`.
 
     Checking Host defeats DNS rebinding: a page on evil.example whose DNS
     points at this server sends Host: evil.example, which isn't allowed.
     """
+    hostname = _normalize_hostname(hostname)
     if not hostname:
         return False
-    hostname = hostname.lower().rstrip(".")
-    extra = {h.lower() for h in ALLOWED_HOSTS.value}
+    extra = explicitly_allowed_hosts()
     if "*" in extra or hostname in extra:
         return True
     if hostname in _machine_hostnames() or hostname.endswith(".localhost"):
@@ -468,9 +489,11 @@ async def reject_cross_origin(request: web.Request, handler):
             # Only an exact match or an explicit --allowed_hosts entry: the
             # defaults above (e.g. any IP address) are fine for Host but not
             # for the page making the request.
-            explicitly_allowed = (parts.hostname or "").lower() in {
-                h.lower() for h in ALLOWED_HOSTS.value
-            } or "*" in ALLOWED_HOSTS.value
+            extra = explicitly_allowed_hosts()
+            origin_host = _normalize_hostname(parts.hostname)
+            explicitly_allowed = bool(origin_host) and (
+                "*" in extra or origin_host in extra
+            )
             if parts.netloc != request.host and not explicitly_allowed:
                 logging.warning(
                     "Rejected %s %s from origin %s",
