@@ -352,6 +352,32 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(resp.status, 200)
 
+    async def test_null_origin_rejected_even_with_blank_allowed_host(self):
+        body = {
+            "command": "connect",
+            "session_id": "s14",
+            "endpoint": "autopush-common",
+            "location": "us-central1",
+        }
+        # A trailing comma leaves an empty entry in the list flag.
+        with flagsaver.flagsaver(allowed_hosts=["demo.example.com", ""]):
+            resp = await self.client.post(
+                "/api/control", json=body, headers={"Origin": "null"}
+            )
+        self.assertEqual(resp.status, 403)
+
+    def test_allowed_hosts_entries_are_normalized(self):
+        with flagsaver.flagsaver(
+            allowed_hosts=[" Demo.Example.com. ", "proxy.example:8443", ""]
+        ):
+            self.assertEqual(
+                main.explicitly_allowed_hosts(),
+                frozenset({"demo.example.com", "proxy.example"}),
+            )
+            self.assertTrue(main.is_allowed_host("demo.example.com"))
+            self.assertTrue(main.is_allowed_host("proxy.example"))
+            self.assertFalse(main.is_allowed_host(""))
+
     def test_is_allowed_host(self):
         for host in ["localhost", "127.0.0.1", "::1", "10.1.2.3", "app.localhost"]:
             self.assertTrue(main.is_allowed_host(host), host)
