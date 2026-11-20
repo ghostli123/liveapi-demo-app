@@ -117,6 +117,9 @@
             aria-label="Turn camera off" title="Turn camera off" onclick="cameraBtnClick()"><md-icon>videocam</md-icon></md-filled-icon-button></span>
         <span id="cameraOffBtn"><md-filled-icon-button disabled
             aria-label="Turn camera on" title="Turn camera on" onclick="cameraOffBtnClick()"><md-icon>videocam_off</md-icon></md-filled-icon-button></span>
+        <!-- Material buttons ignore the hidden attribute, so hide a wrapper. -->
+        <span id="turnBtnWrap" hidden><md-filled-tonal-button id="turnBtn" onclick="turnBtnClick()"
+          title="Automatic speech detection is off: mark where your turn starts and ends">Start speaking</md-filled-tonal-button></span>
         <span id="screenBtn"><md-filled-icon-button disabled
             aria-label="Share screen" title="Share screen" onclick="screenShareBtnClick()"><md-icon>present_to_all</md-icon></md-filled-icon-button></span>
       </div>
