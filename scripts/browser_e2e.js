@@ -4,11 +4,16 @@
 //
 //   node scripts/browser_e2e.js [--server=http://localhost:8080]
 //       [--environment=prod-us-rep] [--model=gemini-3.8-live]
-//       [--chrome=/usr/bin/google-chrome] [--speech=sample.wav]
+//       [--chrome=/usr/bin/google-chrome] [--speech=sample.wav] [--mock]
 //
 // --speech feeds a WAV file to the fake microphone to test voice turns.
-// --environment=autopush-common reaches scripts/mock_live_api.py when the
-// server runs with --common_bag_ws_port set to the mock's port.
+// --mock runs against scripts/mock_live_api.py instead, which needs no
+// credentials: start the server with --common_bag_ws_port set to the mock's
+// port. The environment defaults to autopush-common, which the server routes
+// to that port. The mock sends no avatar video or WebRTC answer, so those
+// checks become checks of the audio-only and WebSocket-fallback paths; the
+// function-response simulator (a Gemini call) is answered in the browser; and
+// a GoAway scenario runs, since only the mock can be told to send one.
 const { chromium } = require("playwright-core");
 const path = require("path");
 
@@ -16,7 +21,8 @@ const args = Object.fromEntries(
     process.argv.slice(2).map((arg) => arg.replace(/^--/, "").split(/=(.*)/s).slice(0, 2))
 );
 const SERVER = (args.server || "http://localhost:8080").replace(/\/$/, "");
-const ENVIRONMENT = args.environment || "prod-us-rep";
+const MOCK = "mock" in args;
+const ENVIRONMENT = args.environment || (MOCK ? "autopush-common" : "prod-us-rep");
 const MODEL = args.model || "gemini-3.8-live";
 const CHROME = args.chrome || process.env.CHROME_PATH || "/usr/bin/google-chrome";
 const FC_DEFINITION = require(path.join(__dirname, "..", "fc_definition.json"));
@@ -113,11 +119,13 @@ const scenarios = {
         await waitConnected(page);
         await say(page, "Say hello in one short sentence.");
         check((await modelLines(page)).length > 0, "no model reply");
-        const video = await page.evaluate(() => {
-            const v = document.getElementById("video_player");
-            return { width: v.videoWidth, time: v.currentTime };
-        });
-        check(video.width > 0 && video.time > 0, `avatar video not playing: ${JSON.stringify(video)}`);
+        if (!MOCK) {
+            const video = await page.evaluate(() => {
+                const v = document.getElementById("video_player");
+                return { width: v.videoWidth, time: v.currentTime };
+            });
+            check(video.width > 0 && video.time > 0, `avatar video not playing: ${JSON.stringify(video)}`);
+        }
         await page.click("#disconnectBtn");
         await page.waitForTimeout(1000);
         check((await dialog(page)) === null, `disconnect showed: ${await dialog(page)}`);
@@ -130,8 +138,21 @@ const scenarios = {
         await waitConnected(page);
         await say(page, "Say hello in one short sentence.");
         check((await modelLines(page)).length > 0, "no model reply");
-        const state = await page.evaluate(() => document.getElementById("webrtc-state").textContent);
-        check(state === "connected", `WebRTC state ${state}`);
+        const state = await page.evaluate(() => ({
+            transport: document.getElementById("active-transport").textContent,
+            webrtc: document.getElementById("webrtc-state").textContent,
+        }));
+        if (MOCK) {
+            // The mock sends no SDP answer, so media falls back to the WebSocket.
+            check(
+                state.transport === "WebSocket" && state.webrtc === "n/a",
+                `after fallback: ${JSON.stringify(state)}`
+            );
+            const lines = await chat(page);
+            check(lines.some((l) => /didn't accept WebRTC/.test(l.text)), "no fallback message");
+        } else {
+            check(state.webrtc === "connected", `WebRTC state ${state.webrtc}`);
+        }
         await page.click("#disconnectBtn");
         check(page.errors.length === 0, `console errors: ${page.errors}`);
     },
@@ -153,6 +174,14 @@ const scenarios = {
 
     async "function calling"(browser) {
         const page = await newPage(browser);
+        if (MOCK) {
+            // The simulator is a Gemini call, which needs credentials.
+            await page.route("**/api/post_endpoint", (route) =>
+                route.request().postDataJSON().objective === "fr_generate"
+                    ? route.fulfill({ json: { response: '{"appointment_id": "APT-1234"}' } })
+                    : route.continue()
+            );
+        }
         await connect(page, {
             transport: "websocket",
             modality: "AUDIO",
@@ -170,7 +199,10 @@ const scenarios = {
         const lines = await chat(page);
         check(lines.some((l) => l.text.startsWith("Function call: create_appointment")), "no function call");
         check(!lines.some((l) => l.kind.includes("chat-error")), "function call failed");
-        check((await modelLines(page)).length > 0, "no reply after the function response");
+        const replies = await modelLines(page);
+        check(replies.length > 0, "no reply after the function response");
+        // The mock's reply quotes the function response it got.
+        check(!MOCK || /APT-1234/.test(replies.pop().text), "the reply doesn't use the function response");
         await page.click("#disconnectBtn");
     },
 
@@ -182,7 +214,36 @@ const scenarios = {
         check(/code 1008/.test(message) && /no-such-model/.test(message), `dialog: ${message}`);
     },
 
+    async "GoAway resumes the session"(browser) {
+        if (!MOCK) return "skipped (needs --mock)";
+        const page = await newPage(browser);
+        await connect(page, { transport: "websocket", modality: "AUDIO" });
+        await waitConnected(page);
+        await say(page, "My favorite fruit is mango.", 1000);
+        await page.waitForFunction(() => AppState.geminiLiveApi.latestResumptionHandle, null, { timeout: 15000 });
+        const sessionId = await page.evaluate(() => AppState.geminiLiveApi.sessionId);
+        // The mock sends goAway, then closes the connection 1 s later.
+        await say(page, "/goaway 1", 0);
+        await page
+            .waitForFunction(
+                (old) => AppState.geminiLiveApi.sessionId !== old && AppState.geminiLiveApi.isSetupComplete,
+                sessionId,
+                { timeout: 15000 }
+            )
+            .catch(() => {
+                throw new Error("no new connection after GoAway");
+            });
+        await page.waitForTimeout(2000); // Past the old connection's close.
+        await say(page, "What is my favorite fruit?", 2000);
+        const last = (await modelLines(page)).pop();
+        check(last && /mango/i.test(last.text), `reply after resume: ${last && last.text}`);
+        check((await dialog(page)) === null, `GoAway showed: ${await dialog(page)}`);
+        check(page.errors.length === 0, `console errors: ${page.errors}`);
+        await page.click("#disconnectBtn");
+    },
+
     async "voice turn from the microphone"(browser) {
+        if (MOCK) return "skipped (the mock ignores audio)";
         if (!args.speech) return "skipped (pass --speech=file.wav)";
         const voiceBrowser = await chromium.launch({
             executablePath: CHROME,
