@@ -244,6 +244,22 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(msg.data, 1011)
         self.assertTrue(msg.extra)
 
+    async def test_missing_credentials_close_with_reason(self):
+        # Cleanup used to re-raise the failed proxy task's error, so the
+        # handler died before closing and the browser saw 1006, no reason.
+        await self.connect_session("s16", endpoint="aiplatform.googleapis.com")
+        with mock.patch.object(
+            main.get_credentials,
+            "get_access_token",
+            side_effect=RuntimeError("No access token source worked"),
+        ):
+            ws = await self.client.ws_connect("/ws?session_id=s16")
+            msg = await asyncio.wait_for(ws.receive(), 5)
+        self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(msg.data, 1011)
+        self.assertIn("No access token source worked", str(msg.extra))
+        self.assertIsNone(await main.SESSION_MANAGER.search_item("s16"))
+
     async def test_ws_requires_known_session(self):
         resp = await self.client.get("/ws?session_id=unknown")
         self.assertEqual(resp.status, 404)
