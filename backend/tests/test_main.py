@@ -200,6 +200,28 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resp.status, 404)
 
+    async def test_session_without_websocket_expires(self):
+        with mock.patch.object(main, "PENDING_SESSION_TTL_S", 0.05):
+            await self.connect_session("s5")
+            self.assertIsNotNone(await main.SESSION_MANAGER.search_item("s5"))
+            await asyncio.sleep(0.2)
+        self.assertIsNone(await main.SESSION_MANAGER.search_item("s5"))
+
+    async def test_connected_session_does_not_expire(self):
+        async with FakeUpstream() as upstream:
+            with (
+                flagsaver.flagsaver(common_bag_ws_port=upstream.port),
+                mock.patch.object(main, "PENDING_SESSION_TTL_S", 0.05),
+            ):
+                await self.connect_session("s6")
+                ws = await self.client.ws_connect("/ws?session_id=s6")
+                await asyncio.sleep(0.2)
+                self.assertIsNotNone(await main.SESSION_MANAGER.search_item("s6"))
+                await ws.send_str("ping")
+                msg = await asyncio.wait_for(ws.receive(), 5)
+                self.assertEqual(json.loads(msg.data), {"echo": "ping"})
+                await ws.close()
+
     async def test_static_files_revalidate(self):
         resp = await self.client.get("/frontend/script.js")
         self.assertEqual(resp.status, 200)
