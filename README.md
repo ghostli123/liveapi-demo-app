@@ -58,6 +58,7 @@ Requires Python 3.11 or later.
 | `--fr_simulator_thinking_level` | `low` | Its thinking level; empty uses the model's default. |
 | `--ws_heartbeat_s` | `20` | Seconds between WebSocket pings to the browser and to the Live API. Keeps quiet sessions (mic muted, text only) from being closed by proxies that drop idle connections, and ends a session whose browser or upstream has silently gone away. `0` disables pings. |
 | `--max_sessions` | `0` (no limit) | Most sessions held at once, counting ones still connecting. Further connects get HTTP 503 (the browser retries for a few seconds, then shows the error). A session's slot frees when its browser disconnects, so a resume isn't refused while the old upstream connection finishes closing (at most 10 s), or when the browser gives up before connecting (e.g. Disconnect while connecting); a session that never connects otherwise expires after 60 s. Set it on public deployments to bound the upstream connections one instance can be made to open. |
+| `--idle_timeout_s` | `900` | The browser ends a session after this many seconds without conversation or user input (typing, clicks, speech the model answers), so an abandoned tab doesn't keep its upstream connection and `--max_sessions` slot. The frontend enforces it, since the proxy can't tell an idle session from an active one: WebRTC media bypasses it, and avatar video and an open microphone stream while nobody is there. `0` disables it. |
 | `--debug` | off | Debug logging, including a preview of every proxied message. |
 | `PORT` (env) | `8080` | Port to listen on. |
 
@@ -80,6 +81,8 @@ The backend tries, in order: Application Default Credentials through google-auth
 - **Custom avatar**: under **Avatar**, upload an image (or use the bundled sample) to replace the stock "Piper" avatar from the next connection. The project must be allowlisted for custom avatars; otherwise the session closes with "not allowlisted for customized avatar".
 - **Saving the avatar video**: with **Save avatar video** checked, the avatar's MP4 stream (WebSocket transport) is downloaded when you disconnect.
 - **Metrics**: hover over 📊 to see transport, bandwidth, frame rate, packet loss, token usage for the last turn, and response latency: the time from sending a message (or, for speech, the last input transcript) to the model's first audio or text.
+
+A session with no conversation and no typing or clicking on the page for 15 minutes (`--idle_timeout_s`) ends with "Disconnected after 15 minutes without activity."; the chat log shows its resumption handle as after Disconnect.
 
 If the server ends a session, the app shows the close code and the reason the Live API gave, such as a missing model or a permission error.
 

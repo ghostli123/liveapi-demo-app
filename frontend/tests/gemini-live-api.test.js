@@ -507,3 +507,104 @@ test("setup message carries the configured fields", async () => {
     assert.deepEqual(plain(setup.system_instruction), { parts: [{ text: "Be brief." }] });
     assert.equal(setup.generation_config.speech_config.voice_config.prebuilt_voice_config.voice_name, "puck");
 });
+
+// A connected session whose server set --idle_timeout_s=idleS.
+async function idleApi(idleS = 120) {
+    const api = connectedApi();
+    api.idleMessages = [];
+    api.onIdleTimeout = (message) => api.idleMessages.push(message);
+    api.sendPostRequest = async () => ({ project_id: "p", idle_timeout_s: idleS });
+    api.setupWebSocketToService = () => {};
+    await api.connect();
+    return api;
+}
+
+// Fires the pending idle timer as if no activity happened since `idleAgoMs`.
+function fireIdleTimer(api, idleAgoMs) {
+    const timer = timers[api.idleTimer - 1];
+    assert.equal(timer.cleared, false);
+    api.lastActivityAt = Date.now() - idleAgoMs;
+    timer.fn();
+}
+
+test("a session ends after the server's idle timeout without activity", async () => {
+    const api = await idleApi(120);
+    assert.equal(api.idleTimeoutMs, 120000);
+    assert.equal(timers[api.idleTimer - 1].ms, 120000);
+    fireIdleTimer(api, 120000);
+    assert.deepEqual(plain(api.idleMessages), ["Disconnected after 2 minutes without activity."]);
+    assert.equal(api.idleTimer, null);
+});
+
+test("conversation events and user input postpone the idle timeout", async () => {
+    const api = await idleApi(60);
+    const activities = {
+        "input transcript": { serverContent: { inputTranscription: { text: "hi" } } },
+        "output transcript": { serverContent: { outputTranscription: { text: "hello" } } },
+        "model text": { serverContent: { modelTurn: { parts: [{ text: "hello" }] } } },
+        "turn end": { serverContent: { turnComplete: true } },
+        interruption: { serverContent: { interrupted: true } },
+        "function call": { toolCall: { functionCalls: [{ id: "1", name: "f", args: {} }] } },
+    };
+    const userInput = {
+        "text message": () => api.sendTextMessage("hi"),
+        "push-to-talk": () => api.sendVoiceActivityMessage(true),
+        "page input": () => api.noteActivity(),
+    };
+    for (const [name, act] of [
+        ...Object.entries(activities).map(([name, raw]) => [
+            name,
+            () => api.onReceiveMessage({ data: JSON.stringify(raw) }),
+        ]),
+        ...Object.entries(userInput),
+    ]) {
+        api.lastActivityAt = 0;
+        act();
+        assert.ok(Date.now() - api.lastActivityAt < 1000, name);
+    }
+    // With the last activity 30 s ago, the timer waits out the other 30 s.
+    fireIdleTimer(api, 30000);
+    assert.deepEqual(plain(api.idleMessages), []);
+    assert.ok(Math.abs(timers[api.idleTimer - 1].ms - 30000) < 1000);
+});
+
+test("audio, avatar video and usage reports don't postpone the idle timeout", async () => {
+    const api = await idleApi(60);
+    api.lastActivityAt = 0;
+    for (const raw of [
+        { serverContent: { modelTurn: { parts: [{ inlineData: { mimeType: "audio/pcm", data: "AA==" } }] } } },
+        { serverContent: { modelTurn: { parts: [{ inlineData: { mimeType: "video/mp4", data: "AA==" } }] } } },
+        { usageMetadata: { totalTokenCount: 1 } },
+        { sessionResumptionUpdate: { newHandle: "h" } },
+    ]) {
+        api.onReceiveMessage({ data: JSON.stringify(raw) });
+    }
+    assert.equal(api.lastActivityAt, 0);
+    timers[api.idleTimer - 1].fn();
+    assert.equal(api.idleMessages.length, 1);
+});
+
+test("disconnect() stops the idle timer, and idle_timeout_s 0 disables it", async () => {
+    const api = await idleApi(120);
+    const timer = timers[api.idleTimer - 1];
+    api.webSocket.close = () => {};
+    api.disconnect();
+    assert.equal(timer.cleared, true);
+    assert.equal(api.idleTimer, null);
+
+    const off = await idleApi(0);
+    assert.equal(off.idleTimeoutMs, 0);
+    assert.equal(off.idleTimer, null);
+});
+
+test("a resume keeps the conversation's idle timer", async () => {
+    const api = await idleApi(120);
+    const timer = api.idleTimer;
+    api.lastActivityAt = 12345;
+    api.webSocket.close = () => {};
+    api.webSocket.readyState = FakeWebSocket.CLOSED;
+    await api.resume("h");
+    assert.equal(api.idleTimer, timer);
+    assert.equal(timers[timer - 1].cleared, false);
+    assert.equal(api.lastActivityAt, 12345);
+});

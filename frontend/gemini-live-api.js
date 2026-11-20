@@ -112,6 +112,28 @@ class GeminiLiveResponseMessage {
 const SETUP_TIMEOUT_MS = 30000;
 // Most automatic resumes (after close code 1001) allowed per minute.
 const AUTO_RESUME_LIMIT = 3;
+// Server events that mean a conversation is going on, for the idle timeout.
+// Audio, avatar video and usage reports also arrive while nobody is there.
+const ACTIVITY_EVENTS = new Set([
+    "INPUT_TRANSCRIPTION",
+    "OUTPUT_TRANSCRIPTION",
+    "TEXT",
+    "GENERATION_STARTED",
+    "END_OF_TURN",
+    "INTERRUPT",
+    "FUNCTION_CALL",
+]);
+
+/**
+ * Formats a duration for messages, e.g. "15 minutes" or "90 seconds".
+ * @param {number} ms
+ * @returns {string}
+ */
+function describeDuration(ms) {
+    const seconds = Math.round(ms / 1000);
+    const [count, unit] = seconds % 60 === 0 ? [seconds / 60, "minute"] : [seconds, "second"];
+    return `${count} ${unit}${count === 1 ? "" : "s"}`;
+}
 
 /**
  * Main Client API class for interacting with Gemini Live Realtime connections.
@@ -214,6 +236,13 @@ class GeminiLiveAPI {
         this.connectAttempt = 0; // Bumped to cancel a connect in progress
         this.autoResumeTimes = []; // When automatic resumes happened
         this.setupTimer = null;
+        // From the server's --idle_timeout_s; 0 means sessions never time out.
+        this.idleTimeoutMs = 0;
+        this.lastActivityAt = 0; // Date.now() of the last noteActivity()
+        this.idleTimer = null;
+        // Called when a session times out for lack of activity; the handler
+        // ends the session, as for onErrorMessage.
+        this.onIdleTimeout = (message) => this.onErrorMessage(message);
         // Called when the server restarts and the session can be resumed.
         this.onReconnectNeeded = () => {};
         // Called after falling back from WebRTC to WebSocket media.
@@ -432,15 +461,16 @@ class GeminiLiveAPI {
         let created = false;
         try {
             console.log("prepare(): Initializing backend service...");
-            const projectId = await this.initBackendService(sessionId);
+            const control = await this.initBackendService(sessionId);
             created = true;
             if (!isCurrent()) {
                 this.abandonSession(sessionId);
                 return false;
             }
-            if (projectId) {
-                this.setProjectId(projectId);
+            if (control?.project_id) {
+                this.setProjectId(control.project_id);
             }
+            this.idleTimeoutMs = Math.max(0, Number(control?.idle_timeout_s) || 0) * 1000;
 
             console.log("prepare(): Setting up function declarations...");
             await this.setupFuncDeclarationToService(sessionId);
@@ -485,6 +515,8 @@ class GeminiLiveAPI {
             if (!(await this.prepare(attempt))) return; // Cancelled by disconnect().
             console.log("connect(): Preparation successful. Starting WebSocket connection...");
             this.setupWebSocketToService();
+            // Resumes keep the timer: they continue the same conversation.
+            this.startIdleTimer();
         } catch (error) {
             console.error("connect(): Connection sequence failed.", error);
         }
@@ -569,8 +601,8 @@ class GeminiLiveAPI {
     }
 
     /**
-     * Initializes backend control session to retrieve Project ID or other session metadata.
-     * @returns {Promise<void>}
+     * Creates the backend's record for a session.
+     * @returns {Promise<Object>} The server's reply: project_id, idle_timeout_s.
      */
     async initBackendService(sessionId = this.sessionId) {
         if (this.model === "gemini-3.5-live-early-exp") {
@@ -598,8 +630,7 @@ class GeminiLiveAPI {
             location: this.location,
         };
         try {
-            const response = await this.postWithRetry(this.controlUrl, postRequestBody);
-            return response?.project_id;
+            return (await this.postWithRetry(this.controlUrl, postRequestBody)) || {};
         } catch (error) {
             console.error("Error in initBackendService:", error);
             throw new Error(`Could not start the session: ${error.message}`);
@@ -634,6 +665,8 @@ class GeminiLiveAPI {
     disconnect() {
         this.connectAttempt++; // Abandons a connect() or resume() in progress.
         this.stopUpdateBandwidthUsage();
+        clearTimeout(this.idleTimer);
+        this.idleTimer = null;
         if (this.webRtcManager) {
             this.webRtcManager.close();
         }
@@ -647,6 +680,38 @@ class GeminiLiveAPI {
             webSocket.onmessage = null;
             webSocket.close(1000);
         }
+    }
+
+    /**
+     * Records that the user or the conversation did something, which
+     * postpones the idle timeout.
+     */
+    noteActivity() {
+        this.lastActivityAt = Date.now();
+    }
+
+    /**
+     * Ends the session (through onIdleTimeout) once noteActivity() hasn't
+     * been called for idleTimeoutMs, so an abandoned tab doesn't hold a
+     * server session and its upstream connection indefinitely.
+     */
+    startIdleTimer() {
+        clearTimeout(this.idleTimer);
+        this.idleTimer = null;
+        if (!this.idleTimeoutMs) return;
+        this.noteActivity();
+        const check = () => {
+            const left = this.lastActivityAt + this.idleTimeoutMs - Date.now();
+            if (left > 0) {
+                this.idleTimer = setTimeout(check, left);
+                return;
+            }
+            this.idleTimer = null;
+            this.onIdleTimeout(
+                `Disconnected after ${describeDuration(this.idleTimeoutMs)} without activity.`
+            );
+        };
+        this.idleTimer = setTimeout(check, this.idleTimeoutMs);
     }
 
     /**
@@ -689,6 +754,8 @@ class GeminiLiveAPI {
                 }
             } else if (message.type === "RESUMPTION") {
                 this.latestResumptionHandle = message.data;
+            } else if (ACTIVITY_EVENTS.has(message.type)) {
+                this.noteActivity();
             }
             if (
                 message.type === "SETUP COMPLETE" &&
@@ -1160,6 +1227,7 @@ class GeminiLiveAPI {
                 turn_complete: true,
             },
         };
+        this.noteActivity();
         this.sendMessage(textMessage);
     }
 
@@ -1171,6 +1239,7 @@ class GeminiLiveAPI {
         const activityMessage = {
             realtime_input: start ? { activity_start: {} } : { activity_end: {} },
         };
+        this.noteActivity();
         this.sendMessage(activityMessage);
     }
 

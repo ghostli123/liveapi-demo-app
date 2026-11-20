@@ -199,6 +199,7 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 status, body = await self.connect_session("s1")
                 self.assertEqual(status, 200, body)
                 self.assertEqual(body["project_id"], main.DEFAULT_PROJECT_ID)
+                self.assertEqual(body["idle_timeout_s"], 900)
 
                 ws = await self.client.ws_connect("/ws?session_id=s1")
                 await ws.send_str('{"setup": {}}')
@@ -531,6 +532,14 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 await self.wait_for_session_end("s26")
                 status, body = await self.connect_session("s27")
                 self.assertEqual(status, 200, body)
+
+    async def test_control_reports_idle_timeout(self):
+        # The browser enforces it, so it must learn the server's value.
+        for idle_timeout_s in (0, 120):
+            with flagsaver.flagsaver(idle_timeout_s=idle_timeout_s):
+                status, body = await self.connect_session(f"s-idle-{idle_timeout_s}")
+                self.assertEqual(status, 200, body)
+                self.assertEqual(body["idle_timeout_s"], idle_timeout_s)
 
     async def disconnect_session(self, session_id):
         resp = await self.client.post(

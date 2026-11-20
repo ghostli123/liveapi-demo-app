@@ -279,6 +279,31 @@ const scenarios = {
         check(page.errors.length === 0, `console errors: ${page.errors}`);
     },
 
+    async "an idle session ends with a reason"(browser) {
+        const page = await newPage(browser);
+        // Shortens the server's --idle_timeout_s (default 15 minutes) to 5 s.
+        await page.route("**/api/control", async (route) => {
+            const response = await route.fetch();
+            const json = await response.json();
+            if ("idle_timeout_s" in json) json.idle_timeout_s = 5;
+            await route.fulfill({ response, json });
+        });
+        await connect(page, { transport: "websocket", modality: "AUDIO" });
+        await waitConnected(page);
+        await say(page, "Say hi.", 0);
+        const saidAt = Date.now();
+        await page.waitForFunction(() => document.getElementById("dialog").open, null, { timeout: 30000 });
+        const elapsed = Date.now() - saidAt;
+        check(elapsed >= 4500, `ended ${elapsed} ms after the last message`);
+        check((await modelLines(page)).length > 0, "no model reply before the timeout");
+        check(
+            (await dialog(page)) === "Disconnected after 5 seconds without activity.",
+            `dialog: ${await dialog(page)}`
+        );
+        check(!(await page.evaluate(() => document.getElementById("connectBtn").disabled)), "Connect is disabled");
+        check(page.errors.length === 0, `console errors: ${page.errors}`);
+    },
+
     async "voice turn from the microphone"() {
         if (MOCK) return "skipped (the mock ignores audio)";
         if (!args.speech) return "skipped (pass --speech=file.wav)";
