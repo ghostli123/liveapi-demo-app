@@ -14,11 +14,21 @@ class FakeWebSocket {
     }
 }
 
+// Timeouts are recorded rather than run, so tests can fire them on demand.
+const timers = [];
 const { GeminiLiveAPI, GeminiLiveResponseMessage } = loadScript(
     "gemini-live-api.js",
     ["GeminiLiveAPI", "GeminiLiveResponseMessage"],
-    // Inert timers: the bandwidth meter's interval would keep the test alive.
-    { WebSocket: FakeWebSocket, setInterval: () => 1, clearInterval: () => {} }
+    {
+        WebSocket: FakeWebSocket,
+        // Inert: the bandwidth meter's interval would keep the test alive.
+        setInterval: () => 1,
+        clearInterval: () => {},
+        setTimeout: (fn, ms) => timers.push({ fn, ms, cleared: false }),
+        clearTimeout: (id) => {
+            if (timers[id - 1]) timers[id - 1].cleared = true;
+        },
+    }
 );
 
 // Values created inside the VM context have that context's prototypes, which
@@ -181,6 +191,35 @@ test("disconnect() closes quietly and stops realtime input", () => {
     assert.equal(api.isSetupComplete, false);
     assert.equal(webSocket.onclose, null);
     assert.equal(api.errors.length, 0);
+});
+
+test("setup times out if the server never confirms it", () => {
+    const api = connectedApi();
+    const timer = timers[timers.length - 1];
+    assert.equal(timer.ms, 30000);
+    timer.fn();
+    assert.deepEqual(plain(api.errors), ["Timed out waiting for the server to set up the session."]);
+});
+
+test("setupComplete cancels the setup timeout", () => {
+    const api = connectedApi();
+    const timer = timers[timers.length - 1];
+    api.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) });
+    assert.equal(timer.cleared, true);
+});
+
+test("disconnect() during connect() stops it from opening a WebSocket", async () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    let release;
+    api.sendPostRequest = () => new Promise((resolve) => (release = resolve));
+    let opened = 0;
+    api.setupWebSocketToService = () => opened++;
+    const connecting = api.connect();
+    await Promise.resolve();
+    api.disconnect();
+    release({ project_id: "p" });
+    await connecting;
+    assert.equal(opened, 0);
 });
 
 test("describeClose explains how the server ended the session", () => {

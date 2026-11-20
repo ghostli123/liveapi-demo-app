@@ -29,8 +29,10 @@ class LiveAudioOutputManager {
 
     /** Drops audio that hasn't played yet, e.g. when the model is interrupted. */
     clear() {
-        if (this.workletNode) {
-            this.workletNode.port.postMessage("clear");
+        // Through the same promise as playAudioChunk(), so chunks queued
+        // before this call are posted (and dropped) before the clear.
+        if (this.ready) {
+            this.ready.then(() => this.workletNode.port.postMessage("clear"));
         }
     }
 
@@ -361,6 +363,8 @@ class LiveScreenManager extends LiveFrameSource {
 // Seconds of already-played avatar video kept in the MSE buffer. Older data is
 // removed so a long session doesn't fill the buffer quota (~1 MB/s of video).
 const VIDEO_BACK_BUFFER_S = 10;
+// When playback starts this far behind the newest video, skip to the newest.
+const VIDEO_MAX_LAG_S = 2;
 
 /** Plays the avatar's fragmented-MP4 stream (WebSocket mode) through MSE. */
 class LiveVideoOutputManager {
@@ -375,7 +379,10 @@ class LiveVideoOutputManager {
         // grows by about 1 MB per second.
         this.recordingEnabled = false;
         this.recordedChunks = [];
+        this.finishedRecordings = [];
         this.videoListenersAttached = false;
+        // Called when the browser refuses to start playback without a click.
+        this.onAutoplayBlocked = () => {};
     }
 
     /** Starts a new stream. Each connection sends its own MP4 init segment. */
@@ -396,7 +403,9 @@ class LiveVideoOutputManager {
             return;
         }
 
-        // Chunks of the previous stream can't be appended to the new one.
+        // Chunks of the previous stream can't be appended to the new one, and
+        // can't share a file with it either.
+        this.finishRecording();
         this.chunkQueue = [];
         this.sourceBuffer = null;
         this.initialized = false;
@@ -423,6 +432,9 @@ class LiveVideoOutputManager {
         video.style.display = "block";
         video.src = this.objectUrl;
         this.attachVideoListeners(video);
+        video.play().catch((err) => {
+            if (err.name === "NotAllowedError") this.onAutoplayBlocked();
+        });
     }
 
     attachVideoListeners(video) {
@@ -443,6 +455,18 @@ class LiveVideoOutputManager {
             const recommendedBitrateElement = document.getElementById('recommended-video-bitrate');
             if (recommendedBitrateElement) {
                 recommendedBitrateElement.textContent = "0";
+            }
+        });
+
+        // After a pause (or blocked autoplay) the playhead is behind the
+        // stream; jump to the live edge instead of playing stale video.
+        video.addEventListener('play', () => {
+            if (!this.sourceBuffer || video.srcObject) return;
+            const buffered = this.sourceBuffer.buffered;
+            if (buffered.length === 0) return;
+            const liveEdge = buffered.end(buffered.length - 1);
+            if (liveEdge - video.currentTime > VIDEO_MAX_LAG_S) {
+                video.currentTime = liveEdge - 0.3;
             }
         });
     }
@@ -534,12 +558,23 @@ class LiveVideoOutputManager {
         return this.trimBuffer(VIDEO_BACK_BUFFER_S);
     }
 
-    getRecordedBlob() {
-        return new Blob(this.recordedChunks, { type: "video/mp4" });
+    /** Closes the current stream's recording; each stream is its own MP4. */
+    finishRecording() {
+        if (this.recordedChunks.length > 0) {
+            this.finishedRecordings.push(new Blob(this.recordedChunks, { type: "video/mp4" }));
+            this.recordedChunks = [];
+        }
+    }
+
+    /** @returns {Blob[]} One MP4 per stream received since the last clear. */
+    getRecordings() {
+        this.finishRecording();
+        return this.finishedRecordings;
     }
 
     clearRecordedChunks() {
         this.recordedChunks = [];
+        this.finishedRecordings = [];
     }
 
     resetPlayer() {
@@ -564,7 +599,7 @@ class LiveVideoOutputManager {
             video.style.display = "block";
         }
         this.chunkQueue = [];
-        this.recordedChunks = [];
+        this.clearRecordedChunks();
         this.sourceBuffer = null;
         this.mediaSource = null;
         this.initialized = false;
@@ -596,6 +631,8 @@ class G3RtcWebRtcManager {
         this.statsInterval = null;
         // Called when the peer connection fails, e.g. UDP is blocked.
         this.onConnectionFailed = () => {};
+        // Called when the browser refuses to start playback without a click.
+        this.onAutoplayBlocked = () => {};
         this.lastBytesReceived = 0;
         this.lastBytesSent = 0;
         this.lastStatsTimeMs = 0;
@@ -737,6 +774,7 @@ class G3RtcWebRtcManager {
             videoEl.muted = false;
             videoEl.play().catch((err) => {
                 console.warn("[WebRTC] Auto-play warning on video_player:", err);
+                if (err.name === "NotAllowedError") this.onAutoplayBlocked();
             });
         }
         this.startStatsPolling();
