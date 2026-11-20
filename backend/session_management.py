@@ -1,25 +1,26 @@
 import asyncio
 from typing import Dict, Optional
-import pydantic
 from websocket_handler import WebsocketHandler
 from absl import logging
 import google.genai.chats
 
 
 class SessionBaseModel:
-
     def __init__(
         self,
         session_id: str,
         ws_host: str,
         websocket_handler: WebsocketHandler | None = None,
         fr_session: google.genai.chats.AsyncChat | None = None,
+        fr_error: str = "",
     ):
         self.session_id: str = session_id
         self.ws_host: str = ws_host
 
         self.websocket_handler: WebsocketHandler | None = websocket_handler
         self.fr_session: google.genai.chats.AsyncChat | None = fr_session
+        # Why fr_session is None, reported when the frontend asks for it.
+        self.fr_error: str = fr_error
 
     async def del_session(self):
         if self.websocket_handler:
