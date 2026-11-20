@@ -40,6 +40,12 @@ async function newPage(browser) {
         }
     });
     page.on("pageerror", (e) => page.errors.push(e.message));
+    // Not every browser logs a Content-Security-Policy violation as an error.
+    await page.addInitScript(() =>
+        document.addEventListener("securitypolicyviolation", (e) =>
+            console.error(`CSP violation: ${e.effectiveDirective} ${e.blockedURI}`)
+        )
+    );
     await page.goto(`${SERVER}/`);
     await page.waitForFunction(() => customElements.get("md-outlined-select"));
     await page.evaluate(() => localStorage.clear());

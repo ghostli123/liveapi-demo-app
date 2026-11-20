@@ -482,15 +482,38 @@ async def health_check(request):
     return web.Response(text="ok")
 
 
+# The page runs only its own scripts and Material Web from the CDN (esm.run
+# redirects to cdn.jsdelivr.net), so an injected <script> or on* attribute
+# can't run and read the user's session. Inline style attributes stay allowed:
+# index.html and Material Web's templates use them. blob: and data: cover the
+# avatar video (MediaSource) and its JPEG frames. Other sites may not frame the
+# page: a framed page could trick the user into clicking Connect or allowing
+# the microphone.
+CONTENT_SECURITY_POLICY = "; ".join(
+    [
+        "default-src 'self'",
+        "script-src 'self' https://esm.run https://cdn.jsdelivr.net",
+        "style-src 'self' https://fonts.googleapis.com",
+        "style-src-attr 'unsafe-inline'",
+        "font-src https://fonts.gstatic.com",
+        "img-src 'self' data: blob:",
+        "media-src 'self' blob:",
+        "connect-src 'self'",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'self'",
+    ]
+)
+
+
 @web.middleware
 async def revalidate_static_files(request: web.Request, handler):
     """Makes browsers revalidate the frontend so they never run stale JS after a deploy."""
     response = await handler(request)
     if request.path == "/" or request.path.startswith("/frontend/"):
         response.headers.setdefault("Cache-Control", "no-cache")
-        # Other sites may not frame the page: a framed page could trick the
-        # user into clicking Connect or allowing the microphone.
-        response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'self'")
+        response.headers.setdefault("Content-Security-Policy", CONTENT_SECURITY_POLICY)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
     return response

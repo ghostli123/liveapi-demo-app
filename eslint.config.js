@@ -16,6 +16,10 @@ module.exports = [
         },
     },
     {
+        files: ["frontend/material.js"],
+        languageOptions: { sourceType: "module" },
+    },
+    {
         files: ["frontend/input-processor.js", "frontend/pcm-processor.js"],
         languageOptions: {
             globals: { ...globals.audioWorklet },
