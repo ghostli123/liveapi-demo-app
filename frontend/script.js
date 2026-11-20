@@ -595,8 +595,15 @@ async function handleFunctionCallRequest(functionCalls) {
         functionResponses.push({ id: funcCall.id, name: funcCall.name, response });
     }
     if (AppState.geminiLiveApi.webSocket !== webSocket) {
-        // The connection that made these calls has closed or been replaced.
+        // The connection that made these calls has closed or been replaced;
+        // the new one doesn't know their IDs.
         console.warn("Dropping responses to calls from a previous connection.");
+        if (AppState.geminiLiveApi.webSocket) {
+            newSystemMessage(
+                "The connection was replaced while function calls were running, so their " +
+                "results weren't sent. Ask again if the model is waiting for them."
+            );
+        }
         return;
     }
     AppState.geminiLiveApi.sendMessage({ toolResponse: { functionResponses } });
@@ -921,10 +928,20 @@ function setAppStatus(status) {
             if (AppState.liveVideoOutputManager) {
                 const recordings = AppState.liveVideoOutputManager.getRecordings();
                 const stamp = Date.now();
-                recordings.forEach((blob, i) => {
-                    const part = recordings.length > 1 ? `_part${i + 1}` : "";
-                    downloadBlob(blob, `received_video_${stamp}${part}.mp4`);
-                });
+                if (recordings.length === 1) {
+                    downloadBlob(recordings[0], `received_video_${stamp}.mp4`);
+                } else if (recordings.length > 1) {
+                    // Several automatic downloads trigger the browser's
+                    // "download multiple files" prompt; offer links instead.
+                    const line = newSystemMessage("Saved avatar video:");
+                    recordings.forEach((blob, i) => {
+                        const link = document.createElement("a");
+                        link.href = URL.createObjectURL(blob);
+                        link.download = `received_video_${stamp}_part${i + 1}.mp4`;
+                        link.textContent = `part ${i + 1}`;
+                        if (line) line.append(" ", link);
+                    });
+                }
                 AppState.liveVideoOutputManager.clearRecordedChunks();
             }
             break;

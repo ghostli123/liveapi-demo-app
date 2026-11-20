@@ -2,10 +2,12 @@
 
 import asyncio
 import functools
+import ipaddress
 import json
 import os
 import re
 import signal
+import socket
 import subprocess
 from typing import Any
 import urllib.parse
@@ -89,6 +91,14 @@ ALLOWED_HOST_SUFFIXES = flags.DEFINE_list(
     [".googleapis.com"],
     "Upstream hosts the proxy may connect to. The proxy sends its access token "
     "to these hosts, so keep this list tight.",
+)
+ALLOWED_HOSTS = flags.DEFINE_list(
+    "allowed_hosts",
+    [],
+    "Extra host names browsers may use to reach this server, e.g. a custom "
+    "domain or the public host of a proxy that rewrites Host. Always allowed: "
+    "localhost, IP addresses, this machine's names, and *.run.app on Cloud Run. "
+    "'*' allows any host, which disables DNS-rebinding protection.",
 )
 DEBUG = flags.DEFINE_bool(
     "debug", False, "Log at debug level, including a preview of every proxied message."
@@ -385,19 +395,64 @@ async def revalidate_static_files(request: web.Request, handler):
     return response
 
 
+@functools.cache
+def _machine_hostnames() -> frozenset[str]:
+    return frozenset({"localhost", socket.gethostname().lower(), socket.getfqdn().lower()})
+
+
+def is_allowed_host(hostname: str | None) -> bool:
+    """Whether browsers may reach this server under `hostname`.
+
+    Checking Host defeats DNS rebinding: a page on evil.example whose DNS
+    points at this server sends Host: evil.example, which isn't allowed.
+    """
+    if not hostname:
+        return False
+    hostname = hostname.lower().rstrip(".")
+    extra = {h.lower() for h in ALLOWED_HOSTS.value}
+    if "*" in extra or hostname in extra:
+        return True
+    if hostname in _machine_hostnames() or hostname.endswith(".localhost"):
+        return True
+    try:
+        ipaddress.ip_address(hostname)
+        return True  # DNS rebinding needs a domain name.
+    except ValueError:
+        pass
+    return bool(os.environ.get("K_SERVICE")) and hostname.endswith(".run.app")
+
+
 @web.middleware
 async def reject_cross_origin(request: web.Request, handler):
     """Rejects API and WebSocket requests that other websites' pages make.
 
     Without this, any page open in the user's browser could start sessions on
     the server's credentials and read the model's replies. Requests without an
-    Origin header (scripts such as scripts/smoke_test.py) are allowed.
+    Origin header (scripts such as scripts/smoke_test.py) only need an allowed
+    Host.
     """
     if request.method != "GET" or request.path == "/ws":
+        host = urllib.parse.urlsplit("//" + request.host).hostname
+        if not is_allowed_host(host):
+            logging.warning("Rejected %s %s for host %s", request.method, request.path, host)
+            return web.Response(
+                text=f"Host {host!r} is not allowed; start the server with --allowed_hosts={host}",
+                status=403,
+            )
         origin = request.headers.get("Origin")
-        if origin is not None and urllib.parse.urlsplit(origin).netloc != request.host:
-            logging.warning("Rejected %s %s from origin %s", request.method, request.path, origin)
-            return web.Response(text="Cross-origin request rejected", status=403)
+        if origin is not None:
+            parts = urllib.parse.urlsplit(origin)
+            # Only an exact match or an explicit --allowed_hosts entry: the
+            # defaults above (e.g. any IP address) are fine for Host but not
+            # for the page making the request.
+            explicitly_allowed = (parts.hostname or "").lower() in {
+                h.lower() for h in ALLOWED_HOSTS.value
+            } or "*" in ALLOWED_HOSTS.value
+            if parts.netloc != request.host and not explicitly_allowed:
+                logging.warning(
+                    "Rejected %s %s from origin %s", request.method, request.path, origin
+                )
+                return web.Response(text="Cross-origin request rejected", status=403)
     return await handler(request)
 
 
@@ -410,7 +465,7 @@ async def close_sessions_on_shutdown(app: web.Application) -> None:
     sessions = await SESSION_MANAGER.all_items()
     if sessions:
         logging.info("Closing %d session(s) for shutdown", len(sessions))
-    await asyncio.gather(
+    closing = asyncio.gather(
         *(
             session.websocket_handler.client_websocket.close(
                 code=1001, reason="Server restarting"
@@ -420,6 +475,12 @@ async def close_sessions_on_shutdown(app: web.Application) -> None:
         ),
         return_exceptions=True,
     )
+    # close() waits for each browser to acknowledge; don't let one that has
+    # gone silent (asleep, offline) hold up the shutdown.
+    try:
+        await asyncio.wait_for(closing, timeout=2)
+    except TimeoutError:
+        logging.warning("Some sessions didn't acknowledge the close in time")
 
 
 async def create_app():
@@ -469,11 +530,22 @@ async def main_async():
         project_id(),
         ", ".join(ALLOWED_HOST_SUFFIXES.value),
     )
+    # Fetch a token now so the first session doesn't wait for it (seconds when
+    # it comes from the gcloud fallback). Failures are retried per session.
+    prefetch = asyncio.create_task(asyncio.to_thread(get_credentials.get_access_token))
+    prefetch.add_done_callback(
+        lambda task: task.cancelled()
+        or task.exception() is None
+        or logging.warning("Token prefetch failed: %s", task.exception())
+    )
     stop = asyncio.Event()
 
     def on_signal():
         if stop.is_set():
-            os._exit(1)  # A second Ctrl-C quits without waiting.
+            # A second Ctrl-C quits without waiting.
+            if proxy_proc is not None and proxy_proc.poll() is None:
+                proxy_proc.terminate()
+            os._exit(1)
         stop.set()
 
     loop = asyncio.get_running_loop()

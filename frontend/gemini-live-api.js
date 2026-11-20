@@ -106,6 +106,8 @@ class GeminiLiveResponseMessage {
 
 // How long to wait for setupComplete after the WebSocket opens.
 const SETUP_TIMEOUT_MS = 30000;
+// Most automatic resumes (after close code 1001) allowed per minute.
+const AUTO_RESUME_LIMIT = 3;
 
 const DUMMY_AVATAR_16_9 =
     "iVBORw0KGgoAAAANSUhEUgAAABAAAAAJCAIAAABnTYUvAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAAMSURBVBhXYwQDAAACAAHnSm8jAAAAAElFTkSuQmCC";
@@ -211,6 +213,7 @@ class GeminiLiveAPI {
         this.isSetupComplete = false; // Whether the server confirmed the setup message
         this.latestResumptionHandle = ""; // Last handle the server sent this session
         this.connectAttempt = 0; // Bumped to cancel a connect in progress
+        this.autoResumeTimes = []; // When automatic resumes happened
         this.setupTimer = null;
         // Called when the server restarts and the session can be resumed.
         this.onReconnectNeeded = () => {};
@@ -251,8 +254,7 @@ class GeminiLiveAPI {
             });
         } catch (error) {
             console.error("Error loading custom avatar:", error);
-            this.onErrorMessage("Error loading custom avatar image.");
-            throw error;
+            throw new Error(`Could not load the custom avatar image: ${error.message}`);
         }
     }
 
@@ -443,17 +445,32 @@ class GeminiLiveAPI {
      * establishing the WebSocket connection.
      * @returns {Promise<void>}
      */
-    async prepare() {
-        if (this.useCustomizedAvatar) {
-            console.log("prepare(): Loading custom avatar...");
-            await this.loadCustomAvatar();
+    async prepare(attempt = this.connectAttempt) {
+        // An attempt that disconnect() abandoned must neither report errors
+        // (which would end the next attempt's session) nor touch its state.
+        const isCurrent = () => attempt === this.connectAttempt;
+        const sessionId = this.sessionId;
+        try {
+            if (this.useCustomizedAvatar) {
+                console.log("prepare(): Loading custom avatar...");
+                await this.loadCustomAvatar();
+            }
+
+            console.log("prepare(): Initializing backend service...");
+            const projectId = await this.initBackendService(sessionId);
+            if (!isCurrent()) return;
+            if (projectId) {
+                this.setProjectId(projectId);
+            }
+
+            console.log("prepare(): Setting up function declarations...");
+            await this.setupFuncDeclarationToService(sessionId);
+        } catch (error) {
+            if (isCurrent()) {
+                this.onErrorMessage(error.message);
+            }
+            throw error;
         }
-
-        console.log("prepare(): Initializing backend service...");
-        await this.initBackendService();
-
-        console.log("prepare(): initBackendService successful. Setting up function declarations...");
-        await this.setupFuncDeclarationToService();
     }
 
     /**
@@ -465,8 +482,9 @@ class GeminiLiveAPI {
         this.sessionId = crypto.randomUUID();
         this.latestResumptionHandle = "";
         const attempt = ++this.connectAttempt;
+        this.autoResumeTimes = [];
         try {
-            await this.prepare();
+            await this.prepare(attempt);
             if (attempt !== this.connectAttempt) return; // Cancelled by disconnect().
             console.log("connect(): Preparation successful. Starting WebSocket connection...");
             this.setupWebSocketToService();
@@ -482,6 +500,21 @@ class GeminiLiveAPI {
      */
     canResume() {
         return this.enableSessionResumption && !!this.latestResumptionHandle;
+    }
+
+    /**
+     * Rate-limits automatic resumes to AUTO_RESUME_LIMIT a minute, so a server
+     * that keeps closing connections can't cause a reconnect loop.
+     * @returns {boolean} Whether another automatic resume is allowed now.
+     */
+    takeAutoResume() {
+        const now = Date.now();
+        this.autoResumeTimes = this.autoResumeTimes.filter((t) => now - t < 60000);
+        if (this.autoResumeTimes.length >= AUTO_RESUME_LIMIT) {
+            return false;
+        }
+        this.autoResumeTimes.push(now);
+        return true;
     }
 
     /**
@@ -513,7 +546,7 @@ class GeminiLiveAPI {
         this.sessionId = crypto.randomUUID();
         const attempt = ++this.connectAttempt;
         // Close the old connection while the backend prepares the new session.
-        await Promise.all([closed, this.prepare()]);
+        await Promise.all([closed, this.prepare(attempt)]);
         if (attempt !== this.connectAttempt) return; // Cancelled by disconnect().
         this.setupWebSocketToService();
     }
@@ -522,7 +555,7 @@ class GeminiLiveAPI {
      * Initializes backend control session to retrieve Project ID or other session metadata.
      * @returns {Promise<void>}
      */
-    async initBackendService() {
+    async initBackendService(sessionId = this.sessionId) {
         if (this.model === "gemini-3.5-live-early-exp") {
             this.location = "us-central1";
             if (
@@ -543,19 +576,16 @@ class GeminiLiveAPI {
         }
         const postRequestBody = {
             command: "connect",
-            session_id: this.sessionId,
+            session_id: sessionId,
             endpoint: this.endPoint,
             location: this.location,
         };
         try {
             const response = await this.postWithRetry(this.controlUrl, postRequestBody);
-            if (response?.project_id) {
-                this.setProjectId(response.project_id);
-            }
+            return response?.project_id;
         } catch (error) {
             console.error("Error in initBackendService:", error);
-            this.onErrorMessage(`Could not start the session: ${error.message}`);
-            throw error;
+            throw new Error(`Could not start the session: ${error.message}`);
         }
     }
 
@@ -563,21 +593,20 @@ class GeminiLiveAPI {
      * Posts tool / function declarations to the function registry service.
      * @returns {Promise<void>}
      */
-    async setupFuncDeclarationToService() {
+    async setupFuncDeclarationToService(sessionId = this.sessionId) {
         if (!this.functionCallDefinition) {
             return;
         }
         const funcDeclarationMessage = {
             objective: "fc_definition",
-            session_id: this.sessionId,
+            session_id: sessionId,
             functionDefinition: this.functionCallDefinition,
         };
         try {
             await this.sendPostRequest(this.frUrl, funcDeclarationMessage);
         } catch (error) {
             console.error("Error in setupFuncDeclarationToService:", error);
-            this.onErrorMessage(`Could not set up function declarations: ${error.message}`);
-            throw error;
+            throw new Error(`Could not set up function declarations: ${error.message}`);
         }
     }
 
@@ -729,12 +758,15 @@ class GeminiLiveAPI {
             if (this.webSocket !== webSocket) {
                 return; // Superseded by disconnect() or resume().
             }
+            const wasSetUp = this.isSetupComplete;
             this.webSocket = null;
             this.isSetupComplete = false;
             this.stopUpdateBandwidthUsage();
-            // 1001 means the backend is restarting (e.g. a deploy); resume
-            // the session on a new connection if possible.
-            const resumable = event.code === 1001 && this.canResume();
+            // 1001 means the server is going away (e.g. the backend restarts
+            // for a deploy); resume the session on a new connection if this
+            // one worked and we aren't already resuming in a loop.
+            const resumable =
+                event.code === 1001 && wasSetUp && this.canResume() && this.takeAutoResume();
             if (this.webRtcManager) {
                 this.webRtcManager.close({ keepLocalMedia: resumable });
             }
@@ -1167,7 +1199,9 @@ class GeminiLiveAPI {
         }
         if (!response.ok) {
             const detail = receivedData?.error || response.statusText;
-            throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+            const error = new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+            error.status = response.status;
+            throw error;
         }
         console.log("Received data:", receivedData);
         return receivedData;
@@ -1186,8 +1220,11 @@ class GeminiLiveAPI {
             try {
                 return await this.sendPostRequest(url, data);
             } catch (error) {
-                // fetch() rejects with a TypeError when the server is unreachable.
-                if (!(error instanceof TypeError) || attempt >= attempts) {
+                // fetch() rejects with a TypeError when the server is
+                // unreachable; a proxy in front of it answers 502-504.
+                const transient =
+                    error instanceof TypeError || [502, 503, 504].includes(error.status);
+                if (!transient || attempt >= attempts) {
                     throw error;
                 }
                 console.warn(`POST ${url} failed (${error.message}); retrying...`);

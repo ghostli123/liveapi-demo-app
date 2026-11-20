@@ -166,6 +166,7 @@ function connectedApi() {
 test("a server restart (1001) resumes when the session has a handle", () => {
     const api = connectedApi();
     api.setResumption(true, "");
+    api.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) });
     api.onReceiveMessage({ data: JSON.stringify({ sessionResumptionUpdate: { newHandle: "h1" } }) });
     api.webSocket.onclose({ code: 1001, reason: "Server restarting" });
     assert.equal(api.reconnects, 1);
@@ -220,6 +221,60 @@ test("disconnect() during connect() stops it from opening a WebSocket", async ()
     release({ project_id: "p" });
     await connecting;
     assert.equal(opened, 0);
+});
+
+test("a cancelled connect's failure doesn't end the next connection", async () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    const errors = [];
+    api.onErrorMessage = (message) => errors.push(message);
+    const bodies = [];
+    let failFirst;
+    api.sendPostRequest = (url, body) => {
+        bodies.push(body);
+        return bodies.length === 1
+            ? new Promise((_, reject) => (failFirst = reject))
+            : Promise.resolve({ project_id: "p2" });
+    };
+    let opened = 0;
+    api.setupWebSocketToService = () => opened++;
+
+    const first = api.connect();
+    await Promise.resolve();
+    api.disconnect();
+    const second = api.connect();
+    failFirst(Object.assign(new Error("HTTP 500"), { status: 500 }));
+    await Promise.all([first, second]);
+
+    assert.deepEqual(errors, []);
+    assert.equal(opened, 1);
+    assert.equal(api.projectId, "p2");
+    assert.notEqual(bodies[0].session_id, bodies[1].session_id);
+});
+
+test("automatic resumes after 1001 are limited", () => {
+    const api = connectedApi();
+    api.setResumption(true, "");
+    api.onReconnectNeeded = () => {
+        api.reconnects++;
+        api.setupWebSocketToService(); // Stand-in for resume().
+    };
+    // Three resumes are allowed; the fourth close within a minute is reported.
+    for (let i = 0; i < 4; i++) {
+        api.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) });
+        api.onReceiveMessage({ data: JSON.stringify({ sessionResumptionUpdate: { newHandle: "h" } }) });
+        api.webSocket.onclose({ code: 1001, reason: "" });
+    }
+    assert.equal(api.reconnects, 3);
+    assert.equal(api.errors.length, 1);
+});
+
+test("1001 before setup completed is an error, not a resume", () => {
+    const api = connectedApi();
+    api.setResumption(true, "");
+    api.latestResumptionHandle = "h";
+    api.webSocket.onclose({ code: 1001, reason: "" });
+    assert.equal(api.reconnects, 0);
+    assert.equal(api.errors.length, 1);
 });
 
 test("describeClose explains how the server ended the session", () => {
