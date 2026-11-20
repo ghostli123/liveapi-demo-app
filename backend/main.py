@@ -243,8 +243,6 @@ async def aiohttp_websocket_handler(request: web.Request) -> web.StreamResponse:
     ws = web.WebSocketResponse(
         max_msg_size=MAX_CLIENT_MESSAGE_BYTES, heartbeat=heartbeat_s
     )
-    await ws.prepare(request)
-
     wb_handler = websocket_handler.WebsocketHandler(
         upstream_url(session_handler.ws_host),
         session_id,
@@ -252,7 +250,18 @@ async def aiohttp_websocket_handler(request: web.Request) -> web.StreamResponse:
         debug_mode=DEBUG.value,
         keepalive_s=heartbeat_s,
     )
-    session_handler.websocket_handler = wb_handler
+    # Claimed before the first await (ws.prepare), so a second /ws for this
+    # session gets 409 instead of a second upstream connection.
+    if not await SESSION_MANAGER.claim_websocket(
+        session_id, session_handler, wb_handler
+    ):
+        return web.Response(text="Session already has a WebSocket", status=409)
+    try:
+        await ws.prepare(request)
+    except BaseException:
+        await SESSION_MANAGER.delete_item(session_id, session_handler)
+        raise
+
     try:
         await wb_handler.start_websocket()
         close_code, close_reason = wb_handler.client_close_frame()
@@ -266,7 +275,7 @@ async def aiohttp_websocket_handler(request: web.Request) -> web.StreamResponse:
         logging.info("WebSocket connection cleanup for session %s", session_id)
         # Always clean up the session to prevent memory leaks if the client
         # disconnects without sending a 'disconnect' command.
-        await SESSION_MANAGER.delete_item(session_id)
+        await SESSION_MANAGER.delete_item(session_id, session_handler)
 
     # Relay how upstream ended the session (e.g. a quota or permission error),
     # which the frontend shows to the user.
@@ -369,7 +378,9 @@ async def handle_control_request(request: web.Request):
     session_handler = session_management.SessionBaseModel(
         session_id=session_id, ws_host=ws_host, fr_session=fr_session, fr_error=fr_error
     )
-    await SESSION_MANAGER.add_item(session_id, session_handler)
+    # Checked again after the await above: a /ws may have attached meanwhile.
+    if not await SESSION_MANAGER.add_unless_connected(session_id, session_handler):
+        return _json_error("Already running", 409)
     session_handler.expiry_task = asyncio.create_task(
         _remove_if_never_connected(session_id, session_handler)
     )
@@ -383,12 +394,9 @@ async def _remove_if_never_connected(
 ) -> None:
     """Drops a session record whose WebSocket never arrived, so it can't leak."""
     await asyncio.sleep(PENDING_SESSION_TTL_S)
-    if (
-        await SESSION_MANAGER.search_item(session_id) is session
-        and session.websocket_handler is None
-    ):
+    if session.websocket_handler is None:
         logging.info("Session %s never opened a WebSocket; removing it", session_id)
-        await SESSION_MANAGER.delete_item(session_id)
+        await SESSION_MANAGER.delete_item(session_id, session)
 
 
 @functools.cache

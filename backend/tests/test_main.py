@@ -2,11 +2,12 @@ import asyncio
 import base64
 import hashlib
 import json
+import threading
 import unittest
 from unittest import mock
 
 import aiohttp
-from aiohttp import test_utils
+from aiohttp import test_utils, web
 from absl.testing import flagsaver
 import websockets
 
@@ -444,6 +445,87 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(json.loads(msg.data), {"echo": "ping"})
                 await ws.close()
 
+    async def test_control_retry_cannot_replace_a_connected_session(self):
+        # /api/control checked for a WebSocket, awaited the simulator's init,
+        # then replaced the record, so a /ws arriving during that await was
+        # attached to a record nobody tracked and a second /ws was allowed.
+        async with FakeUpstream() as upstream:
+            with flagsaver.flagsaver(common_bag_ws_port=upstream.port):
+                await self.connect_session("s23")
+                first = await main.SESSION_MANAGER.search_item("s23")
+                init_started, release = threading.Event(), threading.Event()
+
+                def slow_init():
+                    init_started.set()
+                    release.wait(5)
+                    raise RuntimeError("no creds")
+
+                try:
+                    with mock.patch.object(
+                        main, "initialize_gemini_chat_session", side_effect=slow_init
+                    ):
+                        retry = asyncio.create_task(self.connect_session("s23"))
+                        self.assertTrue(await asyncio.to_thread(init_started.wait, 5))
+                        ws = await self.client.ws_connect("/ws?session_id=s23")
+                        await ws.send_str("ping")
+                        await asyncio.wait_for(ws.receive(), 5)
+                        release.set()
+                        status, body = await retry
+                finally:
+                    release.set()
+                self.assertEqual(status, 409, body)
+                self.assertIs(await main.SESSION_MANAGER.search_item("s23"), first)
+                with self.assertRaises(aiohttp.WSServerHandshakeError) as cm:
+                    await self.client.ws_connect("/ws?session_id=s23")
+                self.assertEqual(cm.exception.status, 409)
+                await ws.close()
+                await self.wait_for_session_end("s23")
+
+    async def test_control_retry_replaces_a_pending_session(self):
+        with mock.patch.object(main, "PENDING_SESSION_TTL_S", 0.5):
+            await self.connect_session("s24")
+        first = await main.SESSION_MANAGER.search_item("s24")
+        status, body = await self.connect_session("s24")
+        self.assertEqual(status, 200, body)
+        second = await main.SESSION_MANAGER.search_item("s24")
+        self.assertIsNot(second, first)
+        assert first is not None and first.expiry_task is not None
+        await asyncio.sleep(0)
+        self.assertTrue(first.expiry_task.cancelled())
+        # The first record's expiry time passes; the second record stays.
+        await asyncio.sleep(0.8)
+        self.assertIs(await main.SESSION_MANAGER.search_item("s24"), second)
+
+    async def test_concurrent_websockets_for_one_session(self):
+        # The /ws handler attached itself to the record only after
+        # ws.prepare, so two requests could both pass the 409 check.
+        prepare = web.WebSocketResponse.prepare
+
+        async def slow_prepare(ws, request):
+            await asyncio.sleep(0.2)
+            return await prepare(ws, request)
+
+        async with FakeUpstream() as upstream:
+            with flagsaver.flagsaver(common_bag_ws_port=upstream.port):
+                await self.connect_session("s25")
+                with mock.patch.object(web.WebSocketResponse, "prepare", slow_prepare):
+                    results = await asyncio.gather(
+                        self.client.ws_connect("/ws?session_id=s25"),
+                        self.client.ws_connect("/ws?session_id=s25"),
+                        return_exceptions=True,
+                    )
+                connected = [
+                    r for r in results if isinstance(r, aiohttp.ClientWebSocketResponse)
+                ]
+                rejected = [
+                    r.status
+                    for r in results
+                    if isinstance(r, aiohttp.WSServerHandshakeError)
+                ]
+                self.assertEqual((len(connected), rejected), (1, [409]), results)
+                await connected[0].close()
+                await self.wait_for_session_end("s25")
+
     async def test_browser_close_closes_upstream_normally(self):
         async with FakeUpstream() as upstream:
             with flagsaver.flagsaver(common_bag_ws_port=upstream.port):
@@ -670,3 +752,28 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_delete_only_removes_the_expected_record(self):
+        manager = session_management.SessionManager()
+        old = session_management.SessionBaseModel("s", "host")
+        new = session_management.SessionBaseModel("s", "host")
+        self.assertTrue(await manager.add_unless_connected("s", old))
+        self.assertTrue(await manager.add_unless_connected("s", new))
+        await manager.delete_item("s", old)
+        self.assertIs(await manager.search_item("s"), new)
+        await manager.delete_item("s", new)
+        self.assertIsNone(await manager.search_item("s"))
+
+    async def test_claim_websocket_is_exclusive(self):
+        manager = session_management.SessionManager()
+        record = session_management.SessionBaseModel("s", "host")
+        other = session_management.SessionBaseModel("s", "host")
+        await manager.add_unless_connected("s", record)
+        handler = mock.Mock(spec=websocket_handler.WebsocketHandler)
+        self.assertFalse(await manager.claim_websocket("s", other, handler))
+        self.assertTrue(await manager.claim_websocket("s", record, handler))
+        self.assertFalse(await manager.claim_websocket("s", record, handler))
+        self.assertFalse(await manager.add_unless_connected("s", other))
+        self.assertIs(await manager.search_item("s"), record)
