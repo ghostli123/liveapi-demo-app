@@ -390,6 +390,11 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         resp = await self.client.get("/frontend/script.js")
         self.assertEqual(resp.status, 200)
         self.assertEqual(resp.headers["Cache-Control"], "no-cache")
+        resp = await self.client.get("/")
+        self.assertEqual(
+            resp.headers["Content-Security-Policy"], "frame-ancestors 'self'"
+        )
+        self.assertEqual(resp.headers["X-Content-Type-Options"], "nosniff")
         resp = await self.client.get("/healthz")
         self.assertEqual(await resp.text(), "ok")
 

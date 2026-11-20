@@ -411,6 +411,11 @@ async def revalidate_static_files(request: web.Request, handler):
     response = await handler(request)
     if request.path == "/" or request.path.startswith("/frontend/"):
         response.headers.setdefault("Cache-Control", "no-cache")
+        # Other sites may not frame the page: a framed page could trick the
+        # user into clicking Connect or allowing the microphone.
+        response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'self'")
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
     return response
 
 
