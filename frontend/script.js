@@ -121,6 +121,11 @@ function initApplicationManagers() {
         AppState.geminiLiveApi.webRtcManager.onAutoplayBlocked = showAutoplayBlocked;
     }
 
+    const micLevelBar = AppUI.getElement("micLevelBar");
+    AppState.micLevelMeter = new MicLevelMeter((level) => {
+        if (micLevelBar) micLevelBar.style.transform = `scaleY(${level.toFixed(3)})`;
+    });
+
     AppState.liveAudioInputManager.onNewAudioRecordingChunk = (audioData) => {
         AppState.geminiLiveApi.sendAudioMessage(audioData);
     };
@@ -810,6 +815,12 @@ async function startAudioInput() {
                 AppUI.getValue("audioInterval", "1000")
             );
         }
+        if (isMicOn()) {
+            AppState.micLevelMeter.start(
+                webRtcManager ? webRtcManager.micStream : AppState.liveAudioInputManager.stream
+            );
+            AppUI.setHidden("micLevel", false);
+        }
         // Device names are only visible once the user has granted access.
         refreshDeviceLists();
     } catch (err) {
@@ -821,6 +832,8 @@ async function startAudioInput() {
 }
 
 function stopAudioInput() {
+    AppState.micLevelMeter.stop();
+    AppUI.setHidden("micLevel", true);
     if (
         AppState.geminiLiveApi &&
         AppState.geminiLiveApi.webRtcManager
