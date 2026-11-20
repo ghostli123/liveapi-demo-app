@@ -696,6 +696,17 @@ class G3RtcWebRtcManager {
         return resultLines.join("\r\n");
     }
 
+    /**
+     * The server's answer lists candidates with an empty foundation
+     * ("a=candidate: 1 udp ..."). Chrome accepts them, but Firefox drops them
+     * and then has nothing to connect to. Give each one a foundation.
+     * @param {string} sdp
+     * @returns {string}
+     */
+    static fixAnswerSdp(sdp) {
+        return sdp.replace(/^a=candidate: /gm, "a=candidate:0 ");
+    }
+
     async initiateSession({ wantsVideo = true } = {}) {
         // Session resumption renegotiates; keep sending the same mic and camera.
         this.close({ keepLocalMedia: true });
@@ -805,13 +816,14 @@ class G3RtcWebRtcManager {
         }
         await this.pc.setRemoteDescription({
             type: "answer",
-            sdp: answerSdp,
+            sdp: G3RtcWebRtcManager.fixAnswerSdp(answerSdp),
         });
 
         const videoEl =
             this.videoPlayerElement || document.getElementById("video_player");
         if (videoEl && this.remoteStream) {
-            videoEl.src = "";
+            // Not `src = ""`, which makes Firefox try to load the page as media.
+            videoEl.removeAttribute("src");
             videoEl.srcObject = this.remoteStream;
             videoEl.muted = false;
             videoEl.play().catch((err) => {
