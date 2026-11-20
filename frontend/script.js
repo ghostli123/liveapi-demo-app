@@ -745,12 +745,17 @@ async function getAvailableDevices(deviceType, fallbackName) {
 
 function setMaterialSelect(allOptions, selectElement) {
     if (!selectElement) return;
+    // Keep the current choice if it still exists; otherwise show the first.
     const previousValue = selectElement.value;
+    const selectedId = allOptions.some((o) => o.id === previousValue)
+        ? previousValue
+        : allOptions.length > 0
+            ? allOptions[0].id
+            : "";
     selectElement.replaceChildren(); // Clean old options securely
     allOptions.forEach((optionData) => {
         const option = document.createElement("md-select-option");
         option.value = optionData.id;
-        option.selected = optionData.id === previousValue;
 
         const slotDiv = document.createElement("div");
         slotDiv.slot = "headline";
@@ -758,6 +763,12 @@ function setMaterialSelect(allOptions, selectElement) {
         option.appendChild(slotDiv);
 
         selectElement.appendChild(option);
+    });
+    // The select registers new options asynchronously; setting its value
+    // after that updates the displayed text too.
+    selectElement.value = selectedId;
+    requestAnimationFrame(() => {
+        if (selectElement.value === selectedId) selectElement.value = selectedId;
     });
 }
 
