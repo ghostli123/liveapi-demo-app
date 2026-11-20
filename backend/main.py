@@ -111,6 +111,16 @@ FR_SIMULATOR_THINKING = flags.DEFINE_string(
     "Thinking level for the function-response simulator (Gemini 3 models). "
     "Empty uses the model's default. 'low' answers in ~1 s instead of ~6 s.",
 )
+WS_HEARTBEAT_S = flags.DEFINE_float(
+    "ws_heartbeat_s",
+    20,
+    "Seconds between WebSocket pings on both legs of a session, browser and "
+    "upstream. Keeps quiet sessions (mic muted, text only) from being dropped "
+    "by proxies and load balancers that close idle connections, and detects "
+    "dead peers: the session ends if the browser doesn't answer a ping within "
+    "half this time, or upstream within this time. 0 disables pings.",
+    lower_bound=0,
+)
 DEBUG = flags.DEFINE_bool(
     "debug", False, "Log at debug level, including a preview of every proxied message."
 )
@@ -224,7 +234,12 @@ async def aiohttp_websocket_handler(request: web.Request) -> web.StreamResponse:
     if session_handler.websocket_handler:
         return web.Response(text="Session already has a WebSocket", status=409)
 
-    ws = web.WebSocketResponse(max_msg_size=MAX_CLIENT_MESSAGE_BYTES)
+    heartbeat_s = WS_HEARTBEAT_S.value or None
+    # aiohttp pings every heartbeat_s and closes the connection if the pong
+    # takes longer than heartbeat_s / 2.
+    ws = web.WebSocketResponse(
+        max_msg_size=MAX_CLIENT_MESSAGE_BYTES, heartbeat=heartbeat_s
+    )
     await ws.prepare(request)
 
     wb_handler = websocket_handler.WebsocketHandler(
@@ -232,6 +247,7 @@ async def aiohttp_websocket_handler(request: web.Request) -> web.StreamResponse:
         session_id,
         AiohttpToWebsocketsAdapter(ws, request_path=request.path_qs),
         debug_mode=DEBUG.value,
+        keepalive_s=heartbeat_s,
     )
     session_handler.websocket_handler = wb_handler
     try:

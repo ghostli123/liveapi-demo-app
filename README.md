@@ -56,6 +56,7 @@ Requires Python 3.11 or later.
 | `--allowed_hosts` | none | Extra host names browsers may use to reach the server, such as a custom domain or the public host of a proxy that rewrites `Host`. localhost, IP addresses, this machine's names, and `*.run.app` on Cloud Run are always allowed. |
 | `--fr_simulator_model` | `gemini-3-flash-preview` | Model that simulates function responses. |
 | `--fr_simulator_thinking_level` | `low` | Its thinking level; empty uses the model's default. |
+| `--ws_heartbeat_s` | `20` | Seconds between WebSocket pings to the browser and to the Live API. Keeps quiet sessions (mic muted, text only) from being closed by proxies that drop idle connections, and ends a session whose browser or upstream has silently gone away. `0` disables pings. |
 | `--debug` | off | Debug logging, including a preview of every proxied message. |
 | `PORT` (env) | `8080` | Port to listen on. |
 
