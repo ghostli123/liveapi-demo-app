@@ -132,6 +132,9 @@ function initApplicationManagers() {
 
     const videoElement = AppUI.getElement("video");
     const canvasElement = AppUI.getElement("canvas");
+    // Covers both camera and screen sharing, which share this element.
+    videoElement.addEventListener("loadedmetadata", () => AppUI.setHidden("previewPlaceholder", true));
+    videoElement.addEventListener("emptied", () => AppUI.setHidden("previewPlaceholder", false));
 
     AppState.liveVideoManager = new LiveVideoManager(videoElement, canvasElement);
     AppState.liveScreenManager = new LiveScreenManager(videoElement, canvasElement);

@@ -97,7 +97,10 @@
       <div id="video-preview-container" class="avatar-mode">
         <div class="input-container">
           <h3>Input (Camera/Screen)</h3>
-          <video id="video" autoplay playsinline muted></video>
+          <div class="preview-frame">
+            <video id="video" autoplay playsinline muted></video>
+            <div id="previewPlaceholder" class="preview-placeholder">Camera and screen sharing are off</div>
+          </div>
           <canvas id="canvas" style="display: none;"></canvas>
         </div>
         <div class="avatar-output-container">
