@@ -531,6 +531,7 @@ class GeminiLiveAPI {
         this.stopUpdateBandwidthUsage();
         const closed = oldWebSocket
             ? new Promise((resolve) => {
+                oldWebSocket.onopen = null;
                 oldWebSocket.onmessage = null;
                 oldWebSocket.onclose = () => resolve();
                 oldWebSocket.onerror = () => resolve();
@@ -625,6 +626,7 @@ class GeminiLiveAPI {
         this.webSocket = null;
         this.isSetupComplete = false;
         if (webSocket) {
+            webSocket.onopen = null;
             webSocket.onclose = null;
             webSocket.onerror = null;
             webSocket.onmessage = null;
@@ -787,8 +789,9 @@ class GeminiLiveAPI {
             console.log("websocket open");
             try {
                 // onConnectionStarted() runs when the server confirms setup.
-                await this.sendInitialSetupMessages();
+                await this.sendInitialSetupMessages(webSocket);
             } catch (err) {
+                if (this.webSocket !== webSocket) return; // Cancelled meanwhile.
                 console.error("Failed during initial setup:", err);
                 this.onErrorMessage(`Setup failed: ${err.message}`);
             }
@@ -860,7 +863,7 @@ class GeminiLiveAPI {
     /**
      * Constructs and sends the initial WebSocket session setup message.
      */
-    async sendInitialSetupMessages() {
+    async sendInitialSetupMessages(webSocket = this.webSocket) {
         console.log("start setting up");
 
         const isCommonBag =
@@ -913,6 +916,8 @@ class GeminiLiveAPI {
             const offerSdp = await this.webRtcManager.initiateSession({
                 wantsVideo,
             });
+            // ICE gathering takes up to 3 s; the user may have disconnected.
+            if (this.webSocket !== webSocket) return;
             sessionSetupMessage.setup.rtc_setup = {
                 offer_sdp: offerSdp,
             };

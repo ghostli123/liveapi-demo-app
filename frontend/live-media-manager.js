@@ -243,7 +243,12 @@ class MicLevelMeter {
     start(stream) {
         this.stop();
         if (!stream) return;
-        this.context = new AudioContext();
+        this.context = new (window.AudioContext || window.webkitAudioContext)();
+        // Created after awaiting getUserMedia, i.e. possibly without a user
+        // gesture, so it can start suspended (always in Safari).
+        if (this.context.state === "suspended") {
+            this.context.resume().catch(() => {});
+        }
         const analyser = this.context.createAnalyser();
         analyser.fftSize = 512;
         this.context.createMediaStreamSource(stream).connect(analyser);
@@ -771,9 +776,15 @@ class G3RtcWebRtcManager {
             transceiverToGroupId.set(recvVideoTransceiver, recvGroupId);
         }
 
-        await this.pc.setLocalDescription();
+        // close() (e.g. Disconnect) may run while this awaits.
+        const ensureOpen = () => {
+            if (this.pc !== pc) throw new Error("The WebRTC session was closed.");
+        };
+        await pc.setLocalDescription();
         await this.waitForIceGathering(3000);
-        await this.pc.setLocalDescription();
+        ensureOpen();
+        await pc.setLocalDescription();
+        ensureOpen();
 
         const midToGroupId = new Map();
         for (const [transceiver, groupId] of transceiverToGroupId.entries()) {
