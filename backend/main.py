@@ -121,6 +121,15 @@ WS_HEARTBEAT_S = flags.DEFINE_float(
     "half this time, or upstream within this time. 0 disables pings.",
     lower_bound=0,
 )
+MAX_SESSIONS = flags.DEFINE_integer(
+    "max_sessions",
+    0,
+    "Most sessions the server holds at once, counting ones whose WebSocket "
+    "hasn't opened yet. Further /api/control requests get 503 until one ends. "
+    "Bounds the upstream connections and memory one instance can be made to "
+    "use. 0 means no limit.",
+    lower_bound=0,
+)
 DEBUG = flags.DEFINE_bool(
     "debug", False, "Log at debug level, including a preview of every proxied message."
 )
@@ -379,7 +388,18 @@ async def handle_control_request(request: web.Request):
         session_id=session_id, ws_host=ws_host, fr_session=fr_session, fr_error=fr_error
     )
     # Checked again after the await above: a /ws may have attached meanwhile.
-    if not await SESSION_MANAGER.add_unless_connected(session_id, session_handler):
+    try:
+        added = await SESSION_MANAGER.add_unless_connected(
+            session_id, session_handler, max_sessions=MAX_SESSIONS.value
+        )
+    except session_management.SessionLimitError as e:
+        logging.warning("Rejected session %s: %s", session_id, e)
+        # The frontend retries 503s, which also covers a resume whose old
+        # session hasn't been removed yet.
+        response = _json_error(f"{e}; try again later", 503)
+        response.headers["Retry-After"] = "1"
+        return response
+    if not added:
         return _json_error("Already running", 409)
     session_handler.expiry_task = asyncio.create_task(
         _remove_if_never_connected(session_id, session_handler)

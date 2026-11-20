@@ -496,6 +496,38 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.8)
         self.assertIs(await main.SESSION_MANAGER.search_item("s24"), second)
 
+    async def test_control_enforces_max_sessions(self):
+        async with FakeUpstream() as upstream:
+            with flagsaver.flagsaver(common_bag_ws_port=upstream.port, max_sessions=1):
+                status, body = await self.connect_session("s26")
+                self.assertEqual(status, 200, body)
+                # A retry for the pending session still fits.
+                status, body = await self.connect_session("s26")
+                self.assertEqual(status, 200, body)
+
+                ws = await self.client.ws_connect("/ws?session_id=s26")
+                await ws.send_str("ping")
+                await asyncio.wait_for(ws.receive(), 5)
+                resp = await self.client.post(
+                    "/api/control",
+                    json={
+                        "command": "connect",
+                        "session_id": "s27",
+                        "endpoint": "autopush-common",
+                        "location": "us-central1",
+                    },
+                )
+                self.assertEqual(resp.status, 503)
+                self.assertEqual(resp.headers["Retry-After"], "1")
+                self.assertIn("session limit (1)", (await resp.json())["error"])
+                self.assertIsNone(await main.SESSION_MANAGER.search_item("s27"))
+
+                # The slot frees when the session ends.
+                await ws.close()
+                await self.wait_for_session_end("s26")
+                status, body = await self.connect_session("s27")
+                self.assertEqual(status, 200, body)
+
     async def test_concurrent_websockets_for_one_session(self):
         # The /ws handler attached itself to the record only after
         # ws.prepare, so two requests could both pass the 409 check.
@@ -750,10 +782,6 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await resp.text(), "ok")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
     async def test_delete_only_removes_the_expected_record(self):
         manager = session_management.SessionManager()
@@ -777,3 +805,27 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await manager.claim_websocket("s", record, handler))
         self.assertFalse(await manager.add_unless_connected("s", other))
         self.assertIs(await manager.search_item("s"), record)
+
+    async def test_session_limit(self):
+        manager = session_management.SessionManager()
+        a = session_management.SessionBaseModel("a", "host")
+        b = session_management.SessionBaseModel("b", "host")
+        self.assertTrue(await manager.add_unless_connected("a", a, max_sessions=2))
+        self.assertTrue(await manager.add_unless_connected("b", b, max_sessions=2))
+        c = session_management.SessionBaseModel("c", "host")
+        with self.assertRaises(session_management.SessionLimitError):
+            await manager.add_unless_connected("c", c, max_sessions=2)
+        self.assertIsNone(await manager.search_item("c"))
+        # A retry replacing a pending record takes no extra slot.
+        a2 = session_management.SessionBaseModel("a", "host")
+        self.assertTrue(await manager.add_unless_connected("a", a2, max_sessions=2))
+        await manager.delete_item("b", b)
+        self.assertTrue(await manager.add_unless_connected("c", c, max_sessions=2))
+        # 0 means no limit.
+        d = session_management.SessionBaseModel("d", "host")
+        self.assertTrue(await manager.add_unless_connected("d", d))
+        self.assertEqual(len(await manager.all_items()), 3)
+
+
+if __name__ == "__main__":
+    unittest.main()
