@@ -411,6 +411,59 @@
       font-weight: 500;
       color: var(--gcp-text-secondary);
     }
+
+    /* --- Narrow screens --- */
+    @media (max-width: 1100px) {
+      /* The navigation is decorative; give its width to the demo. */
+      .left-sidebar {
+        display: none;
+      }
+    }
+
+    @media (max-width: 800px) {
+      body {
+        height: auto;
+        overflow: auto;
+      }
+
+      .app-container {
+        flex-direction: column;
+        overflow: visible;
+      }
+
+      .main-content {
+        padding: 16px;
+        overflow: visible;
+      }
+
+      .right-sidebar {
+        width: auto;
+        border-left: none;
+        border-top: 1px solid var(--gcp-border);
+        overflow: visible;
+      }
+
+      #video-preview-container.avatar-mode .input-container,
+      #video-preview-container.avatar-mode .avatar-output-container {
+        flex: 1 1 100%;
+        min-width: 0;
+        max-width: none;
+      }
+
+      /* The avatar first; the user's own preview small, below it. */
+      #video-preview-container.avatar-mode .avatar-output-container {
+        order: -1;
+      }
+
+      #video-preview-container.avatar-mode #video {
+        max-height: 25vh;
+        object-fit: contain;
+      }
+
+      .media-controls {
+        flex-wrap: wrap;
+      }
+    }
   </style>
 </head>
 
