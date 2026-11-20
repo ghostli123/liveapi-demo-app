@@ -530,19 +530,53 @@ def _normalize_hostname(hostname: str | None) -> str:
     return (hostname or "").strip().lower().rstrip(".")
 
 
+def _allowed_host_entry(entry: str) -> str:
+    """One --allowed_hosts entry as a bare host name; "" for a blank, "*" for any.
+
+    Raises:
+      ValueError: the entry isn't a host name with an optional port.
+    """
+    entry = entry.strip()
+    if entry in ("", "*"):
+        return entry
+    parts = urllib.parse.urlsplit("//" + entry)  # Raises for e.g. "[".
+    _ = parts.port  # Raises for a non-numeric or out-of-range port.
+    # A scheme or path ("https://demo.example") would otherwise parse to a
+    # different host ("https") and silently allow nothing useful.
+    if (
+        parts.netloc != entry
+        or "@" in entry
+        or any(c.isspace() for c in entry)
+        or not parts.hostname
+    ):
+        raise ValueError("not a host name")
+    return _normalize_hostname(parts.hostname)
+
+
+def _validate_allowed_hosts(entries: list[str]) -> bool:
+    for entry in entries:
+        try:
+            _allowed_host_entry(entry)
+        except ValueError as e:
+            raise flags.ValidationError(
+                f"invalid entry {entry!r} ({e}); expected a host name with an "
+                "optional port, e.g. demo.example.com or demo.example.com:8443"
+            ) from e
+    return True
+
+
+# Checked when flags are parsed, so a bad entry stops the server at startup
+# instead of failing every guarded request.
+flags.register_validator(ALLOWED_HOSTS, _validate_allowed_hosts)
+
+
 def explicitly_allowed_hosts() -> frozenset[str]:
     """--allowed_hosts as bare host names, ignoring blanks and ports.
 
     Dropping blanks matters: a trailing comma would otherwise add "", which
     matches the empty host of `Origin: null` (sent by sandboxed iframes).
     """
-    hosts = set()
-    for entry in ALLOWED_HOSTS.value:
-        entry = entry.strip()
-        if entry == "*":
-            hosts.add("*")
-        elif entry:
-            hosts.add(_normalize_hostname(urllib.parse.urlsplit("//" + entry).hostname))
+    hosts = {_allowed_host_entry(entry) for entry in ALLOWED_HOSTS.value}
     hosts.discard("")
     return frozenset(hosts)
 
