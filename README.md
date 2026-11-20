@@ -14,6 +14,8 @@ Two transports are available:
 - **WebSocket**: audio, camera frames (JPEG), and the model's audio and MP4 video all travel as JSON over the WebSocket.
 - **WebRTC**: the WebSocket only carries setup and control messages; media flows over a WebRTC peer connection, which gives lower latency. Not every endpoint supports it.
 
+Both transports are tested in Chrome and Firefox. Safari support is intended but untested.
+
 ## Run locally
 
 Requires Python 3.11 or later.
