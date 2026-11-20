@@ -9,7 +9,7 @@ import re
 import signal
 import socket
 import subprocess
-from typing import Any
+from typing import Any, TypeGuard
 import urllib.parse
 
 from aiohttp import web
@@ -184,7 +184,7 @@ async def _read_json_object(request: web.Request) -> dict[str, Any] | None:
     return body if isinstance(body, dict) else None
 
 
-def _is_valid_session_id(session_id: Any) -> bool:
+def _is_valid_session_id(session_id: Any) -> TypeGuard[str]:
     return isinstance(session_id, str) and bool(_SESSION_ID_RE.match(session_id))
 
 
@@ -405,7 +405,9 @@ def initialize_gemini_chat_session():
         config=genai.types.GenerateContentConfig(
             system_instruction=FR_SIMULATOR_PROMPT,
             thinking_config=(
-                genai.types.ThinkingConfig(thinking_level=thinking)
+                genai.types.ThinkingConfig(
+                    thinking_level=genai.types.ThinkingLevel(thinking)
+                )
                 if thinking
                 else None
             ),

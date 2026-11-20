@@ -101,6 +101,8 @@ class MockLiveApi:
         return self
 
     async def stop(self):
+        if self.server is None:
+            return
         self.server.close()
         await self.server.wait_closed()
 

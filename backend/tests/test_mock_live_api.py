@@ -205,7 +205,7 @@ class MockLiveApiTest(unittest.IsolatedAsyncioTestCase):
         msg = await asyncio.wait_for(ws.receive(), TIMEOUT_S)
         self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
         self.assertEqual(ws.close_code, 1008)
-        self.assertIn("no-such-model", msg.extra)
+        self.assertIn("no-such-model", str(msg.extra))
 
     async def test_goaway_then_close_1001(self):
         ws = await self.open_session(setup_message())

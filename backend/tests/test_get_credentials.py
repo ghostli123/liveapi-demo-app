@@ -54,6 +54,32 @@ class GetAccessTokenTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no ADC.*no gcloud"):
             get_credentials.get_access_token()
 
+    def test_adc_without_token_falls_through(self):
+        adc = mock.Mock(token=None, expiry=None)
+        self.enterContext(mock.patch.object(get_credentials, "_adc_credentials", None))
+        with mock.patch.object(
+            get_credentials.google.auth, "default", return_value=(adc, "project")
+        ):
+            self.use_sources(
+                get_credentials._token_from_adc, lambda: _token(60, "gcloud")
+            )
+            self.assertEqual(get_credentials.get_access_token().source, "gcloud")
+        adc.refresh.assert_called_once()
+
+    def test_adc_token(self):
+        adc = mock.Mock(token="adc-token", expiry=None)
+        self.enterContext(mock.patch.object(get_credentials, "_adc_credentials", None))
+        with mock.patch.object(
+            get_credentials.google.auth, "default", return_value=(adc, "project")
+        ) as default:
+            token = get_credentials._token_from_adc()
+            get_credentials._token_from_adc()
+        self.assertEqual((token.token, token.source), ("adc-token", "adc"))
+        self.assertIsNotNone(token.expiry.tzinfo)
+        # The credentials object is created once and refreshed on each call.
+        default.assert_called_once()
+        self.assertEqual(adc.refresh.call_count, 2)
+
     def test_chain_credentials_refresh(self):
         self.use_sources(lambda: _token(60))
         creds = get_credentials.ChainCredentials()
