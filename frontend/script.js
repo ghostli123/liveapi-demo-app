@@ -141,10 +141,73 @@ function initApplicationManagers() {
 
 initApplicationManagers();
 
-// --- Cookie Persistence ---
-if (typeof CookieJar !== "undefined") {
-    CookieJar.init("systemInstructions");
-    CookieJar.init("location");
+// --- Settings Persistence ---
+// Fields restored on reload, kept in localStorage (not cookies, which went to
+// the server with every request).
+const PERSISTED_FIELDS = [
+    "transportMode",
+    "location",
+    "envApiHost",
+    "liveApiModel",
+    "voiceName",
+    "voiceLocale",
+    "systemInstructions",
+];
+const SETTINGS_KEY = "liveapi-demo-settings";
+
+function loadSavedSettings() {
+    let saved = {};
+    try {
+        saved = JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {};
+    } catch {
+        // Missing or corrupt; start from the page defaults.
+    }
+    // One-time migration from the cookies earlier versions used.
+    for (const id of ["systemInstructions", "location"]) {
+        const match = document.cookie.match(new RegExp(`(?:^|;\\s*)CookieJar_${id}=([^;]*)`));
+        if (match) {
+            if (saved[id] === undefined) saved[id] = decodeURIComponent(match[1]);
+            document.cookie = `CookieJar_${id}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
+        }
+    }
+    return saved;
+}
+
+function saveSettings() {
+    const settings = {};
+    for (const id of PERSISTED_FIELDS) {
+        const element = AppUI.getElement(id);
+        if (element) settings[id] = element.value;
+    }
+    try {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    } catch (error) {
+        console.warn("Could not save settings:", error);
+    }
+}
+
+async function restoreSettings() {
+    const saved = loadSavedSettings();
+    await Promise.all(
+        ["md-outlined-select", "md-outlined-text-field"].map((name) =>
+            customElements.whenDefined(name)
+        )
+    );
+    for (const id of PERSISTED_FIELDS) {
+        const element = AppUI.getElement(id);
+        if (!element) continue;
+        await element.updateComplete;
+        const value = saved[id];
+        // Skip choices the page no longer offers, e.g. a retired model.
+        const offered =
+            !element.options || [...element.options].some((option) => option.value === value);
+        if (typeof value === "string" && offered) {
+            element.value = value;
+        }
+        element.addEventListener("input", saveSettings);
+        element.addEventListener("change", saveSettings);
+    }
+    saveSettings();
 }
 
 // --- Page Load Event Initialization ---
@@ -152,6 +215,7 @@ window.addEventListener("load", () => {
     console.log("Hello Gemini Realtime Demo!");
 
     initDOMEventListeners();
+    restoreSettings();
     refreshDeviceLists();
     if (navigator.mediaDevices) {
         navigator.mediaDevices.addEventListener("devicechange", refreshDeviceLists);
