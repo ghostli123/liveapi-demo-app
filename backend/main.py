@@ -45,7 +45,6 @@ VERTEX_HOSTS = frozenset(
     }
 )
 DEFAULT_PROJECT_ID = "live-api-webrtc-testing"
-FR_SIMULATOR_MODEL = "gemini-3.1-pro-preview"
 # Preview models are served from the global endpoint only, whatever the
 # Live API session's location.
 FR_SIMULATOR_LOCATION = "global"
@@ -99,6 +98,18 @@ ALLOWED_HOSTS = flags.DEFINE_list(
     "domain or the public host of a proxy that rewrites Host. Always allowed: "
     "localhost, IP addresses, this machine's names, and *.run.app on Cloud Run. "
     "'*' allows any host, which disables DNS-rebinding protection.",
+)
+FR_SIMULATOR_MODEL = flags.DEFINE_string(
+    "fr_simulator_model",
+    "gemini-3-flash-preview",
+    "Model that simulates function responses. The Live model waits for each "
+    "response, so a fast model keeps the conversation moving.",
+)
+FR_SIMULATOR_THINKING = flags.DEFINE_string(
+    "fr_simulator_thinking_level",
+    "low",
+    "Thinking level for the function-response simulator (Gemini 3 models). "
+    "Empty uses the model's default. 'low' answers in ~1 s instead of ~6 s.",
 )
 DEBUG = flags.DEFINE_bool(
     "debug", False, "Log at debug level, including a preview of every proxied message."
@@ -372,10 +383,16 @@ def _genai_client() -> genai.Client:
 
 def initialize_gemini_chat_session():
     logging.info("Initializing Gemini chat session with project %s...", project_id())
+    thinking = FR_SIMULATOR_THINKING.value
     return _genai_client().aio.chats.create(
-        model=FR_SIMULATOR_MODEL,
+        model=FR_SIMULATOR_MODEL.value,
         config=genai.types.GenerateContentConfig(
-            system_instruction=FR_SIMULATOR_PROMPT
+            system_instruction=FR_SIMULATOR_PROMPT,
+            thinking_config=(
+                genai.types.ThinkingConfig(thinking_level=thinking)
+                if thinking
+                else None
+            ),
         ),
     )
 
