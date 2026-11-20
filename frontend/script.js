@@ -95,6 +95,12 @@ function initApplicationManagers() {
     };
 
     AppState.geminiLiveApi.onReceiveResponse = handleReceiveResponse;
+    AppState.geminiLiveApi.onTransportFallback = () => {
+        AppState.liveVideoOutputManager.initMediaSource();
+        AppUI.setText("active-transport", "WebSocket");
+        AppUI.setText("webrtc-state", "n/a");
+        newSystemMessage("This endpoint didn't accept WebRTC, so media uses the WebSocket.");
+    };
     AppState.geminiLiveApi.onReconnectNeeded = () => {
         newSystemMessage("The server restarted. Resuming the session...");
         handleSessionResumptionReconnect();
@@ -103,6 +109,16 @@ function initApplicationManagers() {
     AppState.liveAudioOutputManager = new LiveAudioOutputManager();
     AppState.liveVideoOutputManager = new LiveVideoOutputManager();
     AppState.liveAudioInputManager = new LiveAudioInputManager();
+
+    const showAutoplayBlocked = () => {
+        AppUI.showModal(
+            "The browser blocked audio and video playback. Press play on the avatar video to start it."
+        );
+    };
+    AppState.liveVideoOutputManager.onAutoplayBlocked = showAutoplayBlocked;
+    if (AppState.geminiLiveApi.webRtcManager) {
+        AppState.geminiLiveApi.webRtcManager.onAutoplayBlocked = showAutoplayBlocked;
+    }
 
     AppState.liveAudioInputManager.onNewAudioRecordingChunk = (audioData) => {
         AppState.geminiLiveApi.sendAudioMessage(audioData);
@@ -475,6 +491,7 @@ async function simulateFunctionResponse(funcCall) {
 
 async function handleFunctionCallRequest(functionCalls) {
     console.log("Function call requested: ", functionCalls);
+    const webSocket = AppState.geminiLiveApi.webSocket;
     for (const funcCall of functionCalls) {
         newSystemMessage(`Function call: ${funcCall.name}(${JSON.stringify(funcCall.args || {})})`);
     }
@@ -486,6 +503,11 @@ async function handleFunctionCallRequest(functionCalls) {
         const response = await simulateFunctionResponse(funcCall);
         response.scheduling = schedulingVal;
         functionResponses.push({ id: funcCall.id, name: funcCall.name, response });
+    }
+    if (AppState.geminiLiveApi.webSocket !== webSocket) {
+        // The connection that made these calls has closed or been replaced.
+        console.warn("Dropping responses to calls from a previous connection.");
+        return;
     }
     AppState.geminiLiveApi.sendMessage({ toolResponse: { functionResponses } });
 }
@@ -806,17 +828,20 @@ function setAppStatus(status) {
             AppUI.setDisabled("disconnectBtn", true);
 
             if (AppState.liveVideoOutputManager) {
-                const blob = AppState.liveVideoOutputManager.getRecordedBlob();
-                if (blob && blob.size > 0) {
-                    downloadBlob(blob, `received_video_${Date.now()}.mp4`);
-                    AppState.liveVideoOutputManager.clearRecordedChunks();
-                }
+                const recordings = AppState.liveVideoOutputManager.getRecordings();
+                const stamp = Date.now();
+                recordings.forEach((blob, i) => {
+                    const part = recordings.length > 1 ? `_part${i + 1}` : "";
+                    downloadBlob(blob, `received_video_${stamp}${part}.mp4`);
+                });
+                AppState.liveVideoOutputManager.clearRecordedChunks();
             }
             break;
         case "connecting":
             AppUI.setHidden("connecting", false);
             AppUI.setDisabled("connectBtn", true);
-            AppUI.setDisabled("disconnectBtn", true);
+            // Disconnect cancels a connect that is taking too long.
+            AppUI.setDisabled("disconnectBtn", false);
             break;
         case "connected":
             AppUI.setHidden("connected", false);
@@ -880,7 +905,14 @@ function connectBtnClick() {
     setAppStatus("connecting");
     console.log("Connecting...");
     // Runs inside the click, so the browser's autoplay policy allows audio.
+    // Safari also needs play() on the video element during the click, or it
+    // refuses to start the avatar's sound when the stream arrives later.
     AppState.liveAudioOutputManager.resume();
+    const avatarVideo = AppUI.getElement("video_player");
+    if (avatarVideo) {
+        avatarVideo.muted = false;
+        avatarVideo.play().catch(() => {}); // No source yet; this only unlocks.
+    }
     AppUI.setText("usage-tokens", "--");
 
     handleModelChange();

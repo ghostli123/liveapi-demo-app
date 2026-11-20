@@ -104,6 +104,9 @@ class GeminiLiveResponseMessage {
     }
 }
 
+// How long to wait for setupComplete after the WebSocket opens.
+const SETUP_TIMEOUT_MS = 30000;
+
 const DUMMY_AVATAR_16_9 =
     "iVBORw0KGgoAAAANSUhEUgAAABAAAAAJCAIAAABnTYUvAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAAMSURBVBhXYwQDAAACAAHnSm8jAAAAAElFTkSuQmCC";
 
@@ -207,8 +210,12 @@ class GeminiLiveAPI {
         this.googleSearchEnabled = false; // Enable/disable Google Search tool
         this.isSetupComplete = false; // Whether the server confirmed the setup message
         this.latestResumptionHandle = ""; // Last handle the server sent this session
+        this.connectAttempt = 0; // Bumped to cancel a connect in progress
+        this.setupTimer = null;
         // Called when the server restarts and the session can be resumed.
         this.onReconnectNeeded = () => {};
+        // Called after falling back from WebRTC to WebSocket media.
+        this.onTransportFallback = () => {};
         console.log("Created Gemini Live API object: ", this);
     }
 
@@ -457,8 +464,10 @@ class GeminiLiveAPI {
         // the backend can't remove this one.
         this.sessionId = crypto.randomUUID();
         this.latestResumptionHandle = "";
+        const attempt = ++this.connectAttempt;
         try {
             await this.prepare();
+            if (attempt !== this.connectAttempt) return; // Cancelled by disconnect().
             console.log("connect(): Preparation successful. Starting WebSocket connection...");
             this.setupWebSocketToService();
         } catch (error) {
@@ -502,8 +511,10 @@ class GeminiLiveAPI {
         this.setResumption(true, handle);
         // A new session ID keeps the backend from mixing up the two connections.
         this.sessionId = crypto.randomUUID();
+        const attempt = ++this.connectAttempt;
         // Close the old connection while the backend prepares the new session.
         await Promise.all([closed, this.prepare()]);
+        if (attempt !== this.connectAttempt) return; // Cancelled by disconnect().
         this.setupWebSocketToService();
     }
 
@@ -575,6 +586,7 @@ class GeminiLiveAPI {
      * the server, this doesn't report an error.
      */
     disconnect() {
+        this.connectAttempt++; // Abandons a connect() or resume() in progress.
         this.stopUpdateBandwidthUsage();
         if (this.webRtcManager) {
             this.webRtcManager.close();
@@ -624,6 +636,10 @@ class GeminiLiveAPI {
         for (const message of events) {
             if (message.type === "SETUP COMPLETE") {
                 this.isSetupComplete = true;
+                clearTimeout(this.setupTimer);
+                if (this.transportMode === "webrtc" && !message.answerSdp) {
+                    this.fallBackToWebSocketMedia();
+                }
             } else if (message.type === "RESUMPTION") {
                 this.latestResumptionHandle = message.data;
             }
@@ -661,6 +677,21 @@ class GeminiLiveAPI {
     }
 
     /**
+     * Switches media to the WebSocket when the server ignored the WebRTC offer
+     * (setupComplete without an SDP answer). It then streams audio and video
+     * over the WebSocket, which would otherwise be dropped.
+     */
+    fallBackToWebSocketMedia() {
+        console.warn("[WebRTC] setupComplete has no SDP answer; using WebSocket media.");
+        this.transportMode = "websocket";
+        if (this.webRtcManager) {
+            this.webRtcManager.close();
+        }
+        this.updateBandwidthUsage();
+        this.onTransportFallback();
+    }
+
+    /**
      * Describes why the server closed the connection, for showing to the user.
      * @param {CloseEvent} event
      * @returns {string}
@@ -686,6 +717,12 @@ class GeminiLiveAPI {
         const webSocket = new WebSocket(wsUrl);
         this.webSocket = webSocket;
         this.isSetupComplete = false;
+        clearTimeout(this.setupTimer);
+        this.setupTimer = setTimeout(() => {
+            if (this.webSocket === webSocket && !this.isSetupComplete) {
+                this.onErrorMessage("Timed out waiting for the server to set up the session.");
+            }
+        }, SETUP_TIMEOUT_MS);
 
         webSocket.onclose = (event) => {
             console.log("websocket closed: ", event.code, event.reason);
