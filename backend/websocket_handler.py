@@ -151,7 +151,9 @@ class WebsocketHandler:
             token = await asyncio.to_thread(get_credentials.get_access_token)
 
         try:
-            connection = await self._connect_upstream(token.token if token else None)
+            server_websocket = await self._connect_upstream(
+                token.token if token else None
+            )
         except Exception as e:
             self.close_code = 1011
             self.close_reason = describe_connect_error(e)
@@ -165,29 +167,40 @@ class WebsocketHandler:
         # The token is only checked at the handshake. Don't push a refreshed
         # one later: the Live API rejects {"access_token": ...} messages with
         # close code 1007, and GoAway reconnects fetch a new token anyway.
-        async with connection as server_websocket:
-            self.server_websocket = server_websocket
-            self.started_at = time.monotonic()
-            client_to_server = asyncio.create_task(
-                self.proxy_task(self.client_websocket, server_websocket, "c->s")
+        self.server_websocket = server_websocket
+        started_at = self.started_at = time.monotonic()
+        client_to_server = asyncio.create_task(
+            self.proxy_task(self.client_websocket, server_websocket, "c->s")
+        )
+        server_to_client = asyncio.create_task(
+            self.proxy_task(server_websocket, self.client_websocket, "s->c")
+        )
+        logging.info("Proxy established for session %s", self.session_id)
+        upstream_close_code = 1000
+        try:
+            await asyncio.wait(
+                [client_to_server, server_to_client],
+                return_when=asyncio.FIRST_COMPLETED,
             )
-            server_to_client = asyncio.create_task(
-                self.proxy_task(server_websocket, self.client_websocket, "s->c")
-            )
-            logging.info("Proxy established for session %s", self.session_id)
-            try:
-                await asyncio.wait(
-                    [client_to_server, server_to_client],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-            finally:
-                for task in (client_to_server, server_to_client):
-                    task.cancel()
-        # Leaving the `async with` completed the closing handshake, so the
-        # upstream close code is known.
-        self.server_websocket = None
-        self.close_code = server_websocket.close_code
-        self.close_reason = server_websocket.close_reason or ""
+        except asyncio.CancelledError:
+            # The server is shutting down, or aiohttp dropped the handler
+            # because the browser's connection went away. Neither is an
+            # upstream failure, which is what `async with connection` would
+            # have reported (1011) for any exception.
+            upstream_close_code = 1001
+            raise
+        finally:
+            for task in (client_to_server, server_to_client):
+                task.cancel()
+            # Completes the closing handshake, so the upstream close code is
+            # known afterwards.
+            await server_websocket.close(upstream_close_code)
+            self.server_websocket = None
+            self.close_code = server_websocket.close_code
+            self.close_reason = server_websocket.close_reason or ""
+            self._log_summary(time.monotonic() - started_at)
+
+    def _log_summary(self, duration_s: float) -> None:
         (up_messages, up_chars), (down_messages, down_chars) = (
             self.traffic["c->s"],
             self.traffic["s->c"],
@@ -196,7 +209,7 @@ class WebsocketHandler:
             "Session %s ended after %.1f s (upstream close %s %s): "
             "%d messages / %.1f MB to the browser, %d messages / %.1f MB upstream",
             self.session_id,
-            time.monotonic() - self.started_at,
+            duration_s,
             self.close_code,
             self.close_reason,
             down_messages,

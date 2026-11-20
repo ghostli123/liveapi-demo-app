@@ -80,16 +80,27 @@ class FakeUpstream:
 
     def __init__(self):
         self.received = []
+        # The close code each connection received from the proxy.
+        self.close_codes = []
         self.server = None
 
     async def handler(self, connection):
-        async for message in connection:
-            self.received.append(message)
-            if message == "close-please":
-                await connection.close(code=1008, reason="Quota exceeded")
-                return
-            # The Live API sends JSON in binary frames.
-            await connection.send(json.dumps({"echo": message}).encode())
+        try:
+            async for message in connection:
+                self.received.append(message)
+                if message == "close-please":
+                    await connection.close(code=1008, reason="Quota exceeded")
+                    return
+                # The Live API sends JSON in binary frames.
+                await connection.send(json.dumps({"echo": message}).encode())
+        finally:
+            self.close_codes.append(connection.close_code)
+
+    async def wait_for_close_codes(self, count, timeout=5):
+        async with asyncio.timeout(timeout):
+            while len(self.close_codes) < count:
+                await asyncio.sleep(0.02)
+        return self.close_codes
 
     async def __aenter__(self):
         self.server = await websockets.serve(self.handler, "127.0.0.1", 0)
@@ -142,11 +153,24 @@ class UnresponsiveUpstream:
         await self.server.wait_closed()
 
 
+class ProductionTestServer(test_utils.TestServer):
+    """A TestServer whose runner is configured like main_async's.
+
+    aiohttp's TestServer cancels a handler as soon as its client disconnects;
+    the AppRunner in main_async doesn't, so a browser that closes its WebSocket
+    and drops the connection lets the handler finish normally.
+    """
+
+    async def _make_runner(self, **kwargs):
+        kwargs["handler_cancellation"] = False
+        return await super()._make_runner(**kwargs)
+
+
 class ServerTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         main.SESSION_MANAGER = session_management.SessionManager()
         self.client = test_utils.TestClient(
-            test_utils.TestServer(await main.create_app())
+            ProductionTestServer(await main.create_app())
         )
         await self.client.start_server()
         patcher = mock.patch.object(
@@ -344,6 +368,49 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 msg = await asyncio.wait_for(ws.receive(), 5)
                 self.assertEqual(json.loads(msg.data), {"echo": "ping"})
                 await ws.close()
+
+    async def test_browser_close_closes_upstream_normally(self):
+        async with FakeUpstream() as upstream:
+            with flagsaver.flagsaver(common_bag_ws_port=upstream.port):
+                await self.connect_session("s20")
+                with self.assertLogs("absl", level="INFO") as logs:
+                    ws = await self.client.ws_connect("/ws?session_id=s20")
+                    await ws.send_str("ping")
+                    await asyncio.wait_for(ws.receive(), 5)
+                    await ws.close()
+                    await self.wait_for_session_end("s20")
+                self.assertEqual(await upstream.wait_for_close_codes(1), [1000])
+        self.assertTrue(
+            any("Session s20 ended after" in line for line in logs.output),
+            logs.output,
+        )
+
+    async def test_cancelled_proxy_closes_upstream_as_going_away(self):
+        class SilentBrowser:
+            async def recv(self):
+                await asyncio.Event().wait()
+
+            async def send(self, data):
+                pass
+
+        async with FakeUpstream() as upstream:
+            handler = websocket_handler.WebsocketHandler(
+                f"ws://127.0.0.1:{upstream.port}", "s21", SilentBrowser()
+            )
+            with self.assertLogs("absl", level="INFO") as logs:
+                session = asyncio.create_task(handler.start_websocket())
+                async with asyncio.timeout(5):
+                    while handler.server_websocket is None:
+                        await asyncio.sleep(0.02)
+                # What aiohttp does to the handler at shutdown.
+                await handler.end_websocket()
+                with self.assertRaises(asyncio.CancelledError):
+                    await session
+            self.assertEqual(await upstream.wait_for_close_codes(1), [1001])
+        self.assertTrue(
+            any("Session s21 ended after" in line for line in logs.output),
+            logs.output,
+        )
 
     async def wait_for_session_end(self, session_id, timeout=5):
         async with asyncio.timeout(timeout):
