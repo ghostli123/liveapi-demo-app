@@ -1,24 +1,26 @@
-FROM python:3.11
+FROM python:3.11-slim
 
-# Set the working directory inside the container
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PROJECT_ID=live-api-webrtc-testing \
+    PORT=8080
+
 WORKDIR /app
 
-# 1. Install dependencies first (for better caching)
-COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install dependencies first so code changes don't invalidate this layer.
+COPY backend/requirements.txt backend/requirements.txt
+RUN pip install --no-cache-dir -r backend/requirements.txt
 
-# 2. Copy the actual code and assets
-# This copies everything from your local liveapi-demo-app into /app
-COPY . .
+COPY backend backend
+COPY frontend frontend
 
-ENV PROJECT_ID "live-api-webrtc-testing"
-ENV LOCATION "us-central1"
+RUN useradd --system --uid 10001 app
+USER app
 
-
-
-# 3. Cloud Run needs to run the backend
-# We switch to backend so main.py can find its local imports easily
+# main.py imports its sibling modules by name.
 WORKDIR /app/backend
+EXPOSE 8080
 
-# Use the PORT environment variable provided by Cloud Run
-CMD python main.py --project_id=$PROJECT_ID
+# `exec` makes python PID 1, so it receives Cloud Run's SIGTERM and shuts down
+# cleanly instead of being killed when the grace period ends.
+CMD exec python main.py --project_id="$PROJECT_ID"
