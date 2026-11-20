@@ -4,6 +4,10 @@
  * tool/function calling declarations, and secure DOM manipulations.
  */
 
+/* global GeminiLiveAPI, LiveAudioOutputManager, LiveVideoOutputManager, LiveAudioInputManager,
+   MicLevelMeter, LiveVideoManager, LiveScreenManager -- from gemini-live-api.js and
+   live-media-manager.js, loaded before this script (see index.html) */
+
 // --- Application Configuration ---
 const isHttps = window.location.protocol === "https:";
 const wsProtocol = isHttps ? "wss:" : "ws:";

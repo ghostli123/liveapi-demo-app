@@ -1,3 +1,6 @@
+/* global G3RtcWebRtcManager -- from live-media-manager.js (see index.html) */
+/* exported GeminiLiveAPI */
+
 /**
  * One event from a Gemini Live API server message. A single server message can
  * hold several events (e.g. a transcript and the end of the turn), so messages
@@ -109,9 +112,6 @@ class GeminiLiveResponseMessage {
 const SETUP_TIMEOUT_MS = 30000;
 // Most automatic resumes (after close code 1001) allowed per minute.
 const AUTO_RESUME_LIMIT = 3;
-
-const DUMMY_AVATAR_16_9 =
-    "iVBORw0KGgoAAAANSUhEUgAAABAAAAAJCAIAAABnTYUvAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAAMSURBVBhXYwQDAAACAAHnSm8jAAAAAElFTkSuQmCC";
 
 /**
  * Main Client API class for interacting with Gemini Live Realtime connections.

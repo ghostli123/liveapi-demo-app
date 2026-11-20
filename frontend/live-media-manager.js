@@ -1,3 +1,6 @@
+/* exported LiveAudioOutputManager, LiveAudioInputManager, MicLevelMeter, LiveVideoManager,
+   LiveScreenManager, LiveVideoOutputManager, G3RtcWebRtcManager */
+
 class LiveAudioOutputManager {
     constructor() {
         this.audioContext = null;
@@ -106,7 +109,7 @@ class LiveAudioInputManager {
         this.stream = null;
         this.intervalMs = 1000;
 
-        this.onNewAudioRecordingChunk = (audioData) => {
+        this.onNewAudioRecordingChunk = () => {
             console.log("New audio recording ");
         };
     }
@@ -983,13 +986,17 @@ class G3RtcWebRtcManager {
         if (this.dataChannel) {
             try {
                 this.dataChannel.close();
-            } catch (e) {}
+            } catch {
+                // Closing is best effort; the channel is dropped either way.
+            }
             this.dataChannel = null;
         }
         if (this.pc) {
             try {
                 this.pc.close();
-            } catch (e) {}
+            } catch {
+                // Closing is best effort; the connection is dropped either way.
+            }
             this.pc = null;
         }
         this.audioSender = null;

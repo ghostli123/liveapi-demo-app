@@ -14,6 +14,9 @@
 // checks become checks of the audio-only and WebSocket-fallback paths; the
 // function-response simulator (a Gemini call) is answered in the browser; and
 // a GoAway scenario runs, since only the mock can be told to send one.
+
+/* global document, customElements, AppState, handleSessionResumptionReconnect -- used in
+   page.evaluate() callbacks, which run in the app page */
 const { chromium } = require("playwright-core");
 const path = require("path");
 
@@ -242,7 +245,7 @@ const scenarios = {
         await page.click("#disconnectBtn");
     },
 
-    async "voice turn from the microphone"(browser) {
+    async "voice turn from the microphone"() {
         if (MOCK) return "skipped (the mock ignores audio)";
         if (!args.speech) return "skipped (pass --speech=file.wav)";
         const voiceBrowser = await chromium.launch({
