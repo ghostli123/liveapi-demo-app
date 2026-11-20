@@ -279,6 +279,44 @@ window.addEventListener("load", () => {
 
 // --- DOM Event Listeners Setup ---
 function initDOMEventListeners() {
+    // index.html has no inline on* handlers: the Content-Security-Policy
+    // (backend/main.py) blocks them.
+    const clickToOpen = (inputId) => () => AppUI.getElement(inputId)?.click();
+    const listeners = [
+        ["#cameraSource", "change", newCameraSelected],
+        ["#audioSource", "change", newMicSelected],
+        ["#micBtn md-filled-icon-button", "click", micBtnClick],
+        ["#micOffBtn md-filled-icon-button", "click", micOffBtnClick],
+        ["#cameraBtn md-filled-icon-button", "click", cameraBtnClick],
+        ["#cameraOffBtn md-filled-icon-button", "click", cameraOffBtnClick],
+        ["#turnBtn", "click", turnBtnClick],
+        ["#screenBtn md-filled-icon-button", "click", screenShareBtnClick],
+        ["#sendMessageBtn", "click", newUserMessage],
+        ["#connectBtn", "click", connectBtnClick],
+        ["#disconnectBtn", "click", disconnectBtnClick],
+        ["#audioUploadBtn", "click", clickToOpen("audioFileInput")],
+        ["#fcUploadBtn", "click", clickToOpen("fcFileInput")],
+        ["#fcRemove", "click", removeFunctionDeclarations],
+        ["#toolBehavior", "change", toggleSchedulingDisable],
+        ["#enableAvatarMode", "change", toggleAvatarMode],
+        ["#avatarUploadBtn", "click", clickToOpen("avatarFileInput")],
+        ["#avatarSampleLink", "click", useSampleAvatar],
+        ["#avatarStockLink", "click", useStockAvatar],
+        [
+            "#enableS2ST",
+            "change",
+            (event) => AppUI.setDisabled("s2stTargetLanguage", !event.target.checked),
+        ],
+    ];
+    for (const [selector, type, handler] of listeners) {
+        const element = document.querySelector(selector);
+        if (element) {
+            element.addEventListener(type, handler);
+        } else {
+            console.warn(`No element for ${selector}`);
+        }
+    }
+
     const audioFileInput = AppUI.getElement("audioFileInput");
     if (audioFileInput) {
         audioFileInput.addEventListener("change", handleAudioFileInputChange);

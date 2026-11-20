@@ -68,6 +68,8 @@ Requires Python 3.11 or later.
 
 The API and WebSocket only accept browser requests from the app's own pages, under an allowed host name, so other websites (including through DNS rebinding) can't use the server's credentials. Clients that send no `Origin` header, such as `scripts/smoke_test.py`, are allowed.
 
+The page is served with a Content-Security-Policy (`CONTENT_SECURITY_POLICY` in `backend/main.py`) that runs scripts only from the app and the Material Web CDN, connects only to the app's own server, and stops other sites from framing it. Keep `frontend/index.html` free of inline `<script>` blocks and `on*` attributes: attach handlers in `initDOMEventListeners()` in `frontend/script.js`. A new script or font host has to be added to the policy; `test_index_html_has_nothing_the_csp_blocks` and the browser e2e catch what it blocks.
+
 ### Credentials
 
 The backend tries, in order: Application Default Credentials through google-auth, then `gcloud auth application-default print-access-token`, then the LOAS helper `backend/common_bag_ws_proxy.par` if present. The gcloud fallback matters on machines with certificate-based access, where google-auth's own token refresh fails with "Account restricted" but gcloud works. The server log says which source it used.
@@ -119,7 +121,7 @@ node --test frontend/tests/*.test.js      # frontend tests (Node 18+)
 npm install && npm run lint               # ESLint on the frontend and scripts
 ```
 
-The frontend files are classic scripts sharing one global scope (see `frontend/index.html`), so a class one file uses from another is declared in `/* global */` and `/* exported */` comments at the top of each file; ESLint reports undeclared names.
+The frontend files (except the `frontend/material.js` module) are classic scripts sharing one global scope (see `frontend/index.html`), so a class one file uses from another is declared in `/* global */` and `/* exported */` comments at the top of each file; ESLint reports undeclared names.
 
 `scripts/smoke_test.py` runs a real session through a running server, the way the browser does, and reports setup latency, media received, and the transcript:
 
@@ -156,6 +158,7 @@ GitHub Actions runs lint, the unit tests, the browser e2e checks against the moc
 | `backend/session_management.py` | Per-session state. |
 | `frontend/index.html` | Page layout and settings. |
 | `frontend/script.js` | UI logic: connect, media controls, chat. |
+| `frontend/material.js` | Loads the Material Web components from the CDN. |
 | `frontend/gemini-live-api.js` | Live API client: setup message, message parsing, reconnects. |
 | `frontend/live-media-manager.js` | Microphone, camera, screen, audio and video playback, WebRTC. |
 | `frontend/pcm-processor.js`, `frontend/input-processor.js` | Audio worklets for playback and capture. |

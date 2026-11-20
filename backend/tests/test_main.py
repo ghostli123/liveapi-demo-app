@@ -1,10 +1,13 @@
 import asyncio
 import base64
 import hashlib
+import html.parser
 import json
+import os
 import threading
 import unittest
 from unittest import mock
+import urllib.parse
 
 import aiohttp
 from aiohttp import test_utils, web
@@ -879,12 +882,56 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.status, 200)
         self.assertEqual(resp.headers["Cache-Control"], "no-cache")
         resp = await self.client.get("/")
-        self.assertEqual(
-            resp.headers["Content-Security-Policy"], "frame-ancestors 'self'"
-        )
+        csp = resp.headers["Content-Security-Policy"]
+        self.assertEqual(csp, main.CONTENT_SECURITY_POLICY)
+        self.assertIn("frame-ancestors 'self'", csp)
+        self.assertNotIn("'unsafe-inline' https", csp)
         self.assertEqual(resp.headers["X-Content-Type-Options"], "nosniff")
         resp = await self.client.get("/healthz")
         self.assertEqual(await resp.text(), "ok")
+
+    def test_index_html_has_nothing_the_csp_blocks(self):
+        directives = {}
+        for directive in main.CONTENT_SECURITY_POLICY.split(";"):
+            name, _, sources = directive.strip().partition(" ")
+            directives[name] = sources
+        script_sources = directives["script-src"].split()
+        self.assertNotIn("'unsafe-inline'", script_sources)
+        style_sources = directives["style-src"].split()
+
+        class Collector(html.parser.HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.problems = []
+
+            def handle_starttag(self, tag, attrs):
+                attrs = {name: value or "" for name, value in attrs}
+                for name, value in attrs.items():
+                    if name.startswith("on"):
+                        self.problems.append(f"<{tag} {name}>")
+                    if value.strip().lower().startswith("javascript:"):
+                        self.problems.append(f"<{tag} {name}=javascript:>")
+                if tag == "script":
+                    src = attrs.get("src")
+                    if not src:
+                        self.problems.append("inline <script>")
+                    elif not self._allowed(src, script_sources):
+                        self.problems.append(f"script {src}")
+                if tag == "link" and attrs.get("rel") == "stylesheet":
+                    if not self._allowed(attrs["href"], style_sources):
+                        self.problems.append(f"stylesheet {attrs['href']}")
+
+            @staticmethod
+            def _allowed(url, sources):
+                parts = urllib.parse.urlsplit(url)
+                if not parts.netloc:
+                    return "'self'" in sources
+                return f"{parts.scheme}://{parts.netloc}" in sources
+
+        with open(os.path.join(main.FRONTEND_DIR, "index.html")) as f:
+            collector = Collector()
+            collector.feed(f.read())
+        self.assertEqual(collector.problems, [])
 
 
 class SessionManagerTest(unittest.IsolatedAsyncioTestCase):

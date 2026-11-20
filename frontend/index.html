@@ -12,19 +12,7 @@
   <link rel="stylesheet"
     href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
 
-  <script type="importmap">
-    {
-      "imports": {
-        "@material/web/": "https://esm.run/@material/web@2.5.0/"
-      }
-    }
-    </script>
-  <script type="module">
-    import "@material/web/all.js";
-    import { styles as typescaleStyles } from "@material/web/typography/md-typescale-styles.js";
-
-    document.adoptedStyleSheets.push(typescaleStyles.styleSheet);
-  </script>
+  <script type="module" src="/frontend/material.js"></script>
 
   <script src="/frontend/gemini-live-api.js"></script>
   <script src="/frontend/live-media-manager.js"></script>
@@ -112,29 +100,29 @@
       </div>
 
       <div class="media-controls" style="margin-top: 16px;">
-      <md-outlined-select id="cameraSource" label="Camera" onchange="newCameraSelected()"></md-outlined-select>
-        <md-outlined-select id="audioSource" label="Microphone" onchange="newMicSelected()"></md-outlined-select>
+      <md-outlined-select id="cameraSource" label="Camera"></md-outlined-select>
+        <md-outlined-select id="audioSource" label="Microphone"></md-outlined-select>
         <span id="micBtn" hidden><md-filled-icon-button
-            aria-label="Turn microphone off" title="Turn microphone off" onclick="micBtnClick()"><md-icon>mic</md-icon></md-filled-icon-button></span>
+            aria-label="Turn microphone off" title="Turn microphone off"><md-icon>mic</md-icon></md-filled-icon-button></span>
         <span id="micOffBtn"><md-filled-icon-button disabled
-            aria-label="Turn microphone on" title="Turn microphone on" onclick="micOffBtnClick()"><md-icon>mic_off</md-icon></md-filled-icon-button></span>
+            aria-label="Turn microphone on" title="Turn microphone on"><md-icon>mic_off</md-icon></md-filled-icon-button></span>
         <div id="micLevel" class="mic-level" hidden title="Microphone level"><div id="micLevelBar"></div></div>
         <span id="cameraBtn" hidden><md-filled-icon-button
-            aria-label="Turn camera off" title="Turn camera off" onclick="cameraBtnClick()"><md-icon>videocam</md-icon></md-filled-icon-button></span>
+            aria-label="Turn camera off" title="Turn camera off"><md-icon>videocam</md-icon></md-filled-icon-button></span>
         <span id="cameraOffBtn"><md-filled-icon-button disabled
-            aria-label="Turn camera on" title="Turn camera on" onclick="cameraOffBtnClick()"><md-icon>videocam_off</md-icon></md-filled-icon-button></span>
+            aria-label="Turn camera on" title="Turn camera on"><md-icon>videocam_off</md-icon></md-filled-icon-button></span>
         <!-- Material buttons ignore the hidden attribute, so hide a wrapper. -->
-        <span id="turnBtnWrap" hidden><md-filled-tonal-button id="turnBtn" onclick="turnBtnClick()"
+        <span id="turnBtnWrap" hidden><md-filled-tonal-button id="turnBtn"
           title="Automatic speech detection is off: mark where your turn starts and ends">Start speaking</md-filled-tonal-button></span>
         <span id="screenBtn"><md-filled-icon-button disabled
-            aria-label="Share screen" title="Share screen" onclick="screenShareBtnClick()"><md-icon>present_to_all</md-icon></md-filled-icon-button></span>
+            aria-label="Share screen" title="Share screen"><md-icon>present_to_all</md-icon></md-filled-icon-button></span>
       </div>
 
       <div id="chat-container" style="margin-top: 18px; flex-grow: 1;">
         <div id="text-chat" aria-live="polite"></div>
         <div class="text-input-area">
           <md-outlined-text-field id="text-message" label="Send a text message"></md-outlined-text-field>
-          <md-icon-button aria-label="Send message" title="Send message" onclick="newUserMessage()"><md-icon>send</md-icon></md-icon-button>
+          <md-icon-button id="sendMessageBtn" aria-label="Send message" title="Send message"><md-icon>send</md-icon></md-icon-button>
         </div>
       </div>
 
@@ -197,8 +185,8 @@
           </md-select-option>
         </md-outlined-select>
         <div class="button-group">
-          <md-filled-button onclick="connectBtnClick()" id="connectBtn">Connect</md-filled-button>
-          <md-outlined-button onclick="disconnectBtnClick()" id="disconnectBtn" disabled>Disconnect</md-outlined-button>
+          <md-filled-button id="connectBtn">Connect</md-filled-button>
+          <md-outlined-button id="disconnectBtn" disabled>Disconnect</md-outlined-button>
         </div>
       </div>
 
@@ -281,7 +269,7 @@
           </div>
           <div class="button-group">
             <input type="file" id="audioFileInput" accept="audio/*" style="display: none;">
-            <md-outlined-button onclick="document.getElementById('audioFileInput').click()">Upload audio file
+            <md-outlined-button id="audioUploadBtn">Upload audio file
             </md-outlined-button>
           </div>
           <span id="fileName"
@@ -298,16 +286,16 @@
             are converted.</label>
           <div class="button-group">
             <input type="file" id="fcFileInput" accept=".json" style="display: none;">
-            <md-outlined-button onclick="document.getElementById('fcFileInput').click()">Upload .json file
+            <md-outlined-button id="fcUploadBtn">Upload .json file
             </md-outlined-button>
           </div>
 
           <span id="fcFileName"
             style="font-size: 12px; color: var(--gcp-text-secondary); margin-top: 8px; display: block;"></span>
-          <span id="fcRemove" class="create-voice-link" hidden onclick="removeFunctionDeclarations()">Remove</span>
+          <span id="fcRemove" class="create-voice-link" hidden>Remove</span>
         </div>
         <div style="margin-top: 12px;">
-          <md-outlined-select label="Tool Behavior" id="toolBehavior" onchange="toggleSchedulingDisable()">
+          <md-outlined-select label="Tool Behavior" id="toolBehavior">
             <md-select-option selected value="BLOCKING">
               <div slot="headline">BLOCKING</div>
             </md-select-option>
@@ -336,7 +324,7 @@
       <div class="config-section">
         <h3>Avatar</h3>
         <div class="checkbox-row">
-          <md-checkbox id="enableAvatarMode" touch-target="wrapper" checked onchange="toggleAvatarMode()"></md-checkbox>
+          <md-checkbox id="enableAvatarMode" touch-target="wrapper" checked></md-checkbox>
           <label for="enableAvatarMode">Show input and avatar side by side</label>
         </div>
         <div class="checkbox-row">
@@ -345,12 +333,12 @@
         </div>
         <div class="button-group">
           <input type="file" id="avatarFileInput" accept="image/png,image/jpeg,image/webp" style="display: none;">
-          <md-outlined-button onclick="document.getElementById('avatarFileInput').click()">Custom avatar image
+          <md-outlined-button id="avatarUploadBtn">Custom avatar image
           </md-outlined-button>
         </div>
         <span id="avatarName" class="file-note">Avatar: Piper (stock)</span>
-        <span id="avatarSampleLink" class="create-voice-link" onclick="useSampleAvatar()">Use the sample image</span>
-        <span id="avatarStockLink" class="create-voice-link" hidden onclick="useStockAvatar()">Use the stock avatar</span>
+        <span id="avatarSampleLink" class="create-voice-link">Use the sample image</span>
+        <span id="avatarStockLink" class="create-voice-link" hidden>Use the stock avatar</span>
         <p class="file-note">Custom images need a project allowlisted for custom avatars; they apply from the next
           connection.</p>
       </div>
@@ -358,9 +346,7 @@
       <div class="config-section">
         <h3>Translation</h3>
         <div class="checkbox-row">
-          <md-checkbox id="enableS2ST" touch-target="wrapper"
-            onchange="document.getElementById('s2stTargetLanguage').disabled = !this.checked">
-          </md-checkbox>
+          <md-checkbox id="enableS2ST" touch-target="wrapper"></md-checkbox>
           <label for="enableS2ST">Enable Speech-to-Speech Translation</label>
         </div>
 
