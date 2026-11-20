@@ -105,18 +105,37 @@ class SessionManager:
             record.websocket_handler = handler
             return True
 
+    async def release(self, session_id: str, record: SessionBaseModel) -> bool:
+        """Removes record if it is still session_id's record, without ending it.
+
+        Frees its slot under max_sessions while its handler finishes (e.g.
+        closing upstream after the browser left); delete_item ends it later.
+
+        Returns:
+            Whether record was removed.
+        """
+        if not await self._remove(session_id, record):
+            return False
+        logging.info("Released session %s while it closes", session_id)
+        return True
+
     async def delete_item(self, session_id: str, record: SessionBaseModel) -> None:
-        """Removes and ends record if it is still session_id's record.
+        """Removes record if it is still session_id's record, and ends it.
 
         Checking identity keeps a handler that outlived its record from
-        removing a newer one with the same ID.
+        removing a newer one with the same ID. The record is ended either way:
+        it may have been released, and ending a replaced one again is harmless.
         """
-        async with self._lock:
-            if self._sessions.get(session_id) is not record:
-                return
-            del self._sessions[session_id]
+        await self._remove(session_id, record)
         logging.info("Deleting session %s", session_id)
         await record.del_session()
+
+    async def _remove(self, session_id: str, record: SessionBaseModel) -> bool:
+        async with self._lock:
+            if self._sessions.get(session_id) is not record:
+                return False
+            del self._sessions[session_id]
+            return True
 
     async def all_items(self) -> list[SessionBaseModel]:
         """Returns a snapshot of all sessions."""

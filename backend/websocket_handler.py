@@ -4,6 +4,7 @@ import asyncio
 import json
 import ssl
 import time
+from collections.abc import Awaitable, Callable
 
 import certifi
 import websockets
@@ -59,6 +60,7 @@ class WebsocketHandler:
         client_websocket,
         debug_mode=False,
         keepalive_s: float | None = DEFAULT_KEEPALIVE_S,
+        on_client_closed: Callable[[], Awaitable[object]] | None = None,
     ) -> None:
         self.session_id = session_id
         self.liveapi_service_url = liveapi_service_url
@@ -68,6 +70,10 @@ class WebsocketHandler:
         # Upstream ping interval and pong timeout; None disables pings.
         self.keepalive_s = keepalive_s
         self.connection_handler: asyncio.Task | None = None
+        # Called once the browser leg has closed, before the upstream close
+        # handshake, which can take up to UPSTREAM_CLOSE_TIMEOUT_S.
+        self.on_client_closed = on_client_closed
+        self.client_closed = False
         # How the upstream connection ended, for relaying to the browser.
         self.close_code: int | None = None
         self.close_reason: str = ""
@@ -92,6 +98,8 @@ class WebsocketHandler:
             try:
                 message = await source_websocket.recv()
             except websockets.exceptions.ConnectionClosed:
+                if source_websocket is self.client_websocket:
+                    self.client_closed = True
                 logging.info(
                     "%s: source closed for session %s", service_name, self.session_id
                 )
@@ -114,6 +122,8 @@ class WebsocketHandler:
                 await target_websocket.send(message)
             # The target closed; aiohttp and websockets raise different types.
             except Exception as e:
+                if target_websocket is self.client_websocket:
+                    self.client_closed = True
                 logging.info(
                     "%s: target closed for session %s (%s)",
                     service_name,
@@ -182,6 +192,8 @@ class WebsocketHandler:
                 [client_to_server, server_to_client],
                 return_when=asyncio.FIRST_COMPLETED,
             )
+            if self.client_closed and self.on_client_closed:
+                await self.on_client_closed()
         except asyncio.CancelledError:
             # The server is shutting down, or aiohttp dropped the handler
             # because the browser's connection went away. Neither is an
