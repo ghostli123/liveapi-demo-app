@@ -1,52 +1,72 @@
 class LiveAudioOutputManager {
     constructor() {
-        this.audioInputContext;
-        this.workletNode;
-        this.initialized = false;
-
-        this.audioQueue = [];
-        this.isPlaying = false;
-
-        this.initializeAudioContext();
+        this.audioContext = null;
+        this.workletNode = null;
+        this.ready = null; // Promise for the worklet; see initializeAudioContext().
     }
 
-    async playAudioChunk(base64AudioChunk) {
+    /**
+     * Queues a chunk of base64 16-bit little-endian 24 kHz PCM for playback.
+     * Chunks play in the order this is called.
+     */
+    playAudioChunk(base64AudioChunk) {
+        let float32Data;
         try {
-            if (!this.initialized) {
-                await this.initializeAudioContext();
-            }
-
-            if (this.audioInputContext.state === "suspended") {
-                await this.audioInputContext.resume();
-            }
-
             const arrayBuffer =
                 LiveAudioOutputManager.base64ToArrayBuffer(base64AudioChunk);
-            const float32Data =
-                LiveAudioOutputManager.convertPCM16LEToFloat32(arrayBuffer);
-
-            this.workletNode.port.postMessage(float32Data);
+            float32Data = LiveAudioOutputManager.convertPCM16LEToFloat32(arrayBuffer);
         } catch (error) {
-            console.error("Error processing audio chunk:", error);
+            console.error("Error decoding audio chunk:", error);
+            return;
+        }
+        this.initializeAudioContext()
+            .then(() => {
+                this.workletNode.port.postMessage(float32Data, [float32Data.buffer]);
+            })
+            .catch((error) => console.error("Error playing audio chunk:", error));
+        this.resume();
+    }
+
+    /** Drops audio that hasn't played yet, e.g. when the model is interrupted. */
+    clear() {
+        if (this.workletNode) {
+            this.workletNode.port.postMessage("clear");
         }
     }
 
-    async initializeAudioContext() {
-        if (this.initialized) return;
+    /**
+     * Resumes playback if the browser suspended the context. Call from a user
+     * gesture (e.g. the Connect click) so autoplay rules allow it.
+     */
+    resume() {
+        this.initializeAudioContext();
+        if (this.audioContext.state === "suspended") {
+            this.audioContext.resume().catch((error) => {
+                console.warn("Could not resume audio playback:", error);
+            });
+        }
+    }
 
-        console.log("initializeAudioContext...");
-
-        this.audioInputContext = new (window.AudioContext ||
-            window.webkitAudioContext)({ sampleRate: 24000 });
-        await this.audioInputContext.audioWorklet.addModule("frontend/pcm-processor.js");;
-        this.workletNode = new AudioWorkletNode(
-            this.audioInputContext,
-            "pcm-processor"
-        );
-        this.workletNode.connect(this.audioInputContext.destination);
-
-        this.initialized = true;
-        console.log("initializeAudioContext end");
+    /**
+     * Creates the audio context and worklet once; later calls return the same
+     * promise, so concurrent chunks can't create a second context.
+     */
+    initializeAudioContext() {
+        if (!this.ready) {
+            this.audioContext = new (window.AudioContext ||
+                window.webkitAudioContext)({ sampleRate: 24000 });
+            this.ready = this.audioContext.audioWorklet
+                .addModule("/frontend/pcm-processor.js")
+                .then(() => {
+                    this.workletNode = new AudioWorkletNode(
+                        this.audioContext,
+                        "pcm-processor",
+                        { outputChannelCount: [1] }
+                    );
+                    this.workletNode.connect(this.audioContext.destination);
+                });
+        }
+        return this.ready;
     }
 
     static base64ToArrayBuffer(base64) {
@@ -74,6 +94,7 @@ class LiveAudioInputManager {
         this.mediaRecorder;
         this.processor = null;
         this.pcmData = [];
+        this.generation = 0;
 
         this.deviceId = null;
 
@@ -88,13 +109,15 @@ class LiveAudioInputManager {
 
     // Update the audio interval in milliseconds (based on user input)
     async updateAudioInterval(interval) {
-        this.intervalMs = parseInt(interval, 10);
+        this.intervalMs = parseInt(interval, 10) || 1000;
         this.disconnectMicrophone();
-        this.connectMicrophone();
+        await this.connectMicrophone();
     }
 
     async connectMicrophone() {
-        this.audioContext = new AudioContext({
+        // disconnectMicrophone() bumps this, abandoning a connect still in flight.
+        const generation = ++this.generation;
+        const audioContext = new AudioContext({
             sampleRate: 16000,
         });
 
@@ -109,10 +132,23 @@ class LiveAudioInputManager {
             constraints.audio.deviceId = { exact: this.deviceId };
         }
 
-        this.stream = await navigator.mediaDevices.getUserMedia(constraints);
-
+        let stream;
+        try {
+            stream = await navigator.mediaDevices.getUserMedia(constraints);
+            await audioContext.audioWorklet.addModule("/frontend/input-processor.js");
+        } catch (error) {
+            if (stream) stream.getTracks().forEach((track) => track.stop());
+            audioContext.close();
+            throw error;
+        }
+        if (generation !== this.generation) {
+            stream.getTracks().forEach((track) => track.stop());
+            audioContext.close();
+            return;
+        }
+        this.audioContext = audioContext;
+        this.stream = stream;
         const source = this.audioContext.createMediaStreamSource(this.stream);
-        await this.audioContext.audioWorklet.addModule("frontend/input-processor.js");;
 
         // Create an AudioWorkletNode.
         this.processor = new AudioWorkletNode(
@@ -135,11 +171,11 @@ class LiveAudioInputManager {
     }
 
     newAudioRecording(b64AudioData) {
-        console.log("newAudioRecording ");
         this.onNewAudioRecordingChunk(b64AudioData);
     }
 
     recordChunk() {
+        if (this.pcmData.length === 0) return;
         const buffer = new ArrayBuffer(this.pcmData.length * 2);
         const view = new DataView(buffer);
         this.pcmData.forEach((value, index) => {
@@ -160,6 +196,7 @@ class LiveAudioInputManager {
     }
 
     disconnectMicrophone() {
+        this.generation++;
         try {
             if (this.stream) {
                 this.stream.getTracks().forEach((track) => {
@@ -169,15 +206,19 @@ class LiveAudioInputManager {
             if (this.processor) {
                 this.processor.disconnect();
             }
-            if (this.audioContext) {
+            if (this.audioContext && this.audioContext.state !== "closed") {
                 this.audioContext.close();
             }
-            console.log("Microphone disconnected successfully.");
-        } catch {
-            console.error("Error disconnecting microphone");
+        } catch (error) {
+            console.error("Error disconnecting microphone", error);
         }
+        this.stream = null;
+        this.processor = null;
+        this.audioContext = null;
+        this.pcmData = [];
 
         clearInterval(this.interval);
+        this.interval = null;
     }
 
     async updateMicrophoneDevice(deviceId) {
@@ -187,204 +228,157 @@ class LiveAudioInputManager {
     }
 }
 
-class LiveVideoManager {
+// Frames sent over WebSocket are scaled so their longer side is at most this.
+// Gemini downsamples larger images anyway, so full-resolution frames only
+// cost bandwidth.
+const MAX_FRAME_DIMENSION = 1024;
+const FRAME_JPEG_QUALITY = 0.8;
+
+/**
+ * Base class for a local video source (camera or screen) that previews into a
+ * <video> element and, in WebSocket mode, sends periodic JPEG frames.
+ */
+class LiveFrameSource {
     constructor(previewVideoElement, previewCanvasElement) {
         this.previewVideoElement = previewVideoElement;
         this.previewCanvasElement = previewCanvasElement;
         this.ctx = this.previewCanvasElement.getContext("2d");
         this.stream = null;
         this.interval = null;
+        this.intervalMs = 5000;
+        this.onNewFrame = () => {};
+    }
+
+    /** Shows `stream` in the preview and, if asked, starts sending frames. */
+    _attach(stream, sendFrames) {
+        this.stream = stream;
+        this.previewVideoElement.srcObject = stream;
+        if (sendFrames) {
+            this.interval = setInterval(() => this.newFrame(), this.intervalMs);
+        }
+    }
+
+    _detach() {
+        if (this.interval) {
+            clearInterval(this.interval);
+            this.interval = null;
+        }
+        if (!this.stream) return;
+        this.stream.getTracks().forEach((track) => track.stop());
+        if (this.previewVideoElement.srcObject === this.stream) {
+            this.previewVideoElement.srcObject = null;
+        }
+        this.stream = null;
+    }
+
+    /** @returns {string} A base64 JPEG of the current frame, or "" if none. */
+    captureFrameB64() {
+        const video = this.previewVideoElement;
+        if (!this.stream || !video.videoWidth || !video.videoHeight) return "";
+
+        const scale = Math.min(
+            1,
+            MAX_FRAME_DIMENSION / Math.max(video.videoWidth, video.videoHeight)
+        );
+        this.previewCanvasElement.width = Math.round(video.videoWidth * scale);
+        this.previewCanvasElement.height = Math.round(video.videoHeight * scale);
+        this.ctx.drawImage(
+            video,
+            0,
+            0,
+            this.previewCanvasElement.width,
+            this.previewCanvasElement.height
+        );
+        return this.previewCanvasElement
+            .toDataURL("image/jpeg", FRAME_JPEG_QUALITY)
+            .split(",")[1];
+    }
+
+    newFrame() {
+        const frameData = this.captureFrameB64();
+        if (frameData) {
+            this.onNewFrame(frameData);
+        }
+    }
+}
+
+class LiveVideoManager extends LiveFrameSource {
+    constructor(previewVideoElement, previewCanvasElement) {
+        super(previewVideoElement, previewCanvasElement);
         this.deviceId = null;
-        this.intervalMs = 5000; // Default interval in milliseconds
-        this.onNewFrame = (newFrame) => {
-            console.log("Default new frame trigger.");
-        };
+        this.generation = 0;
     }
 
-    async updateVideoInterval(interval) {
-        this.intervalMs = parseInt(interval, 10);
-        this.stopWebcam();
-        this.startWebcam();
-    }
-
-    async startWebcam() {
+    /**
+     * Opens the camera. Throws if the camera can't be opened.
+     * @param {{sendFrames?: boolean}} [options] - sendFrames: send JPEG frames
+     *     every intervalMs (WebSocket mode).
+     */
+    async startWebcam({ sendFrames = true } = {}) {
         if (this.stream) {
             return; // Already started
         }
-        try {
-            const constraints = {
-                video: {
-                    deviceId: this.deviceId
-                        ? { exact: this.deviceId }
-                        : undefined,
-                },
-                // video: {
-                //     width: { max: 640 },
-                //     height: { max: 480 },
-                // },
-            };
-            this.stream = await navigator.mediaDevices.getUserMedia(
-                constraints
-            );
-            this.previewVideoElement.srcObject = this.stream;
-            this.interval = setInterval(() => {
-                this.newFrame();
-            }, this.intervalMs);
-        } catch (err) {
-            console.error("Error accessing the webcam: ", err);
+        const generation = ++this.generation;
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: this.deviceId ? { deviceId: { exact: this.deviceId } } : true,
+        });
+        if (generation !== this.generation) {
+            // stopWebcam() was called while waiting for the camera.
+            stream.getTracks().forEach((track) => track.stop());
+            return;
         }
+        this._attach(stream, sendFrames);
     }
 
     stopWebcam() {
-        if (this.interval) {
-            clearInterval(this.interval);
-            this.interval = null;
-        }
-        if (this.stream) {
-            this.stopStream();
-            this.stream = null;
-        }
-    }
-
-    stopStream() {
-        if (!this.stream) return;
-
-        const tracks = this.stream.getTracks();
-
-        tracks.forEach((track) => {
-            track.stop();
-        });
-    }
-
-    async updateWebcamDevice(deviceId) {
-        this.deviceId = deviceId;
-        this.stopWebcam();
-        await this.startWebcam();
-        // const constraints = {
-        //     video: { deviceId: { exact: deviceId } },
-        // };
-        // this.stream = await navigator.mediaDevices.getUserMedia(constraints);
-        // this.previewVideoElement.srcObject = this.stream;
-    }
-
-    captureFrameB64() {
-        if (this.stream == null) return "";
-
-        this.previewCanvasElement.width = this.previewVideoElement.videoWidth;
-        this.previewCanvasElement.height = this.previewVideoElement.videoHeight;
-        this.ctx.drawImage(
-            this.previewVideoElement,
-            0,
-            0,
-            this.previewCanvasElement.width,
-            this.previewCanvasElement.height
-        );
-        const imageData = this.previewCanvasElement
-            .toDataURL("image/jpeg")
-            .split(",")[1]
-            .trim();
-        return imageData;
-    }
-
-    newFrame() {
-        console.log("capturing new frame");
-        const frameData = this.captureFrameB64();
-        this.onNewFrame(frameData);
+        this.generation++;
+        this._detach();
     }
 }
 
-class LiveScreenManager {
-    constructor(previewVideoElement, previewCanvasElement) {
-        this.previewVideoElement = previewVideoElement;
-        this.previewCanvasElement = previewCanvasElement;
-        this.ctx = this.previewCanvasElement.getContext("2d");
-        this.stream = null;
-        this.interval = null;
-        this.intervalMs = 5000; // Default interval in milliseconds
-        this.onNewFrame = (newFrame) => {
-            console.log("Default new frame trigger: ", newFrame);
-        };
-    }
-
-    updateVideoInterval(interval) {
-        this.intervalMs = parseInt(interval, 10);
+class LiveScreenManager extends LiveFrameSource {
+    /**
+     * Asks the user for a screen to share. Throws if they cancel.
+     * @param {{sendFrames?: boolean}} [options] - See LiveVideoManager.startWebcam.
+     */
+    async startCapture({ sendFrames = true } = {}) {
+        const stream = await navigator.mediaDevices.getDisplayMedia();
         this.stopCapture();
-        this.startCapture();
-    }
-
-    async startCapture() {
-        if (this.interval) {
-            clearInterval(this.interval);
-        }
-
-        try {
-            console.log("Starting screen capture...");
-            this.stream = await navigator.mediaDevices.getDisplayMedia();
-            this.previewVideoElement.srcObject = this.stream;
-
-            this.interval = setInterval(
-                this.newFrame.bind(this),
-                this.intervalMs
-            );
-        } catch (err) {
-            console.error("Error accessing the webcam: ", err);
-        }
+        this._attach(stream, sendFrames);
+        // The browser's own "Stop sharing" button ends the track.
+        stream.getVideoTracks().forEach((track) =>
+            track.addEventListener("ended", () => {
+                if (this.stream === stream) this.stopCapture();
+            })
+        );
     }
 
     stopCapture() {
-        if (this.interval) {
-            clearInterval(this.interval);
-            this.interval = null;
-        }
-
-        if (!this.stream) return;
-
-        const tracks = this.stream.getTracks();
-
-        tracks.forEach((track) => {
-            track.stop();
-        });
-
-        this.previewVideoElement.srcObject = null;
-        this.stream = null;
-    }
-
-    captureFrameB64() {
-        if (this.stream == null) return "";
-
-        this.previewCanvasElement.width = this.previewVideoElement.videoWidth;
-        this.previewCanvasElement.height = this.previewVideoElement.videoHeight;
-        this.ctx.drawImage(
-            this.previewVideoElement,
-            0,
-            0,
-            this.previewCanvasElement.width,
-            this.previewCanvasElement.height
-        );
-        const imageData = this.previewCanvasElement
-            .toDataURL("image/jpeg")
-            .split(",")[1]
-            .trim();
-        return imageData;
-    }
-
-    newFrame() {
-        console.log("capturing new frame");
-        const frameData = this.captureFrameB64();
-        this.onNewFrame(frameData);
+        this._detach();
     }
 }
 
+// Seconds of already-played avatar video kept in the MSE buffer. Older data is
+// removed so a long session doesn't fill the buffer quota (~1 MB/s of video).
+const VIDEO_BACK_BUFFER_S = 10;
+
+/** Plays the avatar's fragmented-MP4 stream (WebSocket mode) through MSE. */
 class LiveVideoOutputManager {
     constructor() {
         this.mediaSource = null;
         this.sourceBuffer = null;
+        this.objectUrl = null;
         this.chunkQueue = [];
         this.initialized = false;
         this.codec = 'video/mp4; codecs="avc1.42c020, mp4a.40.2"';
+        // Received video is kept for download only when this is set, since it
+        // grows by about 1 MB per second.
+        this.recordingEnabled = false;
         this.recordedChunks = [];
+        this.videoListenersAttached = false;
     }
 
+    /** Starts a new stream. Each connection sends its own MP4 init segment. */
     initMediaSource() {
         const video = document.getElementById('video_player');
         if (!video) {
@@ -397,47 +391,48 @@ class LiveVideoOutputManager {
             console.error('MediaSource API not supported in this browser');
             return;
         }
-
-        const isMMS = !!window.ManagedMediaSource;
-        console.log(`Using ${isMMS ? 'ManagedMediaSource' : 'MediaSource'} interface`);
-
-        if (MediaSourceClass.isTypeSupported(this.codec)) {
-            this.mediaSource = new MediaSourceClass();
-            video.src = URL.createObjectURL(this.mediaSource);
-
-            this.mediaSource.addEventListener('sourceopen', () => {
-                console.log('MediaSource opened');
-                try {
-                    this.sourceBuffer = this.mediaSource.addSourceBuffer(this.codec);
-                    this.sourceBuffer.addEventListener('updateend', () => {
-                        this.processQueue();
-                    });
-                    this.initialized = true;
-                    this.processQueue();
-                } catch (e) {
-                    console.error("Error adding source buffer:", e);
-                }
-            });
-
-            this.mediaSource.addEventListener('sourceclose', () => console.log('MediaSource closed'));
-            this.mediaSource.addEventListener('error', e => console.error('MediaSource error', e));
-        } else {
+        if (!MediaSourceClass.isTypeSupported(this.codec)) {
             console.error('Unsupported MIME type or codec:', this.codec);
+            return;
         }
 
-        video.addEventListener('waiting', () => {
-            let downloadSpeed = 0;
-            let uploadSpeed = 0;
-            const uploadSpeedElement = document.getElementById('upload-speed');
-            const downloadSpeedElement = document.getElementById('download-speed');
-            if (uploadSpeedElement) {
-                uploadSpeed = uploadSpeedElement.textContent;
-            }
-            if (downloadSpeedElement) {
-                downloadSpeed = downloadSpeedElement.textContent;
-            }
+        // Chunks of the previous stream can't be appended to the new one.
+        this.chunkQueue = [];
+        this.sourceBuffer = null;
+        this.initialized = false;
+        if (this.objectUrl) {
+            URL.revokeObjectURL(this.objectUrl);
+        }
 
-            const bitrate = downloadSpeed * 1024 * 8 * 0.5;
+        const mediaSource = new MediaSourceClass();
+        this.mediaSource = mediaSource;
+        mediaSource.addEventListener('sourceopen', () => {
+            if (this.mediaSource !== mediaSource) return;
+            try {
+                this.sourceBuffer = mediaSource.addSourceBuffer(this.codec);
+                this.sourceBuffer.addEventListener('updateend', () => this.processQueue());
+                this.initialized = true;
+                this.processQueue();
+            } catch (e) {
+                console.error("Error adding source buffer:", e);
+            }
+        });
+        mediaSource.addEventListener('error', e => console.error('MediaSource error', e));
+
+        this.objectUrl = URL.createObjectURL(mediaSource);
+        video.style.display = "block";
+        video.src = this.objectUrl;
+        this.attachVideoListeners(video);
+    }
+
+    attachVideoListeners(video) {
+        if (this.videoListenersAttached) return;
+        this.videoListenersAttached = true;
+
+        video.addEventListener('waiting', () => {
+            const downloadSpeedElement = document.getElementById('download-speed');
+            const downloadKBps = downloadSpeedElement ? Number(downloadSpeedElement.textContent) || 0 : 0;
+            const bitrate = downloadKBps * 1024 * 8 * 0.5;
             const recommendedBitrateElement = document.getElementById('recommended-video-bitrate');
             if (recommendedBitrateElement) {
                 recommendedBitrateElement.textContent = bitrate.toFixed(2);
@@ -479,22 +474,64 @@ class LiveVideoOutputManager {
         }
         const arrayBuffer = LiveVideoOutputManager.base64ToArrayBuffer(base64Chunk);
         this.chunkQueue.push(arrayBuffer);
-        this.recordedChunks.push(arrayBuffer);
+        if (this.recordingEnabled) {
+            this.recordedChunks.push(arrayBuffer);
+        }
         this.processQueue();
+    }
+
+    /**
+     * Removes played video older than keepSeconds before the playhead.
+     * @returns {boolean} Whether a removal started (wait for updateend).
+     */
+    trimBuffer(keepSeconds) {
+        const video = document.getElementById("video_player");
+        const buffered = this.sourceBuffer.buffered;
+        if (!video || buffered.length === 0) return false;
+        const removeEnd = video.currentTime - keepSeconds;
+        if (removeEnd <= buffered.start(0)) return false;
+        try {
+            this.sourceBuffer.remove(buffered.start(0), removeEnd);
+            return true;
+        } catch (e) {
+            console.warn("Error trimming video buffer:", e);
+            return false;
+        }
     }
 
     processQueue() {
         if (!this.initialized || !this.sourceBuffer) return;
         if (this.sourceBuffer.updating) return;
+        if (this.mediaSource.readyState !== "open") return;
+
+        // Trim in batches of VIDEO_BACK_BUFFER_S rather than on every append.
+        if (this.trimBufferIfLarge()) return;
 
         if (this.chunkQueue.length > 0) {
             const chunk = this.chunkQueue.shift();
             try {
                 this.sourceBuffer.appendBuffer(chunk);
             } catch (e) {
-                console.error("Error appending buffer:", e);
+                if (e.name === "QuotaExceededError") {
+                    // Make room and retry the same chunk on updateend.
+                    this.chunkQueue.unshift(chunk);
+                    if (!this.trimBuffer(1)) {
+                        console.error("Video buffer full and nothing to trim; dropping chunk.");
+                        this.chunkQueue.shift();
+                    }
+                } else {
+                    console.error("Error appending buffer:", e);
+                }
             }
         }
+    }
+
+    trimBufferIfLarge() {
+        const video = document.getElementById("video_player");
+        const buffered = this.sourceBuffer.buffered;
+        if (!video || buffered.length === 0) return false;
+        if (video.currentTime - buffered.start(0) < 2 * VIDEO_BACK_BUFFER_S) return false;
+        return this.trimBuffer(VIDEO_BACK_BUFFER_S);
     }
 
     getRecordedBlob() {
@@ -508,6 +545,10 @@ class LiveVideoOutputManager {
     resetPlayer() {
         if (this.mediaSource && this.mediaSource.readyState === "open") {
             try {
+                // endOfStream() throws while an append is in progress.
+                if (this.sourceBuffer && this.sourceBuffer.updating) {
+                    this.sourceBuffer.abort();
+                }
                 this.mediaSource.endOfStream();
             } catch (e) {
                 console.warn("resetPlayer endOfStream warning:", e);
@@ -548,6 +589,7 @@ class G3RtcWebRtcManager {
         this.videoSender = null;
         this.remoteStream = null;
         this.micStream = null;
+        this.videoTrack = null;
         this.statsInterval = null;
         this.lastBytesReceived = 0;
         this.lastBytesSent = 0;
@@ -571,7 +613,8 @@ class G3RtcWebRtcManager {
     }
 
     async initiateSession({ wantsVideo = true } = {}) {
-        this.close();
+        // Session resumption renegotiates; keep sending the same mic and camera.
+        this.close({ keepLocalMedia: true });
 
         this.pc = new RTCPeerConnection({
             iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -602,6 +645,14 @@ class G3RtcWebRtcManager {
         });
         this.videoSender = sendVideoTransceiver.sender;
         transceiverToGroupId.set(sendVideoTransceiver, sendStreamGroupId);
+
+        const micTrack = this.micStream && this.micStream.getAudioTracks()[0];
+        if (micTrack && micTrack.readyState === "live") {
+            await this.audioSender.replaceTrack(micTrack);
+        }
+        if (this.videoTrack && this.videoTrack.readyState === "live") {
+            await this.videoSender.replaceTrack(this.videoTrack);
+        }
 
         this.remoteStream = new MediaStream();
         const recvGroupId = this.remoteStream.id || crypto.randomUUID();
@@ -710,12 +761,16 @@ class G3RtcWebRtcManager {
     }
 
     async attachVideoStream(stream) {
-        if (!this.videoSender || !stream) return;
-        const videoTrack = stream.getVideoTracks()[0] || null;
-        await this.videoSender.replaceTrack(videoTrack);
+        if (!stream) return;
+        // Remembered so a renegotiated session (resumption) keeps sending it.
+        this.videoTrack = stream.getVideoTracks()[0] || null;
+        if (this.videoSender) {
+            await this.videoSender.replaceTrack(this.videoTrack);
+        }
     }
 
     detachVideoStream() {
+        this.videoTrack = null;
         if (this.videoSender) {
             this.videoSender.replaceTrack(null).catch(() => {});
         }
@@ -789,10 +844,17 @@ class G3RtcWebRtcManager {
         }
     }
 
-    close() {
+    /**
+     * Closes the peer connection.
+     * @param {{keepLocalMedia?: boolean}} [options] - keepLocalMedia: keep the
+     *     microphone and camera tracks for the next initiateSession().
+     */
+    close({ keepLocalMedia = false } = {}) {
         this.stopStatsPolling();
-        this.stopMicrophone();
-        this.detachVideoStream();
+        if (!keepLocalMedia) {
+            this.stopMicrophone();
+            this.detachVideoStream();
+        }
         if (this.dataChannel) {
             try {
                 this.dataChannel.close();

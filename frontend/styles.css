@@ -179,12 +179,39 @@ details .details-content {
 }
 
 #text-chat {
-    height: 150px;
+    height: 200px;
+    min-height: 80px;
+    resize: vertical;
     overflow-y: auto;
     border: 1px solid var(--md-sys-color-outline);
     border-radius: 8px;
     padding: 8px;
     background-color: var(--md-sys-color-surface-container);
+}
+
+.chat-line {
+    margin: 4px 0;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.chat-user {
+    color: #0b57d0;
+}
+
+.chat-model {
+    color: #1f1f1f;
+}
+
+.chat-system {
+    color: var(--md-sys-color-on-surface-variant);
+    font-size: 12px;
+}
+
+.chat-error {
+    color: #b3261e;
+    font-size: 12px;
 }
 
 .text-input-area {
