@@ -299,6 +299,16 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resp.status, 404)
 
+    async def test_fr_endpoint_rejects_invalid_session_ids(self):
+        # A list or object used to reach the session dict and fail with 500.
+        for session_id in (["s4"], {"id": "s4"}, 5, None, "bad id"):
+            resp = await self.client.post(
+                "/api/post_endpoint",
+                json={"session_id": session_id, "objective": "fr_generate"},
+            )
+            self.assertEqual(resp.status, 400, session_id)
+            self.assertIn("session_id", (await resp.json())["error"])
+
     async def test_fr_definitions_go_with_the_first_call_only(self):
         class FakeChat:
             def __init__(self):

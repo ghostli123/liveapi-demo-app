@@ -285,9 +285,10 @@ async def handle_fr_post_request(request: web.Request):
     if request_body is None:
         return _json_error("Request body must be a JSON object", 400)
 
-    chat_session = await SESSION_MANAGER.search_item(
-        request_body.pop("session_id", None)
-    )
+    session_id = request_body.pop("session_id", None)
+    if not _is_valid_session_id(session_id):
+        return _json_error("Missing or invalid session_id", 400)
+    chat_session = await SESSION_MANAGER.search_item(session_id)
     if not chat_session:
         return _json_error("Unknown session", 404)
 
