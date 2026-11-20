@@ -21,7 +21,7 @@ class PCMProcessor extends AudioWorkletProcessor {
         };
     }
 
-    process(inputs, outputs, parameters) {
+    process(inputs, outputs) {
         const channelData = outputs[0][0];
         let written = 0;
         while (written < channelData.length && this.queue.length > 0) {

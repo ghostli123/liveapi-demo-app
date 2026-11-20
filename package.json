@@ -4,9 +4,13 @@
   "description": "Dev tooling for the Gemini Live API demo; the app itself needs no build step.",
   "scripts": {
     "test": "node --test frontend/tests/*.test.js",
+    "lint": "eslint .",
     "e2e": "node scripts/browser_e2e.js"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "globals": "^17.14.0",
     "playwright-core": "^1.65.1"
   }
 }

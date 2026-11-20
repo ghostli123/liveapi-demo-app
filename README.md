@@ -108,7 +108,10 @@ python -m pytest                          # backend tests
 ruff check backend scripts && ruff format --check backend scripts
 pyright                                   # type check (config in pyproject.toml)
 node --test frontend/tests/*.test.js      # frontend tests (Node 18+)
+npm install && npm run lint               # ESLint on the frontend and scripts
 ```
+
+The frontend files are classic scripts sharing one global scope (see `frontend/index.html`), so a class one file uses from another is declared in `/* global */` and `/* exported */` comments at the top of each file; ESLint reports undeclared names.
 
 `scripts/smoke_test.py` runs a real session through a running server, the way the browser does, and reports setup latency, media received, and the transcript:
 

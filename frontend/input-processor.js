@@ -1,7 +1,7 @@
 // input-processor.js
 
 class InputProcessor extends AudioWorkletProcessor {
-  process(inputs, outputs, parameters) {
+  process(inputs) {
     // Get the audio data from the first input channel.
     const input = inputs[0];
     const channelData = input[0];
