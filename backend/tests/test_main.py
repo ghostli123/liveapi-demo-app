@@ -284,6 +284,10 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             "/api/control", json={"command": "explode", "session_id": "s3"}
         )
         self.assertEqual(resp.status, 400)
+        resp = await self.client.post(
+            "/api/control", json={"command": "disconnect", "session_id": ["s3"]}
+        )
+        self.assertEqual(resp.status, 400)
 
     async def test_control_rejects_non_string_endpoints(self):
         # A list or object used to reach the environment set and fail with 500.
@@ -527,6 +531,52 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 await self.wait_for_session_end("s26")
                 status, body = await self.connect_session("s27")
                 self.assertEqual(status, 200, body)
+
+    async def disconnect_session(self, session_id):
+        resp = await self.client.post(
+            "/api/control", json={"command": "disconnect", "session_id": session_id}
+        )
+        return resp.status, await resp.json()
+
+    async def test_disconnect_command_frees_a_pending_slot(self):
+        # A browser that gave up before opening its WebSocket left the record
+        # holding the only slot for PENDING_SESSION_TTL_S.
+        with flagsaver.flagsaver(max_sessions=1):
+            status, body = await self.connect_session("s40")
+            self.assertEqual(status, 200, body)
+            pending = await main.SESSION_MANAGER.search_item("s40")
+            status, body = await self.connect_session("s41")
+            self.assertEqual(status, 503, body)
+
+            status, body = await self.disconnect_session("s40")
+            self.assertEqual((status, body), (200, {"removed": True}))
+            self.assertIsNone(await main.SESSION_MANAGER.search_item("s40"))
+            assert pending is not None and pending.expiry_task is not None
+            await asyncio.sleep(0)
+            self.assertTrue(pending.expiry_task.cancelled())
+            status, body = await self.connect_session("s41")
+            self.assertEqual(status, 200, body)
+
+            # Repeats and unknown IDs are harmless.
+            status, body = await self.disconnect_session("s40")
+            self.assertEqual((status, body), (200, {"removed": False}))
+            status, body = await self.disconnect_session("nope")
+            self.assertEqual((status, body), (200, {"removed": False}))
+
+    async def test_disconnect_command_leaves_connected_session(self):
+        async with FakeUpstream() as upstream:
+            with flagsaver.flagsaver(common_bag_ws_port=upstream.port):
+                await self.connect_session("s42")
+                ws = await self.client.ws_connect("/ws?session_id=s42")
+                await ws.send_str("ping")
+                await asyncio.wait_for(ws.receive(), 5)
+                status, body = await self.disconnect_session("s42")
+                self.assertEqual((status, body), (200, {"removed": False}))
+                await ws.send_str("still here")
+                msg = await asyncio.wait_for(ws.receive(), 5)
+                self.assertEqual(json.loads(msg.data), {"echo": "still here"})
+                await ws.close()
+                await self.wait_for_session_end("s42")
 
     async def test_slot_frees_when_browser_closes(self):
         # The upstream never acknowledges the close, so the old session spends

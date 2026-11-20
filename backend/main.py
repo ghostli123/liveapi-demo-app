@@ -288,8 +288,8 @@ async def aiohttp_websocket_handler(request: web.Request) -> web.StreamResponse:
         )
     finally:
         logging.info("WebSocket connection cleanup for session %s", session_id)
-        # Always clean up the session to prevent memory leaks if the client
-        # disconnects without sending a 'disconnect' command.
+        # Always clean up the session to prevent memory leaks, however the
+        # connection ended.
         await SESSION_MANAGER.delete_item(session_id, session_handler)
 
     # Relay how upstream ended the session (e.g. a quota or permission error),
@@ -365,7 +365,13 @@ async def handle_control_request(request: web.Request):
     session_id = request_body.get("session_id")
     if not _is_valid_session_id(session_id):
         return _json_error("Missing or invalid session_id", 400)
-    if request_body.get("command") != "connect":
+    command = request_body.get("command")
+    if command == "disconnect":
+        # Sent by a browser that abandoned a session before opening its
+        # WebSocket (e.g. Disconnect while connecting).
+        removed = await SESSION_MANAGER.remove_pending(session_id)
+        return web.json_response({"removed": removed})
+    if command != "connect":
         return _json_error("Invalid command", 400)
 
     location = request_body.get("location")

@@ -57,7 +57,7 @@ Requires Python 3.11 or later.
 | `--fr_simulator_model` | `gemini-3-flash-preview` | Model that simulates function responses. |
 | `--fr_simulator_thinking_level` | `low` | Its thinking level; empty uses the model's default. |
 | `--ws_heartbeat_s` | `20` | Seconds between WebSocket pings to the browser and to the Live API. Keeps quiet sessions (mic muted, text only) from being closed by proxies that drop idle connections, and ends a session whose browser or upstream has silently gone away. `0` disables pings. |
-| `--max_sessions` | `0` (no limit) | Most sessions held at once, counting ones still connecting. Further connects get HTTP 503 (the browser retries for a few seconds, then shows the error). A session's slot frees when its browser disconnects, so a resume isn't refused while the old upstream connection finishes closing (at most 10 s). Set it on public deployments to bound the upstream connections one instance can be made to open. |
+| `--max_sessions` | `0` (no limit) | Most sessions held at once, counting ones still connecting. Further connects get HTTP 503 (the browser retries for a few seconds, then shows the error). A session's slot frees when its browser disconnects, so a resume isn't refused while the old upstream connection finishes closing (at most 10 s), or when the browser gives up before connecting (e.g. Disconnect while connecting); a session that never connects otherwise expires after 60 s. Set it on public deployments to bound the upstream connections one instance can be made to open. |
 | `--debug` | off | Debug logging, including a preview of every proxied message. |
 | `PORT` (env) | `8080` | Port to listen on. |
 
