@@ -1,3 +1,9 @@
+/* The hidden attribute always hides, even on elements whose class sets a
+   display value (e.g. Material buttons, links styled inline-block). */
+[hidden] {
+  display: none !important;
+}
+
 :root {
   --md-sys-color-surface-container: #f3f4f6;
   --md-sys-color-on-surface-variant: #43474e;

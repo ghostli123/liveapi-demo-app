@@ -173,18 +173,6 @@
           </md-select-option>
         </md-outlined-select>
         <md-outlined-select label="Model" id="liveApiModel">
-          <md-select-option value="live_avatar_v2_rev25_rc2">
-            <div slot="headline">live_avatar_v2_rev25_rc2 (Common Avatar V2)</div>
-          </md-select-option>
-          <md-select-option value="live_avatar_rev23_rc4">
-            <div slot="headline">live_avatar_rev23_rc4 (Common Avatar)</div>
-          </md-select-option>
-          <md-select-option value="gemini_api_beyond_live_rev23_rc3">
-            <div slot="headline">gemini_api_beyond_live_rev23_rc3 (Common Audio)</div>
-          </md-select-option>
-          <md-select-option value="gemini_live_rev25">
-            <div slot="headline">gemini_live_rev25 (Common Audio)</div>
-          </md-select-option>
           <md-select-option value="gemini-live-2.5-flash-native-audio">
             <div slot="headline">gemini-live-2.5-flash-native-audio</div>
           </md-select-option>
@@ -304,8 +292,9 @@
       <div class="config-section">
         <h3>Function call</h3>
         <div class="form-group">
-          <label style="display: block; font-size: 12px; margin-bottom: 8px; ">Function call definitions
-            in OpenAI format. Should be a json file.</label>
+          <label style="display: block; font-size: 12px; margin-bottom: 8px; ">A JSON list of function
+            declarations (name, description, parameters), like fc_definition.json. OpenAI-style tool lists
+            are converted.</label>
           <div class="button-group">
             <input type="file" id="fcFileInput" accept=".json" style="display: none;">
             <md-outlined-button onclick="document.getElementById('fcFileInput').click()">Upload .json file
@@ -314,6 +303,7 @@
 
           <span id="fcFileName"
             style="font-size: 12px; color: var(--gcp-text-secondary); margin-top: 8px; display: block;"></span>
+          <span id="fcRemove" class="create-voice-link" hidden onclick="removeFunctionDeclarations()">Remove</span>
         </div>
         <div style="margin-top: 12px;">
           <md-outlined-select label="Tool Behavior" id="toolBehavior" onchange="toggleSchedulingDisable()">
@@ -346,7 +336,7 @@
         <h3>Avatar Mode</h3>
         <div class="checkbox-row">
           <md-checkbox id="enableAvatarMode" touch-target="wrapper" checked onchange="toggleAvatarMode()"></md-checkbox>
-          <label for="enableAvatarMode">Enable Avatar Mode (Side-by-side view)</label>
+          <label for="enableAvatarMode">Show input and avatar side by side</label>
         </div>
         <div class="checkbox-row">
           <md-checkbox id="saveAvatarVideo" touch-target="wrapper"></md-checkbox>
@@ -471,9 +461,9 @@
 
             <b class="settings-subtitle">Sampling Rate</b><br />
             <div class="form-grid" style="margin-bottom: 20px;">
-              <md-outlined-text-field id="audioInterval" type="number" label="Audio Interval (ms)"
+              <md-outlined-text-field id="audioInterval" type="number" label="Audio Interval (ms, WebSocket)"
                 value="200"></md-outlined-text-field>
-              <md-outlined-text-field id="videoInterval" type="number" label="Video Frame Interval (ms)"
+              <md-outlined-text-field id="videoInterval" type="number" label="Video Interval (ms, WebSocket)"
                 value="400"></md-outlined-text-field>
             </div>
 
@@ -485,7 +475,10 @@
 
             <b class="settings-subtitle">Detection Sensitivity</b><br />
             <md-outlined-select label="Start Sensitivity" id="startSensitivity">
-              <md-select-option selected value="low">
+              <md-select-option selected value="">
+                <div slot="headline">server default</div>
+              </md-select-option>
+              <md-select-option value="low">
                 <div slot="headline">low</div>
               </md-select-option>
               <md-select-option value="high">
@@ -493,7 +486,10 @@
               </md-select-option>
             </md-outlined-select>
             <md-outlined-select label="End Sensitivity" id="endSensitivity">
-              <md-select-option selected value="low">
+              <md-select-option selected value="">
+                <div slot="headline">server default</div>
+              </md-select-option>
+              <md-select-option value="low">
                 <div slot="headline">low</div>
               </md-select-option>
               <md-select-option value="high">

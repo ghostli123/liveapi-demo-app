@@ -31,6 +31,7 @@ const AppState = {
     userTurnActive: false, // Between "Start speaking" and "Done speaking"
     cancelRecording: null, // Stops the voice recording in progress, if any
     turnStarting: false, // "Start speaking" is waiting for the microphone
+    preferredTransport: null, // The transport the user last picked
     recordingStartTime: null,
 };
 
@@ -309,6 +310,13 @@ function initDOMEventListeners() {
         modelSelect.addEventListener("change", handleModelChange);
     }
 
+    const transportSelect = AppUI.getElement("transportMode");
+    if (transportSelect) {
+        transportSelect.addEventListener("change", () => {
+            AppState.preferredTransport = transportSelect.value;
+        });
+    }
+
     const textMessage = AppUI.getElement("text-message");
     if (textMessage) {
         textMessage.addEventListener("keydown", (event) => {
@@ -367,12 +375,16 @@ function handleEnvironmentChange() {
     ) {
         modelSelect.value = "gemini-3.1-flash-live-preview-04-2026";
     }
-    if (isWebSocketOnlyEnvironment(envVal)) {
-        const transportSelect = AppUI.getElement("transportMode");
-        if (transportSelect && transportSelect.value === "webrtc") {
-            transportSelect.value = "websocket";
+    const transportSelect = AppUI.getElement("transportMode");
+    if (transportSelect) {
+        if (isWebSocketOnlyEnvironment(envVal)) {
+            if (transportSelect.value === "webrtc") transportSelect.value = "websocket";
+        } else if (AppState.preferredTransport) {
+            // Back from a WebSocket-only environment: restore the user's choice.
+            transportSelect.value = AppState.preferredTransport;
         }
     }
+    saveSettings(); // Programmatic changes don't fire change events.
 }
 
 function handleModelChange() {
@@ -396,6 +408,7 @@ function handleModelChange() {
     } else if (envVal === "prod-us-rep") {
         envSelect.value = "prod";
     }
+    saveSettings(); // Programmatic changes don't fire change events.
 }
 
 // --- Input Handlers ---
@@ -485,15 +498,31 @@ function handleFcFileInputChange(event) {
     const reader = new FileReader();
     reader.onload = (e) => {
         try {
-            AppState.functionCallDefinition = JSON.parse(e.target.result);
-            console.log("Function call definition loaded:", AppState.functionCallDefinition);
-            AppUI.setText("fcFileName", `File: ${file.name}`);
-            AppUI.showModal(`Function call definition "${file.name}" has been successfully uploaded.`);
+            const declarations = GeminiLiveAPI.toFunctionDeclarations(JSON.parse(e.target.result));
+            const unnamed = declarations.filter((d) => !d || typeof d.name !== "string");
+            if (declarations.length === 0 || unnamed.length > 0) {
+                throw new Error("expected a list of function declarations, each with a name");
+            }
+            AppState.functionCallDefinition = declarations;
+            const names = declarations.map((d) => d.name).join(", ");
+            AppUI.setText("fcFileName", `File: ${file.name} (${names})`);
+            AppUI.setHidden("fcRemove", false);
+            AppUI.showModal(
+                `Loaded ${declarations.length} function declaration(s) from "${file.name}". ` +
+                "They apply from the next connection."
+            );
         } catch (error) {
-            AppUI.showModal(`Error parsing JSON file: ${error.message}`);
+            AppUI.showModal(`Could not use "${file.name}": ${error.message}`);
         }
+        event.target.value = ""; // So choosing the same file again fires change.
     };
     reader.readAsText(file);
+}
+
+function removeFunctionDeclarations() {
+    AppState.functionCallDefinition = null;
+    AppUI.setText("fcFileName", "");
+    AppUI.setHidden("fcRemove", true);
 }
 
 function getSelectedResponseModality() {
@@ -520,7 +549,9 @@ function handleReceiveResponse(messageResponse) {
             const transport = isWebRtcTransport() ? "WebRTC" : "WebSocket";
             // The server's session ID finds this session in server-side logs.
             const session = messageResponse.sessionId ? `, session ${messageResponse.sessionId}` : "";
-            newSystemMessage(`Setup complete: ${api.model} on ${api.endPoint} over ${transport}${session}.`);
+            newSystemMessage(
+                `Setup complete: ${api.resolvedModel || api.model} on ${api.endPoint} over ${transport}${session}.`
+            );
             AppUI.setText("server-session-id", messageResponse.sessionId || "--");
             break;
         }
@@ -719,13 +750,17 @@ async function handleFunctionCallRequest(functionCalls) {
         newSystemMessage(`Function call: ${funcCall.name}(${JSON.stringify(funcCall.args || {})})`);
     }
 
-    const schedulingVal = AppUI.getValue("fcScheduling", "WHEN_IDLE");
+    // Scheduling only applies to NON_BLOCKING functions.
+    const schedulingVal =
+        AppState.geminiLiveApi.toolBehavior === "NON_BLOCKING"
+            ? AppUI.getValue("fcScheduling", "WHEN_IDLE")
+            : null;
     // Sequential, since the simulator is one chat session per connection.
     const functionResponses = [];
     for (const funcCall of functionCalls) {
         if (api.webSocket !== webSocket) break;
         const response = await simulateFunctionResponse(funcCall, sessionId);
-        response.scheduling = schedulingVal;
+        if (schedulingVal) response.scheduling = schedulingVal;
         functionResponses.push({ id: funcCall.id, name: funcCall.name, response });
     }
     if (AppState.geminiLiveApi.webSocket !== webSocket) {
@@ -876,7 +911,7 @@ async function startAudioInput() {
         } else {
             AppState.liveAudioInputManager.deviceId = deviceId;
             await AppState.liveAudioInputManager.updateAudioInterval(
-                AppUI.getValue("audioInterval", "1000")
+                AppUI.getValue("audioInterval") || "200"
             );
         }
         if (isMicOn()) {
@@ -959,7 +994,7 @@ function endUserTurn() {
 
 // --- Video & Screen Capturing ---
 function videoIntervalMs() {
-    return parseInt(AppUI.getValue("videoInterval", "5000"), 10) || 5000;
+    return parseInt(AppUI.getValue("videoInterval"), 10) || 400;
 }
 
 async function startCameraCapture() {
@@ -1273,9 +1308,12 @@ function connectBtnClick() {
         AppUI.getChecked("enableS2ST"),
         AppUI.getValue("s2stTargetLanguage")
     );
+    // The backend normalizes the location for the host; use the same value in
+    // the model URI.
+    const locationInput = AppUI.getElement("location");
+    if (locationInput) locationInput.value = locationInput.value.trim().toLowerCase();
     AppState.geminiLiveApi.setLocation(AppUI.getValue("location"));
     AppState.geminiLiveApi.setApiHost(AppUI.getValue("envApiHost"));
-    AppState.geminiLiveApi.avatarMode = AppUI.getChecked("enableAvatarMode");
     AppState.geminiLiveApi.googleSearchEnabled = AppUI.getChecked("enableGoogleSearch");
 
     AppState.geminiLiveApi.onConnectionStarted = () => {
@@ -1287,13 +1325,9 @@ function connectBtnClick() {
 }
 
 function disconnectBtnClick() {
+    // Branded voices and function declarations stay for the next connection;
+    // their own controls remove them.
     endSession();
-
-    // Branded voices stay in their dropdown, which also turns them off.
-    AppState.functionCallDefinition = null;
-    const fcFileInput = AppUI.getElement("fcFileInput");
-    if (fcFileInput) fcFileInput.value = "";
-    AppUI.setText("fcFileName", "");
 }
 
 // --- Branded Voice / Reference Voice Modal Operations ---
@@ -1512,6 +1546,7 @@ window.disconnectBtnClick = disconnectBtnClick;
 window.micBtnClick = micBtnClick;
 window.micOffBtnClick = micOffBtnClick;
 window.turnBtnClick = turnBtnClick;
+window.removeFunctionDeclarations = removeFunctionDeclarations;
 window.cameraBtnClick = cameraBtnClick;
 window.cameraOffBtnClick = cameraOffBtnClick;
 window.screenShareBtnClick = screenShareBtnClick;

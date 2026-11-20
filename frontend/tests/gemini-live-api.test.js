@@ -297,6 +297,36 @@ test("Disconnect during WebRTC ICE gathering neither sends setup nor reports an 
     assert.equal(webSocket.onopen, null);
 });
 
+test("toFunctionDeclarations accepts Gemini and OpenAI-style tool files", () => {
+    const decl = { name: "f", description: "d", parameters: { type: "object" } };
+    const cases = [
+        [[decl], [decl]],
+        [decl, [decl]],
+        [[{ type: "function", function: decl }], [decl]],
+        [{ tools: [{ type: "function", function: decl }] }, [decl]],
+    ];
+    for (const [input, expected] of cases) {
+        assert.deepEqual(plain(GeminiLiveAPI.toFunctionDeclarations(input)), expected);
+    }
+});
+
+test("realtime input config sends only what the user chose", () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    api.setVad(false, false, "", "");
+    assert.equal(api._buildRealtimeInputConfig(), null);
+
+    api.setVad(false, false, "high", "");
+    assert.deepEqual(plain(api._buildRealtimeInputConfig()), {
+        automatic_activity_detection: { start_of_speech_sensitivity: "START_SENSITIVITY_HIGH" },
+    });
+
+    api.setVad(true, true, "", "low");
+    assert.deepEqual(plain(api._buildRealtimeInputConfig()), {
+        automatic_activity_detection: { end_of_speech_sensitivity: "END_SENSITIVITY_LOW", disabled: true },
+        activity_handling: "NO_INTERRUPTION",
+    });
+});
+
 test("describeClose explains how the server ended the session", () => {
     assert.equal(
         GeminiLiveAPI.describeClose({ code: 1008, reason: "Quota exceeded" }),

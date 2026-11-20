@@ -141,7 +141,6 @@ class GeminiLiveAPI {
         // Features & Configuration
         this.responseModalities = ["VIDEO"];
         this.systemInstructions = "";
-        this.avatarMode = false;
         this.enableInputTranscript = false;
         this.enableOutputTranscript = false;
         this.enableSessionResumption = false;
@@ -364,6 +363,21 @@ class GeminiLiveAPI {
      */
     setFunctionCall(fcDefinition) {
         this.functionCallDefinition = fcDefinition;
+    }
+
+    /**
+     * Normalizes an uploaded tools file to a list of Gemini function
+     * declarations. Accepts that list itself, a single declaration, or an
+     * OpenAI-style tool list ({type: "function", function: {...}}, optionally
+     * under "tools").
+     * @param {*} json - The parsed file.
+     * @returns {Object[]}
+     */
+    static toFunctionDeclarations(json) {
+        const list = Array.isArray(json) ? json : Array.isArray(json?.tools) ? json.tools : [json];
+        return list.map((entry) =>
+            entry && entry.type === "function" && entry.function ? entry.function : entry
+        );
     }
 
     /**
@@ -886,6 +900,7 @@ class GeminiLiveAPI {
                     ? "gemini-3.8-live"
                     : "gemini-3.1-flash-live-preview-04-2026";
         }
+        this.resolvedModel = resolvedModel;
         const modelUri = isCommonBag
             ? `models/${resolvedModel}`
             : `projects/${this.projectId}/locations/${this.location}/publishers/google/models/${resolvedModel}`;
@@ -1090,17 +1105,23 @@ class GeminiLiveAPI {
         const config = {};
 
         if (hasDetectionConfig) {
-            config.automatic_activity_detection = {
-                start_of_speech_sensitivity: getStartSensitivity(this.startSensitivity),
-                end_of_speech_sensitivity: getEndSensitivity(this.endSensitivity),
-            };
+            // Only what the user chose; the rest keeps the server's defaults.
+            config.automatic_activity_detection = {};
+            if (this.startSensitivity) {
+                config.automatic_activity_detection.start_of_speech_sensitivity =
+                    getStartSensitivity(this.startSensitivity);
+            }
+            if (this.endSensitivity) {
+                config.automatic_activity_detection.end_of_speech_sensitivity =
+                    getEndSensitivity(this.endSensitivity);
+            }
             if (this.disableDetection) {
                 config.automatic_activity_detection.disabled = true;
             }
         }
 
         if (hasInterruptionConfig) {
-            config.activity_handling = 2;
+            config.activity_handling = "NO_INTERRUPTION";
         }
 
         return config;
