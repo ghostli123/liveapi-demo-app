@@ -1,0 +1,12 @@
+{
+  "name": "liveapi-demo-app",
+  "private": true,
+  "description": "Dev tooling for the Gemini Live API demo; the app itself needs no build step.",
+  "scripts": {
+    "test": "node --test frontend/tests/*.test.js",
+    "e2e": "node scripts/browser_e2e.js"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.65.1"
+  }
+}

@@ -106,7 +106,14 @@ node --test frontend/tests/*.test.js      # frontend tests (Node 18+)
 python scripts/smoke_test.py --environment=prod-us-rep --model=gemini-3.8-live --modality=VIDEO
 ```
 
-GitHub Actions runs the tests and builds the container on every push.
+`scripts/browser_e2e.js` drives the app in headless Chrome against a running server and a real endpoint: text turns over both transports, resumption, function calling, error reporting, and (with `--speech=file.wav`) a spoken turn through the fake microphone:
+
+```sh
+npm install
+npm run e2e -- --server=http://localhost:8080 --speech=sample.wav
+```
+
+GitHub Actions runs the unit tests, lint, and a container build on every push; the end-to-end checks need credentials, so they run locally.
 
 ### Files
 
