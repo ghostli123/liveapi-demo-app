@@ -58,6 +58,8 @@ If there are any issues with the arguments, such as type is incorrect, required 
 """
 # Max size of one WebSocket message from the browser (custom avatar images are large).
 MAX_CLIENT_MESSAGE_BYTES = 64 * 1024 * 1024
+# A session record is removed if its WebSocket doesn't open within this time.
+PENDING_SESSION_TTL_S = 60
 
 _LOCATION_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
 _HOSTNAME_RE = re.compile(
@@ -309,9 +311,25 @@ async def handle_control_request(request: web.Request):
         session_id=session_id, ws_host=ws_host, fr_session=fr_session, fr_error=fr_error
     )
     await SESSION_MANAGER.add_item(session_id, session_handler)
+    session_handler.expiry_task = asyncio.create_task(
+        _remove_if_never_connected(session_id, session_handler)
+    )
     return web.json_response(
         {"status": "Session initialized.", "project_id": project_id()}
     )
+
+
+async def _remove_if_never_connected(
+    session_id: str, session: session_management.SessionBaseModel
+) -> None:
+    """Drops a session record whose WebSocket never arrived, so it can't leak."""
+    await asyncio.sleep(PENDING_SESSION_TTL_S)
+    if (
+        await SESSION_MANAGER.search_item(session_id) is session
+        and session.websocket_handler is None
+    ):
+        logging.info("Session %s never opened a WebSocket; removing it", session_id)
+        await SESSION_MANAGER.delete_item(session_id)
 
 
 @functools.cache

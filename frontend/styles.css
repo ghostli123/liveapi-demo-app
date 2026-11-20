@@ -266,7 +266,8 @@ details .details-content {
   justify-content: flex-end;
 }
 
-.metrics-container:hover .metrics-panel {
+.metrics-container:hover .metrics-panel,
+.metrics-container:focus-within .metrics-panel {
   display: block;
 }
 

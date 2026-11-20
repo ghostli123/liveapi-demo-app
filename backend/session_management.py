@@ -21,8 +21,12 @@ class SessionBaseModel:
         self.fr_session: google.genai.chats.AsyncChat | None = fr_session
         # Why fr_session is None, reported when the frontend asks for it.
         self.fr_error: str = fr_error
+        # Removes the record if no WebSocket arrives; see main.py.
+        self.expiry_task: asyncio.Task | None = None
 
     async def del_session(self):
+        if self.expiry_task and self.expiry_task is not asyncio.current_task():
+            self.expiry_task.cancel()
         if self.websocket_handler:
             await self.websocket_handler.end_websocket()
             del self.websocket_handler

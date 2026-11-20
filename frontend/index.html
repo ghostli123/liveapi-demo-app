@@ -446,7 +446,7 @@
         <div id="speaking" class="state" hidden><span class="material-symbols-outlined">graphic_eq</span><span
             class="icon-text">model speaking</span></div>
         <div class="metrics-container">
-          <div class="metrics-icon" id="metrics-icon">📊</div>
+          <div class="metrics-icon" id="metrics-icon" tabindex="0" role="button" aria-label="Transport metrics">📊</div>
           <div class="metrics-panel" id="metrics-panel">
             <h3 id="metrics-title">Transport Metrics</h3>
             <p>Transport: <span id="active-transport">WebRTC</span> (<span id="webrtc-state">idle</span>)</p>
@@ -475,22 +475,22 @@
       <md-outlined-select id="cameraSource" label="Camera" onchange="newCameraSelected()"></md-outlined-select>
         <md-outlined-select id="audioSource" label="Microphone" onchange="newMicSelected()"></md-outlined-select>
         <span id="micBtn" hidden><md-filled-icon-button
-            onclick="micBtnClick()"><md-icon>mic</md-icon></md-filled-icon-button></span>
+            aria-label="Turn microphone off" title="Turn microphone off" onclick="micBtnClick()"><md-icon>mic</md-icon></md-filled-icon-button></span>
         <span id="micOffBtn"><md-filled-icon-button disabled
-            onclick="micOffBtnClick()"><md-icon>mic_off</md-icon></md-filled-icon-button></span>
+            aria-label="Turn microphone on" title="Turn microphone on" onclick="micOffBtnClick()"><md-icon>mic_off</md-icon></md-filled-icon-button></span>
         <span id="cameraBtn" hidden><md-filled-icon-button
-            onclick="cameraBtnClick()"><md-icon>videocam</md-icon></md-filled-icon-button></span>
+            aria-label="Turn camera off" title="Turn camera off" onclick="cameraBtnClick()"><md-icon>videocam</md-icon></md-filled-icon-button></span>
         <span id="cameraOffBtn"><md-filled-icon-button disabled
-            onclick="cameraOffBtnClick()"><md-icon>videocam_off</md-icon></md-filled-icon-button></span>
+            aria-label="Turn camera on" title="Turn camera on" onclick="cameraOffBtnClick()"><md-icon>videocam_off</md-icon></md-filled-icon-button></span>
         <span id="screenBtn"><md-filled-icon-button disabled
-            onclick="screenShareBtnClick()"><md-icon>present_to_all</md-icon></md-filled-icon-button></span>
+            aria-label="Share screen" title="Share screen" onclick="screenShareBtnClick()"><md-icon>present_to_all</md-icon></md-filled-icon-button></span>
       </div>
 
       <div id="chat-container" style="margin-top: 18px; flex-grow: 1;">
         <div id="text-chat" aria-live="polite"></div>
         <div class="text-input-area">
           <md-outlined-text-field id="text-message" label="Send a text message"></md-outlined-text-field>
-          <md-icon-button onclick="newUserMessage()"><md-icon>send</md-icon></md-icon-button>
+          <md-icon-button aria-label="Send message" title="Send message" onclick="newUserMessage()"><md-icon>send</md-icon></md-icon-button>
         </div>
       </div>
 
