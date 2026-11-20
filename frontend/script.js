@@ -102,6 +102,20 @@ function initApplicationManagers() {
         endSession();
     };
 
+    AppState.geminiLiveApi.onIdleTimeout = (message) => {
+        AppUI.showModal(message);
+        newSystemMessage(message);
+        endSession();
+    };
+    // Using the page counts as activity for the idle timeout. Capture, so
+    // controls that stop propagation still count.
+    for (const type of ["pointerdown", "keydown", "wheel"]) {
+        document.addEventListener(type, () => AppState.geminiLiveApi.noteActivity(), {
+            capture: true,
+            passive: true,
+        });
+    }
+
     AppState.geminiLiveApi.onReceiveResponse = handleReceiveResponse;
     AppState.geminiLiveApi.onTransportFallback = () => {
         AppState.liveVideoOutputManager.initMediaSource();

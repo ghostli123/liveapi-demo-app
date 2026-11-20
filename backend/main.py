@@ -131,6 +131,17 @@ MAX_SESSIONS = flags.DEFINE_integer(
     "use. 0 means no limit.",
     lower_bound=0,
 )
+IDLE_TIMEOUT_S = flags.DEFINE_integer(
+    "idle_timeout_s",
+    900,
+    "Seconds without conversation or user input (typing, clicks, speech the "
+    "model answers) after which the browser ends a session, so an abandoned "
+    "tab doesn't hold its upstream connection and --max_sessions slot. The "
+    "frontend enforces it, since the proxy can't tell: WebRTC media bypasses "
+    "it, and avatar video and an open microphone stream while nobody is "
+    "there. 0 disables.",
+    lower_bound=0,
+)
 DEBUG = flags.DEFINE_bool(
     "debug", False, "Log at debug level, including a preview of every proxied message."
 )
@@ -417,7 +428,11 @@ async def handle_control_request(request: web.Request):
         _remove_if_never_connected(session_id, session_handler)
     )
     return web.json_response(
-        {"status": "Session initialized.", "project_id": project_id()}
+        {
+            "status": "Session initialized.",
+            "project_id": project_id(),
+            "idle_timeout_s": IDLE_TIMEOUT_S.value,
+        }
     )
 
 
