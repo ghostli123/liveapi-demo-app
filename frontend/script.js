@@ -95,6 +95,10 @@ function initApplicationManagers() {
     };
 
     AppState.geminiLiveApi.onReceiveResponse = handleReceiveResponse;
+    AppState.geminiLiveApi.onReconnectNeeded = () => {
+        newSystemMessage("The server restarted. Resuming the session...");
+        handleSessionResumptionReconnect();
+    };
 
     AppState.liveAudioOutputManager = new LiveAudioOutputManager();
     AppState.liveVideoOutputManager = new LiveVideoOutputManager();
@@ -375,8 +379,15 @@ function handleReceiveResponse(messageResponse) {
         }
         case "GO_AWAY":
             console.log("GoAway message received. Time left: ", messageResponse.data);
-            newSystemMessage("Connection expiring. Reconnecting for session resumption...");
-            handleSessionResumptionReconnect();
+            if (AppState.geminiLiveApi.canResume()) {
+                newSystemMessage("Connection expiring. Reconnecting for session resumption...");
+                handleSessionResumptionReconnect();
+            } else {
+                newSystemMessage(
+                    "The server will close this connection soon. Enable session resumption " +
+                    "to continue the conversation on a new connection."
+                );
+            }
             break;
         case "INPUT_TRANSCRIPTION":
             appendTranscript("input", messageResponse.data);
@@ -437,10 +448,10 @@ async function handleSessionResumptionReconnect() {
         AppState.liveVideoOutputManager.initMediaSource();
     }
     try {
-        await api.resume(AppUI.getValue("handle"));
+        await api.resume(api.latestResumptionHandle);
     } catch (error) {
+        // prepare() already reported the error and ended the session.
         console.error("Session resumption failed: ", error);
-        api.onErrorMessage(`Session resumption failed: ${error.message}`);
     }
 }
 
@@ -851,6 +862,15 @@ function endSession() {
     closeTranscriptLine("input");
     closeTranscriptLine("output");
     AppState.liveAudioOutputManager.clear();
+    // The next Connect starts a new conversation unless the user pastes a
+    // handle back in, so keep the last one where they can find it.
+    const handleInput = AppUI.getElement("handle");
+    if (handleInput && handleInput.value) {
+        newSystemMessage(
+            `To resume this conversation later, enter this handle in Advanced Settings: ${handleInput.value}`
+        );
+        handleInput.value = "";
+    }
     // Before resetPlayer(), which discards the recorded video this saves.
     setAppStatus("disconnected");
     AppState.liveVideoOutputManager.resetPlayer();

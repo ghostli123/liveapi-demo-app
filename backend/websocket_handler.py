@@ -1,7 +1,6 @@
 """Proxies one browser WebSocket to the upstream Live API WebSocket."""
 
 import asyncio
-import datetime
 import json
 import ssl
 
@@ -16,9 +15,6 @@ MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 _RESERVED_CLOSE_CODES = frozenset({1005, 1006, 1015})
 # A close frame carries at most 123 bytes of reason after the 2-byte code.
 _MAX_CLOSE_REASON_BYTES = 123
-# Lower bound between token pushes, so a token that's already near expiry
-# can't turn the refresh loop into a busy loop.
-_MIN_TOKEN_REFRESH_INTERVAL_S = 30
 _DEBUG_PREVIEW_CHARS = 300
 
 
@@ -146,13 +142,11 @@ class WebsocketHandler:
             )
             return
 
-        refresh_task = None
+        # The token is only checked at the handshake. Don't push a refreshed
+        # one later: the Live API rejects {"access_token": ...} messages with
+        # close code 1007, and GoAway reconnects fetch a new token anyway.
         async with connection as server_websocket:
             self.server_websocket = server_websocket
-            if token:
-                refresh_task = asyncio.create_task(
-                    self._refresh_token_loop(token.expiry)
-                )
             client_to_server = asyncio.create_task(
                 self.proxy_task(self.client_websocket, server_websocket, "c->s")
             )
@@ -166,9 +160,8 @@ class WebsocketHandler:
                     return_when=asyncio.FIRST_COMPLETED,
                 )
             finally:
-                for task in (client_to_server, server_to_client, refresh_task):
-                    if task:
-                        task.cancel()
+                for task in (client_to_server, server_to_client):
+                    task.cancel()
         # Leaving the `async with` completed the closing handshake, so the
         # upstream close code is known.
         self.server_websocket = None
@@ -203,27 +196,3 @@ class WebsocketHandler:
             except asyncio.CancelledError:
                 pass  # Cancellation is expected.
             self.connection_handler = None
-
-    async def _refresh_token_loop(self, expiry: datetime.datetime) -> None:
-        """Pushes a fresh access token upstream a minute before each expiry."""
-        while True:
-            remaining = (
-                expiry - datetime.datetime.now(datetime.timezone.utc)
-            ).total_seconds()
-            await asyncio.sleep(max(_MIN_TOKEN_REFRESH_INTERVAL_S, remaining - 60))
-            try:
-                token = await asyncio.to_thread(get_credentials.get_access_token)
-            except Exception:
-                logging.exception(
-                    "Token refresh failed for session %s", self.session_id
-                )
-                continue
-            server_websocket = self.server_websocket
-            if server_websocket is None:
-                return
-            logging.info("Updating bearer token for session %s", self.session_id)
-            try:
-                await server_websocket.send(json.dumps({"access_token": token.token}))
-            except websockets.exceptions.ConnectionClosed:
-                return
-            expiry = token.expiry

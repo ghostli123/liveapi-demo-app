@@ -8,9 +8,9 @@ import re
 import signal
 import subprocess
 from typing import Any
+import urllib.parse
 
 from aiohttp import web
-import aiohttp_cors
 from absl import app, flags, logging
 from google import genai
 import websockets
@@ -60,6 +60,9 @@ If there are any issues with the arguments, such as type is incorrect, required 
 MAX_CLIENT_MESSAGE_BYTES = 64 * 1024 * 1024
 # A session record is removed if its WebSocket doesn't open within this time.
 PENDING_SESSION_TTL_S = 60
+# How long shutdown waits for handlers after closing sessions. Cloud Run sends
+# SIGKILL 10 s after SIGTERM.
+SHUTDOWN_TIMEOUT_S = 5
 
 _LOCATION_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
 _HOSTNAME_RE = re.compile(
@@ -233,7 +236,14 @@ async def aiohttp_websocket_handler(request: web.Request) -> web.StreamResponse:
 
 
 async def handle_fr_post_request(request: web.Request):
-    """Forwards a function-call simulation request to the session's Gemini chat."""
+    """Simulates function responses with a Gemini chat, one per session.
+
+    Objectives:
+      fc_definition: stores the session's function declarations. No model
+        call, so connecting doesn't wait on the simulator.
+      fr_generate: asks the model for a plausible response to one call. The
+        first request also gives the model the stored declarations.
+    """
     request_body = await _read_json_object(request)
     if request_body is None:
         return _json_error("Request body must be a JSON object", 400)
@@ -243,33 +253,39 @@ async def handle_fr_post_request(request: web.Request):
     )
     if not chat_session:
         return _json_error("Unknown session", 404)
+
+    query_object = request_body.pop("objective", None)
+    query = json.dumps(request_body)
+    logging.debug("Received %s query for Gemini:\n%s", query_object, query)
+    if query_object == "fc_definition":
+        chat_session.fc_definitions = query
+        return web.json_response({"response": "Function definitions stored."})
+    if query_object != "fr_generate":
+        return _json_error(f"Unknown query objective type {query_object!r}", 400)
+
     if not chat_session.fr_session:
         return _json_error(
             f"Function response simulator unavailable: {chat_session.fr_error or 'not initialized'}",
             503,
         )
-
-    query_object = request_body.pop("objective", None)
-    query = json.dumps(request_body)
-    logging.debug("Received %s query for Gemini:\n%s", query_object, query)
-    if query_object == "fr_generate":
-        current_content = [
-            genai.types.Part(text="Now generate function response this function call."),
-            genai.types.Part(text=query),
-        ]
-    elif query_object == "fc_definition":
-        current_content = [
+    current_content = []
+    send_definitions = chat_session.fc_definitions and not chat_session.fc_definitions_sent
+    if send_definitions:
+        current_content += [
             genai.types.Part(text="The definition of the functions are:"),
-            genai.types.Part(text=query),
+            genai.types.Part(text=chat_session.fc_definitions),
         ]
-    else:
-        return _json_error(f"Unknown query objective type {query_object!r}", 400)
-
+    current_content += [
+        genai.types.Part(text="Now generate function response this function call."),
+        genai.types.Part(text=query),
+    ]
     try:
         response = await chat_session.fr_session.send_message(current_content)
     except Exception as e:
         logging.exception("Function response simulator request failed")
         return _json_error(f"Function response simulator failed: {e}", 502)
+    if send_definitions:
+        chat_session.fc_definitions_sent = True
     logging.debug("Sending back frontend with response:\n%s", response.text)
     return web.json_response({"response": response.text})
 
@@ -369,23 +385,50 @@ async def revalidate_static_files(request: web.Request, handler):
     return response
 
 
-async def create_app():
-    app = web.Application(middlewares=[revalidate_static_files])
-    cors = aiohttp_cors.setup(
-        app,
-        defaults={
-            "*": aiohttp_cors.ResourceOptions(
-                allow_credentials=True,
-                expose_headers="*",
-                allow_headers="*",
-                allow_methods="*",
+@web.middleware
+async def reject_cross_origin(request: web.Request, handler):
+    """Rejects API and WebSocket requests that other websites' pages make.
+
+    Without this, any page open in the user's browser could start sessions on
+    the server's credentials and read the model's replies. Requests without an
+    Origin header (scripts such as scripts/smoke_test.py) are allowed.
+    """
+    if request.method != "GET" or request.path == "/ws":
+        origin = request.headers.get("Origin")
+        if origin is not None and urllib.parse.urlsplit(origin).netloc != request.host:
+            logging.warning("Rejected %s %s from origin %s", request.method, request.path, origin)
+            return web.Response(text="Cross-origin request rejected", status=403)
+    return await handler(request)
+
+
+async def close_sessions_on_shutdown(app: web.Application) -> None:
+    """Ends open sessions with 1001 (going away), so browsers can reconnect.
+
+    Otherwise aiohttp waits shutdown_timeout for them and then drops the
+    connections, which browsers see as an abnormal close (1006).
+    """
+    sessions = await SESSION_MANAGER.all_items()
+    if sessions:
+        logging.info("Closing %d session(s) for shutdown", len(sessions))
+    await asyncio.gather(
+        *(
+            session.websocket_handler.client_websocket.close(
+                code=1001, reason="Server restarting"
             )
-        },
+            for session in sessions
+            if session.websocket_handler
+        ),
+        return_exceptions=True,
     )
 
+
+async def create_app():
+    app = web.Application(middlewares=[reject_cross_origin, revalidate_static_files])
+    app.on_shutdown.append(close_sessions_on_shutdown)
+
     # API and WS Routes
-    cors.add(app.router.add_post("/api/post_endpoint", handle_fr_post_request))
-    cors.add(app.router.add_post("/api/control", handle_control_request))
+    app.router.add_post("/api/post_endpoint", handle_fr_post_request)
+    app.router.add_post("/api/control", handle_control_request)
     app.router.add_get("/ws", aiohttp_websocket_handler)
     app.router.add_get("/healthz", health_check)
 
@@ -415,7 +458,7 @@ async def main_async():
     app = await create_app()
     port = int(os.environ.get("PORT", 8080))
 
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(app, shutdown_timeout=SHUTDOWN_TIMEOUT_S)
     await runner.setup()
     site = web.TCPSite(runner, None, port)
     await site.start()
@@ -427,9 +470,15 @@ async def main_async():
         ", ".join(ALLOWED_HOST_SUFFIXES.value),
     )
     stop = asyncio.Event()
+
+    def on_signal():
+        if stop.is_set():
+            os._exit(1)  # A second Ctrl-C quits without waiting.
+        stop.set()
+
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
+        loop.add_signal_handler(sig, on_signal)
     try:
         await stop.wait()
         logging.info("Shutting down...")

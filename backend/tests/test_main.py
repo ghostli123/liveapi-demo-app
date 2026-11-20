@@ -200,6 +200,68 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resp.status, 404)
 
+    async def test_fr_definitions_go_with_the_first_call_only(self):
+        class FakeChat:
+            def __init__(self):
+                self.messages = []
+
+            async def send_message(self, parts):
+                self.messages.append([p.text for p in parts])
+                return mock.Mock(text='{"ok": true}')
+
+        chat = FakeChat()
+        with mock.patch.object(
+            main, "initialize_gemini_chat_session", return_value=chat
+        ):
+            await self.connect_session("s8")
+
+        async def post(body):
+            resp = await self.client.post(
+                "/api/post_endpoint", json={"session_id": "s8", **body}
+            )
+            return resp.status, await resp.json()
+
+        status, _ = await post(
+            {"objective": "fc_definition", "functionDefinition": [{"name": "f"}]}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(chat.messages, [])  # Storing makes no model call.
+
+        for _ in range(2):
+            status, body = await post(
+                {"objective": "fr_generate", "functionName": "f", "functionArgs": {}}
+            )
+            self.assertEqual((status, body), (200, {"response": '{"ok": true}'}))
+        self.assertIn('"name": "f"', chat.messages[0][1])
+        self.assertEqual(len(chat.messages[0]), 4)
+        self.assertEqual(len(chat.messages[1]), 2)
+
+    async def test_fr_definitions_stored_without_simulator(self):
+        await self.connect_session("s9")
+        resp = await self.client.post(
+            "/api/post_endpoint",
+            json={
+                "session_id": "s9",
+                "objective": "fc_definition",
+                "functionDefinition": [],
+            },
+        )
+        self.assertEqual(resp.status, 200)
+
+    async def test_shutdown_closes_sessions_with_going_away(self):
+        async with FakeUpstream() as upstream:
+            with flagsaver.flagsaver(common_bag_ws_port=upstream.port):
+                await self.connect_session("s10")
+                ws = await self.client.ws_connect("/ws?session_id=s10")
+                await ws.send_str("ping")
+                await asyncio.wait_for(ws.receive(), 5)
+
+                await main.close_sessions_on_shutdown(self.client.app)
+                msg = await asyncio.wait_for(ws.receive(), 5)
+        self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(msg.data, 1001)
+        self.assertEqual(msg.extra, "Server restarting")
+
     async def test_session_without_websocket_expires(self):
         with mock.patch.object(main, "PENDING_SESSION_TTL_S", 0.05):
             await self.connect_session("s5")
@@ -221,6 +283,32 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 msg = await asyncio.wait_for(ws.receive(), 5)
                 self.assertEqual(json.loads(msg.data), {"echo": "ping"})
                 await ws.close()
+
+    async def test_rejects_cross_origin_requests(self):
+        body = {
+            "command": "connect",
+            "session_id": "s7",
+            "endpoint": "autopush-common",
+            "location": "us-central1",
+        }
+        resp = await self.client.post(
+            "/api/control", json=body, headers={"Origin": "https://evil.example"}
+        )
+        self.assertEqual(resp.status, 403)
+        self.assertNotIn("Access-Control-Allow-Origin", resp.headers)
+        self.assertIsNone(await main.SESSION_MANAGER.search_item("s7"))
+
+        resp = await self.client.get(
+            "/ws?session_id=s7", headers={"Origin": "https://evil.example"}
+        )
+        self.assertEqual(resp.status, 403)
+
+        # The app's own pages, and scripts that send no Origin, are allowed.
+        own_origin = f"http://{self.client.host}:{self.client.port}"
+        resp = await self.client.post(
+            "/api/control", json=body, headers={"Origin": own_origin}
+        )
+        self.assertEqual(resp.status, 200)
 
     async def test_static_files_revalidate(self):
         resp = await self.client.get("/frontend/script.js")

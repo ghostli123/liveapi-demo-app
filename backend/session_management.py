@@ -23,6 +23,10 @@ class SessionBaseModel:
         self.fr_error: str = fr_error
         # Removes the record if no WebSocket arrives; see main.py.
         self.expiry_task: asyncio.Task | None = None
+        # Function declarations (JSON) for the simulator, and whether the
+        # simulator's chat has been given them yet.
+        self.fc_definitions: str = ""
+        self.fc_definitions_sent: bool = False
 
     async def del_session(self):
         if self.expiry_task and self.expiry_task is not asyncio.current_task():
@@ -81,6 +85,11 @@ class SessionManager:
             await session_data.del_session()
             del session_data
         logging.info("Session %s deleted", session_id)
+
+    async def all_items(self) -> list[SessionBaseModel]:
+        """Returns a snapshot of all sessions."""
+        async with self._lock:
+            return list(self._sessions.values())
 
     async def search_item(self, session_id: str) -> Optional[SessionBaseModel]:
         """

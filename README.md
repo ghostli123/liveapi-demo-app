@@ -49,6 +49,8 @@ Requires Python 3.11 or later.
 | `--debug` | off | Debug logging, including a preview of every proxied message. |
 | `PORT` (env) | `8080` | Port to listen on. |
 
+The API and WebSocket only accept browser requests from the app's own pages, so other websites can't use the server's credentials. Clients that send no `Origin` header, such as `scripts/smoke_test.py`, are allowed.
+
 ### Credentials
 
 The backend tries, in order: Application Default Credentials through google-auth, then `gcloud auth application-default print-access-token`, then the LOAS helper `backend/common_bag_ws_proxy.par` if present. The gcloud fallback matters on machines with certificate-based access, where google-auth's own token refresh fails with "Account restricted" but gcloud works. The server log says which source it used.
@@ -62,7 +64,7 @@ The backend tries, in order: Application Default Credentials through google-auth
 - **Response type** (in **Model Behavior**): Video (avatar), Audio, or Text.
 - **Branded voice**: upload a `.wav` file, or record one with **Create a new branded voice**, *before* clicking Connect. The voice sample is sent in the session's setup message, so changes apply to the next connection.
 - **Function calling**: upload a JSON list of function declarations before connecting; `fc_definition.json` is an example. When the model calls a function, the backend asks `gemini-3.1-pro-preview` to simulate a plausible response and sends it back to the model.
-- **Session resumption**: on by default. When the server announces it will close the connection (GoAway), the app reconnects with the latest resumption handle and the conversation continues.
+- **Session resumption**: on by default. When the Live API announces it will close the connection (GoAway), or the backend restarts (e.g. a deploy), the app reconnects with the session's latest resumption handle and the conversation continues. Disconnect ends the conversation; the chat log shows its handle, which you can enter under **Advanced Settings** before connecting to resume it.
 - **Saving the avatar video**: with **Save avatar video** checked, the avatar's MP4 stream (WebSocket transport) is downloaded when you disconnect.
 - **Metrics**: hover over 📊 to see transport, bandwidth, frame rate, packet loss, and token usage for the last turn.
 
