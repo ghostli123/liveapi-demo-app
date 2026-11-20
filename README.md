@@ -2,7 +2,12 @@
 
 A web app for talking to Gemini through the [Gemini Live API](https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/multimodal-live) with your voice, camera, or screen. The model can answer with audio, text, or a talking avatar video.
 
+<details>
+<summary>Screenshot</summary>
+
 ![Demo](/img/ui.jpg)
+
+</details>
 
 ## Architecture
 
