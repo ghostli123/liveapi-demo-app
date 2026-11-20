@@ -232,6 +232,46 @@ class LiveAudioInputManager {
     }
 }
 
+/** Reports a microphone stream's loudness (0-1) about 60 times a second. */
+class MicLevelMeter {
+    constructor(onLevel) {
+        this.onLevel = onLevel;
+        this.context = null;
+        this.frame = null;
+    }
+
+    start(stream) {
+        this.stop();
+        if (!stream) return;
+        this.context = new AudioContext();
+        const analyser = this.context.createAnalyser();
+        analyser.fftSize = 512;
+        this.context.createMediaStreamSource(stream).connect(analyser);
+        const samples = new Float32Array(analyser.fftSize);
+        const tick = () => {
+            analyser.getFloatTimeDomainData(samples);
+            let sum = 0;
+            for (const sample of samples) sum += sample * sample;
+            // Map -60..0 dBFS to 0..1: perceived loudness is logarithmic,
+            // and a linear scale pins loud microphones at the top.
+            const dbfs = 10 * Math.log10(sum / samples.length + 1e-12);
+            this.onLevel(Math.min(1, Math.max(0, (dbfs + 60) / 60)));
+            this.frame = requestAnimationFrame(tick);
+        };
+        tick();
+    }
+
+    stop() {
+        cancelAnimationFrame(this.frame);
+        this.frame = null;
+        if (this.context) {
+            this.context.close();
+            this.context = null;
+        }
+        this.onLevel(0);
+    }
+}
+
 // Frames sent over WebSocket are scaled so their longer side is at most this.
 // Gemini downsamples larger images anyway, so full-resolution frames only
 // cost bandwidth.
