@@ -61,11 +61,15 @@ def _as_utc(expiry: datetime.datetime | None) -> datetime.datetime:
 
 def _token_from_adc() -> AccessToken:
     global _adc_credentials
-    if _adc_credentials is None:
-        _adc_credentials, _ = google.auth.default(scopes=list(_SCOPES))
+    credentials = _adc_credentials
+    if credentials is None:
+        credentials, _ = google.auth.default(scopes=list(_SCOPES))
+        _adc_credentials = credentials
     # Only called when the cache is stale, so always refresh.
-    _adc_credentials.refresh(google.auth.transport.requests.Request())
-    return AccessToken(_adc_credentials.token, _as_utc(_adc_credentials.expiry), "adc")
+    credentials.refresh(google.auth.transport.requests.Request())
+    if not credentials.token:
+        raise RuntimeError("ADC refresh returned no token")
+    return AccessToken(credentials.token, _as_utc(credentials.expiry), "adc")
 
 
 def _token_from_gcloud() -> AccessToken:

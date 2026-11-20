@@ -1,3 +1,5 @@
 -r requirements.txt
 pytest
+# Pinned: new pyright releases add checks, which would turn CI red unannounced.
+pyright==1.1.414
 ruff

@@ -82,7 +82,6 @@ class FakeUpstream:
         self.received = []
         # The close code each connection received from the proxy.
         self.close_codes = []
-        self.server = None
 
     async def handler(self, connection):
         try:
@@ -104,7 +103,7 @@ class FakeUpstream:
 
     async def __aenter__(self):
         self.server = await websockets.serve(self.handler, "127.0.0.1", 0)
-        self.port = self.server.sockets[0].getsockname()[1]
+        self.port = next(iter(self.server.sockets)).getsockname()[1]
         return self
 
     async def __aexit__(self, *exc_info):
@@ -120,7 +119,6 @@ class UnresponsiveUpstream:
     """
 
     def __init__(self):
-        self.server = None
         self.writers = []
 
     async def handler(self, reader, writer):

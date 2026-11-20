@@ -18,6 +18,8 @@ jobs:
       - run: pip install -r backend/requirements-dev.txt
       - name: Lint
         run: ruff check backend scripts && ruff format --check backend scripts
+      - name: Type check
+        run: pyright
       - run: python -m pytest -q
 
   frontend:
