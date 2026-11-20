@@ -654,3 +654,29 @@ video {
     flex-wrap: wrap;
   }
 }
+
+/* Message over the input preview while nothing is captured. */
+.preview-frame {
+  position: relative;
+  width: 100%;
+}
+
+/* As a flex item the video was blockified; keep it a block in the wrapper. */
+.preview-frame > video {
+  display: block;
+}
+
+.preview-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #bdc1c6;
+  font-size: 14px;
+  pointer-events: none;
+}
+
+.preview-placeholder[hidden] {
+  display: none;
+}
