@@ -592,6 +592,7 @@ function handleReceiveResponse(messageResponse) {
                 `Setup complete: ${api.resolvedModel || api.model} on ${api.endPoint} over ${transport}${session}.`
             );
             AppUI.setText("server-session-id", messageResponse.sessionId || "--");
+            startConnectionTimer();
             break;
         }
         case "GENERATION_STARTED":
@@ -730,6 +731,30 @@ function markModelResponse(what = "") {
 function resetLatencyTurn() {
     LatencyState.turnEndedAt = null;
     LatencyState.responding = false;
+}
+
+// --- Connection age ---
+// Time since the current connection was set up (reset by resumption). The
+// server sends GoAway based on connection age, so this helps when testing it.
+let connectionTimer = null;
+
+function startConnectionTimer() {
+    stopConnectionTimer();
+    const startedAt = Date.now();
+    const tick = () => {
+        const seconds = Math.floor((Date.now() - startedAt) / 1000);
+        AppUI.setText(
+            "connection-age",
+            `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`
+        );
+    };
+    tick();
+    connectionTimer = setInterval(tick, 1000);
+}
+
+function stopConnectionTimer() {
+    clearInterval(connectionTimer);
+    connectionTimer = null;
 }
 
 function showUsage(usage) {
@@ -1249,6 +1274,8 @@ function endSession() {
     showMicState(false);
     showCameraState(false);
     setMediaButtonsEnabled(false);
+    stopConnectionTimer();
+    AppUI.setText("connection-age", "--");
     AppUI.setHidden("turnBtnWrap", true);
     setUserTurnActive(false);
     closeTranscriptLine("input");
