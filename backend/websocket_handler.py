@@ -12,6 +12,12 @@ from absl import logging
 import get_credentials
 
 MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+# Seconds between pings to the Live API, and how long to wait for each pong.
+DEFAULT_KEEPALIVE_S = 20
+# How long to wait for upstream to acknowledge a close, including the one sent
+# after a missed pong. A dead upstream is detected within
+# 2 * keepalive + this many seconds.
+UPSTREAM_CLOSE_TIMEOUT_S = 10
 # Close codes that must not appear in a close frame (RFC 6455, section 7.4.1).
 _RESERVED_CLOSE_CODES = frozenset({1005, 1006, 1015})
 # A close frame carries at most 123 bytes of reason after the 2-byte code.
@@ -52,12 +58,15 @@ class WebsocketHandler:
         session_id,
         client_websocket,
         debug_mode=False,
+        keepalive_s: float | None = DEFAULT_KEEPALIVE_S,
     ) -> None:
         self.session_id = session_id
         self.liveapi_service_url = liveapi_service_url
         self.client_websocket = client_websocket
         self.server_websocket = None
         self.debug_mode = debug_mode
+        # Upstream ping interval and pong timeout; None disables pings.
+        self.keepalive_s = keepalive_s
         self.connection_handler: asyncio.Task | None = None
         # How the upstream connection ended, for relaying to the browser.
         self.close_code: int | None = None
@@ -117,10 +126,14 @@ class WebsocketHandler:
             counts[1] += len(message)
 
     def _connect_upstream(self, token: str | None):
+        options = {
+            "max_size": MAX_MESSAGE_BYTES,
+            "ping_interval": self.keepalive_s,
+            "ping_timeout": self.keepalive_s,
+            "close_timeout": UPSTREAM_CLOSE_TIMEOUT_S,
+        }
         if token is None:
-            return websockets.connect(
-                self.liveapi_service_url, max_size=MAX_MESSAGE_BYTES
-            )
+            return websockets.connect(self.liveapi_service_url, **options)
         return websockets.connect(
             self.liveapi_service_url,
             additional_headers={
@@ -128,7 +141,7 @@ class WebsocketHandler:
                 "Authorization": f"Bearer {token}",
             },
             ssl=ssl.create_default_context(cafile=certifi.where()),
-            max_size=MAX_MESSAGE_BYTES,
+            **options,
         )
 
     async def create_proxy(self) -> None:

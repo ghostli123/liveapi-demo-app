@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import hashlib
 import json
 import unittest
 from unittest import mock
@@ -10,6 +12,7 @@ import websockets
 
 import main
 import session_management
+import websocket_handler
 
 
 class ResolveWsHostTest(unittest.TestCase):
@@ -94,6 +97,47 @@ class FakeUpstream:
         return self
 
     async def __aexit__(self, *exc_info):
+        self.server.close()
+        await self.server.wait_closed()
+
+
+class UnresponsiveUpstream:
+    """Accepts the WebSocket handshake, then ignores everything, pings included.
+
+    Stands in for an upstream that has silently gone away (e.g. a dropped NAT
+    mapping); a websockets server can't be used because it always answers pings.
+    """
+
+    def __init__(self):
+        self.server = None
+        self.writers = []
+
+    async def handler(self, reader, writer):
+        self.writers.append(writer)
+        request = await reader.readuntil(b"\r\n\r\n")
+        key = next(
+            line.split(b":", 1)[1].strip()
+            for line in request.split(b"\r\n")
+            if line.lower().startswith(b"sec-websocket-key:")
+        )
+        accept = base64.b64encode(
+            hashlib.sha1(key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest()
+        )
+        writer.write(
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+            b"Connection: Upgrade\r\nSec-WebSocket-Accept: " + accept + b"\r\n\r\n"
+        )
+        while await reader.read(65536):
+            pass
+
+    async def __aenter__(self):
+        self.server = await asyncio.start_server(self.handler, "127.0.0.1", 0)
+        self.port = self.server.sockets[0].getsockname()[1]
+        return self
+
+    async def __aexit__(self, *exc_info):
+        for writer in self.writers:
+            writer.close()
         self.server.close()
         await self.server.wait_closed()
 
@@ -300,6 +344,72 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 msg = await asyncio.wait_for(ws.receive(), 5)
                 self.assertEqual(json.loads(msg.data), {"echo": "ping"})
                 await ws.close()
+
+    async def wait_for_session_end(self, session_id, timeout=5):
+        async with asyncio.timeout(timeout):
+            while await main.SESSION_MANAGER.search_item(session_id):
+                await asyncio.sleep(0.02)
+
+    async def test_quiet_session_survives_many_heartbeats(self):
+        async with FakeUpstream() as upstream:
+            with flagsaver.flagsaver(
+                common_bag_ws_port=upstream.port, ws_heartbeat_s=0.4
+            ):
+                await self.connect_session("s16")
+                ws = await self.client.ws_connect("/ws?session_id=s16")
+                # aiohttp's client answers pings only while receive() is
+                # pending; browsers always do.
+                receive = asyncio.create_task(ws.receive())
+                # Both peers answer pings, so five silent intervals are fine.
+                await asyncio.sleep(2)
+                self.assertFalse(receive.done())
+                await ws.send_str("still there?")
+                msg = await asyncio.wait_for(receive, 5)
+                self.assertEqual(json.loads(msg.data), {"echo": "still there?"})
+                await ws.close()
+
+    async def test_browser_that_stops_answering_pings_is_dropped(self):
+        async with FakeUpstream() as upstream:
+            with flagsaver.flagsaver(
+                common_bag_ws_port=upstream.port, ws_heartbeat_s=0.1
+            ):
+                await self.connect_session("s17")
+                ws = await self.client.ws_connect("/ws?session_id=s17", autoping=False)
+                await self.wait_for_session_end("s17")
+                # The upstream connection is closed with the session.
+                async with asyncio.timeout(5):
+                    while upstream.server.connections:
+                        await asyncio.sleep(0.02)
+                await ws.close()
+
+    async def test_upstream_that_stops_answering_pings_ends_session(self):
+        async with UnresponsiveUpstream() as upstream:
+            with (
+                flagsaver.flagsaver(
+                    common_bag_ws_port=upstream.port, ws_heartbeat_s=0.4
+                ),
+                mock.patch.object(websocket_handler, "UPSTREAM_CLOSE_TIMEOUT_S", 0.1),
+            ):
+                await self.connect_session("s18")
+                ws = await self.client.ws_connect("/ws?session_id=s18")
+                msg = await asyncio.wait_for(ws.receive(), 5)
+        self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(msg.data, 1011)
+        await self.wait_for_session_end("s18")
+
+    async def test_heartbeat_can_be_disabled(self):
+        async with UnresponsiveUpstream() as upstream:
+            with (
+                flagsaver.flagsaver(common_bag_ws_port=upstream.port, ws_heartbeat_s=0),
+                mock.patch.object(websocket_handler, "UPSTREAM_CLOSE_TIMEOUT_S", 0.1),
+            ):
+                await self.connect_session("s19")
+                ws = await self.client.ws_connect("/ws?session_id=s19")
+                with self.assertRaises(TimeoutError):
+                    await asyncio.wait_for(ws.receive(), 0.5)
+                self.assertIsNotNone(await main.SESSION_MANAGER.search_item("s19"))
+                await ws.close()
+                await self.wait_for_session_end("s19")
 
     async def test_rejects_cross_origin_requests(self):
         body = {
