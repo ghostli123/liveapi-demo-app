@@ -1,6 +1,8 @@
-absl-py
-aiohttp
+# Compatible-release pins on the versions the tests and e2e checks ran with,
+# so a new major release can't break a fresh install or container build.
+absl-py~=2.5
+aiohttp~=3.14
 certifi
-google-auth
-google-genai
+google-auth~=2.62
+google-genai~=3.6
 websockets==14.2
