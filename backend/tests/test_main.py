@@ -284,6 +284,57 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resp.status, 400)
 
+    async def test_control_rejects_non_string_endpoints(self):
+        # A list or object used to reach the environment set and fail with 500.
+        for endpoint in ([], {}, ["autopush-common"], 5):
+            resp = await self.client.post(
+                "/api/control",
+                json={
+                    "command": "connect",
+                    "session_id": "s20",
+                    "endpoint": endpoint,
+                    "location": "us-central1",
+                },
+            )
+            self.assertEqual(resp.status, 400, endpoint)
+        self.assertIsNone(await main.SESSION_MANAGER.search_item("s20"))
+
+    async def test_session_ids_with_trailing_newline_rejected(self):
+        status, _ = await self.connect_session("s21\n")
+        self.assertEqual(status, 400)
+        resp = await self.client.get("/ws", params={"session_id": "s21\n"})
+        self.assertEqual(resp.status, 400)
+
+    async def test_undecodable_bodies_rejected(self):
+        # Each of these used to escape the JSON parsing and answer 500.
+        bodies = {
+            "deep nesting": ("[" * 100_000, "application/json"),
+            "huge integer": ('{"n": ' + "9" * 5000 + "}", "application/json"),
+            "unknown charset": ("{}", "application/json; charset=no-such-codec"),
+            "bad utf-8": (b'{"a": "\xff"}', "application/json"),
+        }
+        for path in ("/api/control", "/api/post_endpoint"):
+            for name, (data, content_type) in bodies.items():
+                resp = await self.client.post(
+                    path, data=data, headers={"Content-Type": content_type}
+                )
+                self.assertEqual(resp.status, 400, f"{path} {name}")
+
+    async def test_unparsable_host_and_origin_rejected(self):
+        body = {
+            "command": "connect",
+            "session_id": "s22",
+            "endpoint": "autopush-common",
+            "location": "us-central1",
+        }
+        # urlsplit raises on an unclosed IPv6 bracket; that used to be a 500.
+        for headers, status in (({"Host": "["}, 400), ({"Origin": "http://["}, 403)):
+            resp = await self.client.post("/api/control", json=body, headers=headers)
+            self.assertEqual(resp.status, status, headers)
+            resp = await self.client.get("/ws?session_id=s22", headers=headers)
+            self.assertEqual(resp.status, status, headers)
+        self.assertIsNone(await main.SESSION_MANAGER.search_item("s22"))
+
     async def test_fr_endpoint_reports_unavailable_simulator(self):
         await self.connect_session("s4")
         resp = await self.client.post(
