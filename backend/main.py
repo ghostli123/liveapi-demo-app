@@ -698,63 +698,72 @@ async def create_app():
 async def main_async():
     logging.set_verbosity(logging.DEBUG if DEBUG.value else logging.INFO)
     proxy_proc = None
-    if os.path.exists(COMMON_BAG_PROXY_PAR):
-        logging.info(
-            "Starting local Common BAG Stubby gateway (%s) on port %d...",
-            COMMON_BAG_PROXY_PAR,
-            COMMON_BAG_WS_PORT.value,
-        )
-        proxy_proc = subprocess.Popen(
-            [
-                COMMON_BAG_PROXY_PAR,
-                f"--port={COMMON_BAG_WS_PORT.value}",
-            ]
-        )
-
-    app = await create_app()
-    port = int(os.environ.get("PORT", 8080))
-
-    runner = web.AppRunner(app, shutdown_timeout=SHUTDOWN_TIMEOUT_S)
-    await runner.setup()
-    site = web.TCPSite(runner, None, port)
-    await site.start()
-
-    logging.info(
-        "Serving on port %d; project %s; allowed upstream hosts: %s",
-        port,
-        project_id(),
-        ", ".join(ALLOWED_HOST_SUFFIXES.value),
-    )
-    # Fetch a token now so the first session doesn't wait for it (seconds when
-    # it comes from the gcloud fallback). Failures are retried per session.
-    prefetch = asyncio.create_task(asyncio.to_thread(get_credentials.get_access_token))
-    prefetch.add_done_callback(
-        lambda task: (
-            task.cancelled()
-            or task.exception() is None
-            or logging.warning("Token prefetch failed: %s", task.exception())
-        )
-    )
-    stop = asyncio.Event()
-
-    def on_signal():
-        if stop.is_set():
-            # A second Ctrl-C quits without waiting.
-            if proxy_proc is not None and proxy_proc.poll() is None:
-                proxy_proc.terminate()
-            os._exit(1)
-        stop.set()
-
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, on_signal)
+    runner = None
+    # Everything after the gateway starts is inside the try, so a failed start
+    # (e.g. the port is in use) doesn't leave the gateway running.
     try:
+        if os.path.exists(COMMON_BAG_PROXY_PAR):
+            logging.info(
+                "Starting local Common BAG Stubby gateway (%s) on port %d...",
+                COMMON_BAG_PROXY_PAR,
+                COMMON_BAG_WS_PORT.value,
+            )
+            proxy_proc = subprocess.Popen(
+                [
+                    COMMON_BAG_PROXY_PAR,
+                    f"--port={COMMON_BAG_WS_PORT.value}",
+                ]
+            )
+
+        app = await create_app()
+        port = int(os.environ.get("PORT", 8080))
+
+        runner = web.AppRunner(app, shutdown_timeout=SHUTDOWN_TIMEOUT_S)
+        await runner.setup()
+        site = web.TCPSite(runner, None, port)
+        await site.start()
+
+        logging.info(
+            "Serving on port %d; project %s; allowed upstream hosts: %s",
+            port,
+            project_id(),
+            ", ".join(ALLOWED_HOST_SUFFIXES.value),
+        )
+        # Fetch a token now so the first session doesn't wait for it (seconds
+        # when it comes from the gcloud fallback). Failures are retried per
+        # session.
+        prefetch = asyncio.create_task(
+            asyncio.to_thread(get_credentials.get_access_token)
+        )
+        prefetch.add_done_callback(
+            lambda task: (
+                task.cancelled()
+                or task.exception() is None
+                or logging.warning("Token prefetch failed: %s", task.exception())
+            )
+        )
+        stop = asyncio.Event()
+
+        def on_signal():
+            if stop.is_set():
+                # A second Ctrl-C quits without waiting.
+                if proxy_proc is not None and proxy_proc.poll() is None:
+                    proxy_proc.terminate()
+                os._exit(1)
+            stop.set()
+
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, on_signal)
         await stop.wait()
         logging.info("Shutting down...")
     finally:
-        await runner.cleanup()
-        if proxy_proc is not None and proxy_proc.poll() is None:
-            proxy_proc.terminate()
+        try:
+            if runner is not None:
+                await runner.cleanup()
+        finally:
+            if proxy_proc is not None and proxy_proc.poll() is None:
+                proxy_proc.terminate()
 
 
 if __name__ == "__main__":
