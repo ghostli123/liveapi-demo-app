@@ -29,6 +29,8 @@ const AppState = {
     audioChunks: [],
     isRecording: false,
     userTurnActive: false, // Between "Start speaking" and "Done speaking"
+    cancelRecording: null, // Stops the voice recording in progress, if any
+    turnStarting: false, // "Start speaking" is waiting for the microphone
     recordingStartTime: null,
 };
 
@@ -523,6 +525,11 @@ function handleReceiveResponse(messageResponse) {
             break;
         }
         case "GENERATION_STARTED":
+            // Over WebRTC without output transcripts, this is the only sign
+            // of the response the client sees (audio arrives over RTP).
+            if (isWebRtcTransport() && !AppState.geminiLiveApi.enableOutputTranscript) {
+                markModelResponse("generation start");
+            }
             closeTranscriptLine("input");
             setModelSpeaking(true);
             break;
@@ -551,7 +558,8 @@ function handleReceiveResponse(messageResponse) {
             markModelResponse();
             closeTranscriptLine("input");
             setModelSpeaking(true);
-            appendTranscript("output", messageResponse.data);
+            // Model text is exact, unlike transcripts; leave its spacing alone.
+            appendTranscript("output", messageResponse.data, { fixSpacing: false });
             break;
         case "RESUMPTION": {
             console.log("Resumption handle received: ", messageResponse.data);
@@ -575,11 +583,7 @@ function handleReceiveResponse(messageResponse) {
             }
             break;
         case "INPUT_TRANSCRIPTION":
-            // Transcripts trail the speech they describe; ones that arrive
-            // after the model starts answering don't mark the turn's end.
-            if (messageResponse.data && AppUI.getElement("speaking").hidden) {
-                markUserTurnEnd("speech");
-            }
+            if (messageResponse.data) markUserTurnEnd("speech");
             appendTranscript("input", messageResponse.data);
             if (messageResponse.finished) closeTranscriptLine("input");
             break;
@@ -593,11 +597,13 @@ function handleReceiveResponse(messageResponse) {
         case "END_OF_TURN":
             closeTranscriptLine("output");
             setModelSpeaking(false);
+            resetLatencyTurn();
             break;
         case "INTERRUPT":
             if (AppState.liveAudioOutputManager) {
                 AppState.liveAudioOutputManager.clear();
             }
+            resetLatencyTurn();
             closeTranscriptLine("output");
             setModelSpeaking(false);
             newSystemMessage("Interrupted.");
@@ -624,19 +630,36 @@ function handleReceiveResponse(messageResponse) {
 // --- Response latency ---
 // Time from the end of the user's turn to the model's first audio or text.
 // For speech, the end is approximated by the last input transcript.
-const LatencyState = { turnEndedAt: null, source: "" };
+const LatencyState = { turnEndedAt: null, source: "", responding: false };
 
-function markUserTurnEnd(source) {
+/**
+ * Records (or moves) the end of the user's turn. Input transcripts trail the
+ * speech, so ones that arrive once the model is answering are ignored.
+ */
+function markUserTurnEnd(source, { force = false } = {}) {
+    if (LatencyState.responding && !force) return;
+    if (force) LatencyState.responding = false;
     LatencyState.turnEndedAt = performance.now();
     LatencyState.source = source;
 }
 
-function markModelResponse() {
+/** The model's first response in a turn; `what` names it if not audio/text. */
+function markModelResponse(what = "") {
+    LatencyState.responding = true;
     if (LatencyState.turnEndedAt === null) return;
     const ms = Math.round(performance.now() - LatencyState.turnEndedAt);
     LatencyState.turnEndedAt = null;
-    const after = LatencyState.source === "text" ? "after text" : "after last transcript";
-    AppUI.setText("response-latency", `${ms.toLocaleString()} ms ${after}`);
+    const after = {
+        text: "after text",
+        speech: "after last transcript",
+        "end of turn": "after Done speaking",
+    }[LatencyState.source];
+    AppUI.setText("response-latency", `${ms.toLocaleString()} ms ${after}${what ? ` (to ${what})` : ""}`);
+}
+
+function resetLatencyTurn() {
+    LatencyState.turnEndedAt = null;
+    LatencyState.responding = false;
 }
 
 function showUsage(usage) {
@@ -652,6 +675,8 @@ async function handleSessionResumptionReconnect() {
     setAppStatus("connecting");
     closeTranscriptLine("input");
     closeTranscriptLine("output");
+    setUserTurnActive(false); // The new session never saw activity_start.
+    resetLatencyTurn();
     if (api.transportMode !== "webrtc" && AppState.liveVideoOutputManager) {
         // The new connection streams a new MP4, which needs a fresh MediaSource.
         AppState.liveVideoOutputManager.initMediaSource();
@@ -664,19 +689,22 @@ async function handleSessionResumptionReconnect() {
     }
 }
 
-async function simulateFunctionResponse(funcCall) {
+async function simulateFunctionResponse(funcCall, sessionId) {
     try {
         return {
             result: await AppState.geminiLiveApi.sendPostRequest(AppState.geminiLiveApi.frUrl, {
                 objective: "fr_generate",
-                session_id: AppState.geminiLiveApi.sessionId,
+                session_id: sessionId,
                 functionName: funcCall.name,
                 functionArgs: funcCall.args,
             }),
         };
     } catch (error) {
         console.error(`Simulating ${funcCall.name} failed:`, error);
-        newErrorMessage(`Function ${funcCall.name} failed: ${error.message}`);
+        // After a reconnect the old session is gone; that isn't the function's fault.
+        if (AppState.geminiLiveApi.sessionId === sessionId) {
+            newErrorMessage(`Function ${funcCall.name} failed: ${error.message}`);
+        }
         // Answer anyway: with BLOCKING tools the model waits for a response.
         return { error: error.message };
     }
@@ -684,7 +712,9 @@ async function simulateFunctionResponse(funcCall) {
 
 async function handleFunctionCallRequest(functionCalls) {
     console.log("Function call requested: ", functionCalls);
-    const webSocket = AppState.geminiLiveApi.webSocket;
+    const api = AppState.geminiLiveApi;
+    const webSocket = api.webSocket;
+    const sessionId = api.sessionId;
     for (const funcCall of functionCalls) {
         newSystemMessage(`Function call: ${funcCall.name}(${JSON.stringify(funcCall.args || {})})`);
     }
@@ -693,7 +723,8 @@ async function handleFunctionCallRequest(functionCalls) {
     // Sequential, since the simulator is one chat session per connection.
     const functionResponses = [];
     for (const funcCall of functionCalls) {
-        const response = await simulateFunctionResponse(funcCall);
+        if (api.webSocket !== webSocket) break;
+        const response = await simulateFunctionResponse(funcCall, sessionId);
         response.scheduling = schedulingVal;
         functionResponses.push({ id: funcCall.id, name: funcCall.name, response });
     }
@@ -701,7 +732,7 @@ async function handleFunctionCallRequest(functionCalls) {
         // The connection that made these calls has closed or been replaced;
         // the new one doesn't know their IDs.
         console.warn("Dropping responses to calls from a previous connection.");
-        if (AppState.geminiLiveApi.webSocket) {
+        if (AppUI.getElement("disconnected").hidden) {
             newSystemMessage(
                 "The connection was replaced while function calls were running, so their " +
                 "results weren't sent. Ask again if the model is waiting for them."
@@ -760,8 +791,12 @@ function newErrorMessage(message) {
     return addMessageToChat(message, "error");
 }
 
-/** Streams transcript text into one chat line per utterance. */
-function appendTranscript(stream, text) {
+/**
+ * Streams transcript text into one chat line per utterance.
+ * @param {{fixSpacing?: boolean}} [options] - fixSpacing: add the space that
+ *     transcript fragments sometimes omit after a sentence.
+ */
+function appendTranscript(stream, text, { fixSpacing = true } = {}) {
     if (!text) return;
     let line = ChatState.transcriptLines[stream];
     if (!line || !line.isConnected) {
@@ -772,7 +807,7 @@ function appendTranscript(stream, text) {
     const textChat = AppUI.getElement("text-chat");
     const atBottom = textChat.scrollHeight - textChat.scrollTop - textChat.clientHeight < 24;
     // Fragments don't always carry the space after a sentence ("dog.She").
-    if (/[.!?,;:]$/.test(line.textContent) && /^[^\s.!?,;:]/.test(text)) {
+    if (fixSpacing && /[.!?]$/.test(line.textContent) && /^\p{L}/u.test(text)) {
         text = " " + text;
     }
     line.textContent += text;
@@ -802,7 +837,7 @@ function newUserMessage() {
     closeTranscriptLine("output");
     addMessageToChat("You: " + val, "user");
     api.sendTextMessage(val);
-    markUserTurnEnd("text");
+    markUserTurnEnd("text", { force: true });
 
     textMessage.value = "";
 }
@@ -875,6 +910,7 @@ function stopAudioInput() {
 }
 
 function micBtnClick() {
+    endUserTurn(); // Turning the mic off mid-turn ends the turn.
     stopAudioInput();
     showMicState(false);
 }
@@ -891,15 +927,34 @@ function setUserTurnActive(active) {
     AppUI.setText("turnBtn", active ? "Done speaking" : "Start speaking");
 }
 
-function turnBtnClick() {
-    if (!AppState.userTurnActive) {
-        if (!isMicOn()) micOffBtnClick();
+async function turnBtnClick() {
+    if (AppState.userTurnActive) {
+        endUserTurn();
+        return;
+    }
+    if (AppState.turnStarting) return; // Already waiting for the microphone.
+    AppState.turnStarting = true;
+    try {
+        if (!isMicOn()) {
+            showMicState(true);
+            await startAudioInput();
+            if (!isMicOn()) return; // The microphone failed to start.
+        }
         AppState.geminiLiveApi.sendVoiceActivityMessage(true);
         setUserTurnActive(true);
-    } else {
-        AppState.geminiLiveApi.sendVoiceActivityMessage(false);
-        setUserTurnActive(false);
+    } finally {
+        AppState.turnStarting = false;
     }
+}
+
+function endUserTurn() {
+    if (!AppState.userTurnActive) return;
+    // Over WebSocket, audio is sent every audioInterval ms; send what is
+    // buffered first, or the end of the utterance arrives after activity_end.
+    if (!isWebRtcTransport()) AppState.liveAudioInputManager.recordChunk();
+    AppState.geminiLiveApi.sendVoiceActivityMessage(false);
+    markUserTurnEnd("end of turn");
+    setUserTurnActive(false);
 }
 
 // --- Video & Screen Capturing ---
@@ -1154,7 +1209,7 @@ function connectBtnClick() {
     AppUI.setText("usage-tokens", "--");
     AppUI.setText("response-latency", "--");
     AppUI.setText("server-session-id", "--");
-    LatencyState.turnEndedAt = null;
+    resetLatencyTurn();
 
     handleModelChange();
 
@@ -1261,6 +1316,9 @@ function openModal() {
 function closeModal() {
     const modal = AppUI.getElement("brandedVoiceModal");
     if (modal) modal.style.display = "none";
+    // Closing the dialog abandons a recording in progress.
+    if (AppState.cancelRecording) AppState.cancelRecording();
+    AppState.isRecording = false;
 }
 
 async function handleRecordClick() {
@@ -1292,22 +1350,34 @@ async function handleRecordClick() {
 
         AppState.isRecording = false;
     } else {
+        let stream = null;
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            const mimeType = MediaRecorder.isTypeSupported("audio/wav")
-                ? "audio/wav"
-                : "audio/webm";
-            AppState.mediaRecorder = new MediaRecorder(stream, { mimeType });
+            stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            // Let the browser choose the format (Safari records audio/mp4,
+            // not WAV or WebM); toVoiceSample() decodes whatever it is.
+            const recorder = new MediaRecorder(stream);
+            AppState.mediaRecorder = recorder;
+            AppState.audioChunks = [];
+            let cancelled = false;
+            AppState.cancelRecording = () => {
+                cancelled = true;
+                recorder.stop();
+            };
 
-            AppState.mediaRecorder.ondataavailable = (event) => {
+            recorder.ondataavailable = (event) => {
                 AppState.audioChunks.push(event.data);
             };
 
-            AppState.mediaRecorder.onstop = async () => {
+            recorder.onstop = async () => {
                 // Release the microphone; otherwise the browser keeps showing
                 // it as in use.
                 stream.getTracks().forEach((track) => track.stop());
-                const audioBlob = new Blob(AppState.audioChunks, { type: mimeType });
+                AppState.cancelRecording = null;
+                if (cancelled) {
+                    AppState.audioChunks = [];
+                    return;
+                }
+                const audioBlob = new Blob(AppState.audioChunks, { type: recorder.mimeType });
                 AppState.audioChunks = [];
                 try {
                     const { base64 } = await toVoiceSample(await audioBlob.arrayBuffer());
@@ -1324,15 +1394,20 @@ async function handleRecordClick() {
                 }
             };
 
-            AppState.mediaRecorder.start();
+            recorder.start();
             AppState.recordingStartTime = new Date();
             AppState.isRecording = true;
 
             AppUI.setButtonWithIcon("recordButton", "stop", "Stop Recording");
             AppUI.setText("recordStatus", "Recording... (Please speak for at least 10 seconds)");
         } catch (error) {
-            console.error("Error accessing microphone for reference voice recording:", error);
-            AppUI.showModal("Could not access microphone. Please check your browser permissions.");
+            console.error("Could not start the reference voice recording:", error);
+            if (stream) stream.getTracks().forEach((track) => track.stop());
+            AppUI.showModal(
+                error.name === "NotAllowedError"
+                    ? "Could not access the microphone. Please check your browser permissions."
+                    : `Could not start recording: ${error.message}`
+            );
         }
     }
 }

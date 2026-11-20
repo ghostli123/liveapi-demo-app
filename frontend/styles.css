@@ -653,6 +653,26 @@ video {
   .media-controls {
     flex-wrap: wrap;
   }
+
+  #video-preview-container > div {
+    min-width: 0;
+  }
+
+  /* Anchored to the icon it would run off the right edge of a phone, so
+     anchor it to the status row and span the content width. */
+  #model-state {
+    position: relative;
+  }
+
+  .metrics-container {
+    position: static;
+  }
+
+  .metrics-panel {
+    left: 0;
+    right: 0;
+    min-width: 0;
+  }
 }
 
 /* Message over the input preview while nothing is captured. */
@@ -664,6 +684,11 @@ video {
 /* As a flex item the video was blockified; keep it a block in the wrapper. */
 .preview-frame > video {
   display: block;
+}
+
+/* Without avatar mode the preview fills its container. */
+#video-preview-container:not(.avatar-mode) .preview-frame {
+  height: 100%;
 }
 
 .preview-placeholder {

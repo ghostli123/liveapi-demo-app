@@ -48,6 +48,13 @@ async function connect(page, { transport, modality = "VIDEO", model = MODEL, bef
         [ENVIRONMENT, model, transport, modality]
     );
     if (before) await page.evaluate(before);
+    if (model === "no-such-model" || before?.includes("no-such-model")) {
+        await page.waitForFunction(() => {
+            const select = document.getElementById("liveApiModel");
+            select.value = "no-such-model";
+            return select.value === "no-such-model";
+        });
+    }
     await page.click("#connectBtn");
 }
 
@@ -144,8 +151,12 @@ const scenarios = {
 
     async "upstream errors are shown with their reason"(browser) {
         const page = await newPage(browser);
-        await connect(page, { transport: "websocket", model: MODEL });
-        await page.evaluate(() => AppState.geminiLiveApi.setModel("no-such-model"));
+        await connect(page, {
+            transport: "websocket",
+            before: `const option = document.createElement("md-select-option");
+                     option.value = "no-such-model";
+                     document.getElementById("liveApiModel").appendChild(option);`,
+        });
         await page.waitForFunction(() => document.getElementById("dialog").open, null, { timeout: 20000 });
         const message = await dialog(page);
         check(/code 1008/.test(message) && /no-such-model/.test(message), `dialog: ${message}`);

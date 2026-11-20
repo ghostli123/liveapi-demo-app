@@ -278,6 +278,25 @@ test("1001 before setup completed is an error, not a resume", () => {
     assert.equal(api.errors.length, 1);
 });
 
+test("Disconnect during WebRTC ICE gathering neither sends setup nor reports an error", async () => {
+    const api = connectedApi();
+    api.transportMode = "webrtc";
+    let finishGathering;
+    api.webRtcManager = {
+        initiateSession: () => new Promise((resolve) => (finishGathering = resolve)),
+        close() {},
+    };
+    const webSocket = api.webSocket;
+    webSocket.close = () => {};
+    const opening = webSocket.onopen();
+    api.disconnect();
+    finishGathering("v=0");
+    await opening;
+    assert.equal(webSocket.sent.length, 0);
+    assert.equal(api.errors.length, 0);
+    assert.equal(webSocket.onopen, null);
+});
+
 test("describeClose explains how the server ended the session", () => {
     assert.equal(
         GeminiLiveAPI.describeClose({ code: 1008, reason: "Quota exceeded" }),
