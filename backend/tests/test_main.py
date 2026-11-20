@@ -528,6 +528,38 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 status, body = await self.connect_session("s27")
                 self.assertEqual(status, 200, body)
 
+    async def test_slot_frees_when_browser_closes(self):
+        # The upstream never acknowledges the close, so the old session spends
+        # UPSTREAM_CLOSE_TIMEOUT_S closing; a resume's new session ID must not
+        # wait for that at the limit.
+        async with UnresponsiveUpstream() as upstream:
+            with (
+                flagsaver.flagsaver(
+                    common_bag_ws_port=upstream.port, max_sessions=1, ws_heartbeat_s=0
+                ),
+                mock.patch.object(websocket_handler, "UPSTREAM_CLOSE_TIMEOUT_S", 1.5),
+            ):
+                status, body = await self.connect_session("s28")
+                self.assertEqual(status, 200, body)
+                ws = await self.client.ws_connect("/ws?session_id=s28")
+                record = await main.SESSION_MANAGER.search_item("s28")
+                assert record is not None and record.websocket_handler is not None
+                handler = record.websocket_handler
+                async with asyncio.timeout(5):
+                    while handler.server_websocket is None:
+                        await asyncio.sleep(0.02)
+
+                await ws.close()
+                async with asyncio.timeout(1):
+                    status, body = await self.connect_session("s29")
+                self.assertEqual(status, 200, body)
+                # The old session still closes upstream and ends its record.
+                self.assertIsNotNone(handler.server_websocket)
+                async with asyncio.timeout(5):
+                    while handler.connection_handler is not None:
+                        await asyncio.sleep(0.02)
+                self.assertEqual(handler.close_code, 1006)
+
     async def test_concurrent_websockets_for_one_session(self):
         # The /ws handler attached itself to the record only after
         # ws.prepare, so two requests could both pass the 409 check.
@@ -602,8 +634,22 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def wait_for_session_end(self, session_id, timeout=5):
+        """Waits until session_id's record is gone and no proxy is running.
+
+        A record is released when the browser closes, before its proxy has
+        closed upstream.
+        """
+
+        def proxy_running():
+            return any(
+                getattr(t.get_coro(), "__qualname__", "")
+                == "WebsocketHandler.create_proxy"
+                for t in asyncio.all_tasks()
+                if not t.done()
+            )
+
         async with asyncio.timeout(timeout):
-            while await main.SESSION_MANAGER.search_item(session_id):
+            while await main.SESSION_MANAGER.search_item(session_id) or proxy_running():
                 await asyncio.sleep(0.02)
 
     async def test_quiet_session_survives_many_heartbeats(self):
@@ -821,6 +867,21 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await manager.add_unless_connected("a", a2, max_sessions=2))
         await manager.delete_item("b", b)
         self.assertTrue(await manager.add_unless_connected("c", c, max_sessions=2))
+        # A released record frees its slot without being ended.
+        handler = mock.Mock(spec=websocket_handler.WebsocketHandler)
+        self.assertTrue(await manager.claim_websocket("c", c, handler))
+        self.assertTrue(await manager.release("c", c))
+        self.assertFalse(await manager.release("c", c))
+        handler.end_websocket.assert_not_called()
+        b2 = session_management.SessionBaseModel("b", "host")
+        self.assertTrue(await manager.add_unless_connected("b", b2, max_sessions=2))
+        # Deleting it later still ends it, and leaves a newer "c" alone.
+        c2 = session_management.SessionBaseModel("c", "host")
+        await manager.delete_item("b", b2)
+        self.assertTrue(await manager.add_unless_connected("c", c2, max_sessions=2))
+        await manager.delete_item("c", c)
+        handler.end_websocket.assert_awaited_once()
+        self.assertIs(await manager.search_item("c"), c2)
         # 0 means no limit.
         d = session_management.SessionBaseModel("d", "host")
         self.assertTrue(await manager.add_unless_connected("d", d))

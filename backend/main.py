@@ -125,7 +125,8 @@ MAX_SESSIONS = flags.DEFINE_integer(
     "max_sessions",
     0,
     "Most sessions the server holds at once, counting ones whose WebSocket "
-    "hasn't opened yet. Further /api/control requests get 503 until one ends. "
+    "hasn't opened yet. Further /api/control requests get 503 until a browser "
+    "disconnects (its upstream connection may take up to 10 s more to close). "
     "Bounds the upstream connections and memory one instance can be made to "
     "use. 0 means no limit.",
     lower_bound=0,
@@ -258,6 +259,11 @@ async def aiohttp_websocket_handler(request: web.Request) -> web.StreamResponse:
         AiohttpToWebsocketsAdapter(ws, request_path=request.path_qs),
         debug_mode=DEBUG.value,
         keepalive_s=heartbeat_s,
+        # Frees the slot under --max_sessions without waiting for the upstream
+        # close, so a resume's new session isn't refused meanwhile.
+        on_client_closed=functools.partial(
+            SESSION_MANAGER.release, session_id, session_handler
+        ),
     )
     # Claimed before the first await (ws.prepare), so a second /ws for this
     # session gets 409 instead of a second upstream connection.
