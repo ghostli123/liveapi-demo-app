@@ -3,6 +3,7 @@
 import asyncio
 import json
 import ssl
+import time
 
 import certifi
 import websockets
@@ -61,6 +62,10 @@ class WebsocketHandler:
         # How the upstream connection ended, for relaying to the browser.
         self.close_code: int | None = None
         self.close_reason: str = ""
+        # Messages and characters forwarded per direction, for the summary
+        # logged when the session ends.
+        self.traffic = {"c->s": [0, 0], "s->c": [0, 0]}
+        self.started_at: float | None = None
         logging.info("Websocket handler initialized for session: %s", self.session_id)
 
     async def proxy_task(
@@ -98,9 +103,8 @@ class WebsocketHandler:
                 )
             try:
                 await target_websocket.send(message)
-            except (
-                Exception
-            ) as e:  # The target closed; aiohttp and websockets raise different types.
+            # The target closed; aiohttp and websockets raise different types.
+            except Exception as e:
                 logging.info(
                     "%s: target closed for session %s (%s)",
                     service_name,
@@ -108,6 +112,9 @@ class WebsocketHandler:
                     e,
                 )
                 return
+            counts = self.traffic[service_name]
+            counts[0] += 1
+            counts[1] += len(message)
 
     def _connect_upstream(self, token: str | None):
         if token is None:
@@ -147,6 +154,7 @@ class WebsocketHandler:
         # close code 1007, and GoAway reconnects fetch a new token anyway.
         async with connection as server_websocket:
             self.server_websocket = server_websocket
+            self.started_at = time.monotonic()
             client_to_server = asyncio.create_task(
                 self.proxy_task(self.client_websocket, server_websocket, "c->s")
             )
@@ -167,11 +175,21 @@ class WebsocketHandler:
         self.server_websocket = None
         self.close_code = server_websocket.close_code
         self.close_reason = server_websocket.close_reason or ""
+        (up_messages, up_chars), (down_messages, down_chars) = (
+            self.traffic["c->s"],
+            self.traffic["s->c"],
+        )
         logging.info(
-            "Proxy closed for session %s (upstream close code %s %s)",
+            "Session %s ended after %.1f s (upstream close %s %s): "
+            "%d messages / %.1f MB to the browser, %d messages / %.1f MB upstream",
             self.session_id,
+            time.monotonic() - self.started_at,
             self.close_code,
             self.close_reason,
+            down_messages,
+            down_chars / 1e6,
+            up_messages,
+            up_chars / 1e6,
         )
 
     def client_close_frame(self) -> tuple[int, str]:

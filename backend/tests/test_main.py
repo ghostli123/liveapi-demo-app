@@ -148,6 +148,23 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 await ws.close()
 
         self.assertEqual(upstream.received, ['{"setup": {}}', "close-please"])
+
+    async def test_session_summary_is_logged(self):
+        async with FakeUpstream() as upstream:
+            with flagsaver.flagsaver(common_bag_ws_port=upstream.port):
+                await self.connect_session("s15")
+                with self.assertLogs("absl", level="INFO") as logs:
+                    ws = await self.client.ws_connect("/ws?session_id=s15")
+                    await ws.send_str("ping")
+                    await asyncio.wait_for(ws.receive(), 5)
+                    await ws.send_str("close-please")
+                    await asyncio.wait_for(ws.receive(), 5)
+                    await ws.close()
+                    await asyncio.sleep(0.1)
+        summary = [line for line in logs.output if "Session s15 ended after" in line]
+        self.assertEqual(len(summary), 1, logs.output)
+        self.assertIn("upstream close 1008 Quota exceeded", summary[0])
+        self.assertIn("1 messages / 0.0 MB to the browser, 2 messages", summary[0])
         self.assertIsNone(await main.SESSION_MANAGER.search_item("s1"))
 
     async def test_upstream_unreachable_closes_with_reason(self):
