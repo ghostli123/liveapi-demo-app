@@ -122,7 +122,17 @@ npm install
 npm run e2e -- --server=http://localhost:8080 --speech=sample.wav
 ```
 
-GitHub Actions runs the unit tests, lint, and a container build on every push; the end-to-end checks need credentials, so they run locally.
+`scripts/mock_live_api.py` stands in for the Live API, so sessions run without credentials or quota. The backend reaches the `autopush-common` environment over plain `ws://127.0.0.1:--common_bag_ws_port`, so point that port at the mock and select that environment:
+
+```sh
+python scripts/mock_live_api.py --port=8765 &
+python backend/main.py --common_bag_ws_port=8765
+npm run e2e -- --server=http://localhost:8080 --environment=autopush-common
+```
+
+The mock answers each text turn with a short tone, a transcript that repeats the conversation so far, and a resumption handle; calls a declared function when a turn names it; rejects models named `no-such-*` with close code 1008; and takes `/goaway [seconds]` and `/close <code> [reason]` as turns. It sends no avatar video and no WebRTC answer (WebRTC falls back to WebSocket media), so those two e2e checks fail against it. Function responses are still simulated by Gemini through the backend, which needs credentials. `backend/tests/test_mock_live_api.py` runs sessions through the proxy to the mock.
+
+GitHub Actions runs the unit tests, lint, and a container build on every push; the browser end-to-end checks run locally.
 
 ### Files
 

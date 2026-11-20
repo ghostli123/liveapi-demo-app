@@ -7,6 +7,8 @@
 //       [--chrome=/usr/bin/google-chrome] [--speech=sample.wav]
 //
 // --speech feeds a WAV file to the fake microphone to test voice turns.
+// --environment=autopush-common reaches scripts/mock_live_api.py when the
+// server runs with --common_bag_ws_port set to the mock's port.
 const { chromium } = require("playwright-core");
 const path = require("path");
 
