@@ -169,10 +169,9 @@ class GeminiLiveAPI {
         this.toolBehavior = "BLOCKING";
 
         // Avatar Customization Settings
-        // The default project (live-api-webrtc-testing) is not on the
-        // EnableCustomAvatar allowlist, so use the stock "Piper" avatar unless
-        // this is turned on or an image is set via setCustomizedAvatar().
-        this.useCustomizedAvatar = false;
+        // Without an image (setCustomizedAvatar()) sessions use the stock
+        // "Piper" avatar. Custom images need a project on the
+        // EnableCustomAvatar allowlist, which the default project isn't.
         this.customizedAvatarData = "";
         this.customizedAvatarMimeType = "image/png";
 
@@ -220,42 +219,6 @@ class GeminiLiveAPI {
         // Called after falling back from WebRTC to WebSocket media.
         this.onTransportFallback = () => {};
         console.log("Created Gemini Live API object: ", this);
-    }
-
-    /**
-     * Loads a custom avatar image and extracts its base64 data.
-     * @param {string} [url] - URL to fetch avatar image from.
-     * @returns {Promise<void>}
-     */
-    async loadCustomAvatar(url = "/frontend/assets/avatar_image.png?v=" + Date.now()) {
-        if (this.customizedAvatarData) {
-            console.log("Custom avatar already loaded, skipping fetch.");
-            return;
-        }
-        try {
-            console.log("Loading custom avatar from:", url);
-            const response = await fetch(url);
-            if (!response.ok) {
-                throw new Error(`Failed to load avatar image: ${response.statusText}`);
-            }
-            const blob = await response.blob();
-            this.customizedAvatarMimeType = blob.type;
-            
-            return new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onloadend = () => {
-                    const base64data = reader.result.split(",")[1];
-                    this.customizedAvatarData = base64data;
-                    console.log("Custom avatar image loaded successfully.");
-                    resolve();
-                };
-                reader.onerror = reject;
-                reader.readAsDataURL(blob);
-            });
-        } catch (error) {
-            console.error("Error loading custom avatar:", error);
-            throw new Error(`Could not load the custom avatar image: ${error.message}`);
-        }
     }
 
     /**
@@ -466,11 +429,6 @@ class GeminiLiveAPI {
         const isCurrent = () => attempt === this.connectAttempt;
         const sessionId = this.sessionId;
         try {
-            if (this.useCustomizedAvatar) {
-                console.log("prepare(): Loading custom avatar...");
-                await this.loadCustomAvatar();
-            }
-
             console.log("prepare(): Initializing backend service...");
             const projectId = await this.initBackendService(sessionId);
             if (!isCurrent()) return;

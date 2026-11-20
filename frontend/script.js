@@ -271,6 +271,11 @@ function initDOMEventListeners() {
         fcFileInput.addEventListener("change", handleFcFileInputChange);
     }
 
+    const avatarFileInput = AppUI.getElement("avatarFileInput");
+    if (avatarFileInput) {
+        avatarFileInput.addEventListener("change", handleAvatarFileInputChange);
+    }
+
     const createVoiceBtn = AppUI.getElement("createVoiceBtn");
     if (createVoiceBtn) {
         createVoiceBtn.addEventListener("click", openModal);
@@ -468,6 +473,40 @@ function addBrandedVoice(name, base64) {
 function selectBrandedVoice() {
     const dropdown = AppUI.getElement("voice-dropdown");
     AppState.customVoiceBase64 = (dropdown && BrandedVoices.get(dropdown.value)) || "";
+}
+
+// --- Custom avatar image ---
+async function setAvatarImage(blob, name) {
+    AppState.geminiLiveApi.setCustomizedAvatar(await blobToBase64(blob), blob.type || "image/png");
+    AppUI.setText("avatarName", `Avatar: ${name}`);
+    AppUI.setHidden("avatarStockLink", false);
+}
+
+async function handleAvatarFileInputChange(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    event.target.value = ""; // So choosing the same file again fires change.
+    try {
+        await setAvatarImage(file, file.name);
+    } catch (error) {
+        AppUI.showModal(`Could not read "${file.name}": ${error.message}`);
+    }
+}
+
+async function useSampleAvatar() {
+    try {
+        const response = await fetch("/frontend/assets/avatar_image.png");
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        await setAvatarImage(await response.blob(), "sample image");
+    } catch (error) {
+        AppUI.showModal(`Could not load the sample avatar image: ${error.message}`);
+    }
+}
+
+function useStockAvatar() {
+    AppState.geminiLiveApi.setCustomizedAvatar("", "image/png");
+    AppUI.setText("avatarName", "Avatar: Piper (stock)");
+    AppUI.setHidden("avatarStockLink", true);
 }
 
 async function handleAudioFileInputChange(event) {
@@ -1547,6 +1586,8 @@ window.micBtnClick = micBtnClick;
 window.micOffBtnClick = micOffBtnClick;
 window.turnBtnClick = turnBtnClick;
 window.removeFunctionDeclarations = removeFunctionDeclarations;
+window.useSampleAvatar = useSampleAvatar;
+window.useStockAvatar = useStockAvatar;
 window.cameraBtnClick = cameraBtnClick;
 window.cameraOffBtnClick = cameraOffBtnClick;
 window.screenShareBtnClick = screenShareBtnClick;
