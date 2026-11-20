@@ -37,6 +37,10 @@ class SessionBaseModel:
         self.fr_session = None
 
 
+class SessionLimitError(Exception):
+    """Raised when adding a session would exceed the manager's limit."""
+
+
 class SessionManager:
     """
     A thread-safe class to manage session data using an asyncio.Lock.
@@ -55,20 +59,31 @@ class SessionManager:
         self._lock = asyncio.Lock()
 
     async def add_unless_connected(
-        self, session_id: str, data: SessionBaseModel
+        self, session_id: str, data: SessionBaseModel, max_sessions: int = 0
     ) -> bool:
         """Stores data for session_id unless its record has a WebSocket.
 
         A record still waiting for its WebSocket (e.g. from a retried control
         request) is replaced and ended.
 
+        Args:
+            max_sessions: Most records to hold, pending or connected; 0 for no
+                limit. Replacing session_id's own record doesn't count.
+
         Returns:
             False, storing nothing, if the current record has a WebSocket.
+
+        Raises:
+            SessionLimitError: Storing a new record would exceed max_sessions.
         """
         async with self._lock:
             current = self._sessions.get(session_id)
             if current and current.websocket_handler:
                 return False
+            if not current and 0 < max_sessions <= len(self._sessions):
+                raise SessionLimitError(
+                    f"Server is at its session limit ({max_sessions})"
+                )
             self._sessions[session_id] = data
         logging.info("Session %s added", session_id)
         if current:
