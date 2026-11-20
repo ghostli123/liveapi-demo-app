@@ -66,7 +66,7 @@ The backend tries, in order: Application Default Credentials through google-auth
 - **Function calling**: upload a JSON list of function declarations before connecting; `fc_definition.json` is an example. When the model calls a function, the backend asks `gemini-3.1-pro-preview` to simulate a plausible response and sends it back to the model.
 - **Session resumption**: on by default. When the Live API announces it will close the connection (GoAway), or the backend restarts (e.g. a deploy), the app reconnects with the session's latest resumption handle and the conversation continues. Disconnect ends the conversation; the chat log shows its handle, which you can enter under **Advanced Settings** before connecting to resume it.
 - **Saving the avatar video**: with **Save avatar video** checked, the avatar's MP4 stream (WebSocket transport) is downloaded when you disconnect.
-- **Metrics**: hover over 📊 to see transport, bandwidth, frame rate, packet loss, and token usage for the last turn.
+- **Metrics**: hover over 📊 to see transport, bandwidth, frame rate, packet loss, token usage for the last turn, and response latency: the time from sending a message (or, for speech, the last input transcript) to the model's first audio or text.
 
 If the server ends a session, the app shows the close code and the reason the Live API gave, such as a missing model or a permission error.
 

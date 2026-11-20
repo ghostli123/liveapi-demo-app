@@ -360,6 +360,7 @@ function handleReceiveResponse(messageResponse) {
             setModelSpeaking(true);
             break;
         case "AUDIO":
+            markModelResponse();
             setModelSpeaking(true);
             if (isWebRtcTransport()) {
                 break;
@@ -380,6 +381,7 @@ function handleReceiveResponse(messageResponse) {
             }
             break;
         case "TEXT":
+            markModelResponse();
             closeTranscriptLine("input");
             setModelSpeaking(true);
             appendTranscript("output", messageResponse.data);
@@ -406,10 +408,16 @@ function handleReceiveResponse(messageResponse) {
             }
             break;
         case "INPUT_TRANSCRIPTION":
+            // Transcripts trail the speech they describe; ones that arrive
+            // after the model starts answering don't mark the turn's end.
+            if (messageResponse.data && AppUI.getElement("speaking").hidden) {
+                markUserTurnEnd("speech");
+            }
             appendTranscript("input", messageResponse.data);
             if (messageResponse.finished) closeTranscriptLine("input");
             break;
         case "OUTPUT_TRANSCRIPTION":
+            markModelResponse();
             closeTranscriptLine("input");
             setModelSpeaking(true);
             appendTranscript("output", messageResponse.data);
@@ -444,6 +452,24 @@ function handleReceiveResponse(messageResponse) {
             console.warn("Unhandled message type:", messageResponse.type);
             break;
     }
+}
+
+// --- Response latency ---
+// Time from the end of the user's turn to the model's first audio or text.
+// For speech, the end is approximated by the last input transcript.
+const LatencyState = { turnEndedAt: null, source: "" };
+
+function markUserTurnEnd(source) {
+    LatencyState.turnEndedAt = performance.now();
+    LatencyState.source = source;
+}
+
+function markModelResponse() {
+    if (LatencyState.turnEndedAt === null) return;
+    const ms = Math.round(performance.now() - LatencyState.turnEndedAt);
+    LatencyState.turnEndedAt = null;
+    const after = LatencyState.source === "text" ? "after text" : "after last transcript";
+    AppUI.setText("response-latency", `${ms.toLocaleString()} ms ${after}`);
 }
 
 function showUsage(usage) {
@@ -593,6 +619,7 @@ function newUserMessage() {
     closeTranscriptLine("output");
     addMessageToChat("You: " + val, "user");
     api.sendTextMessage(val);
+    markUserTurnEnd("text");
 
     textMessage.value = "";
 }
@@ -914,6 +941,8 @@ function connectBtnClick() {
         avatarVideo.play().catch(() => {}); // No source yet; this only unlocks.
     }
     AppUI.setText("usage-tokens", "--");
+    AppUI.setText("response-latency", "--");
+    LatencyState.turnEndedAt = null;
 
     handleModelChange();
 
