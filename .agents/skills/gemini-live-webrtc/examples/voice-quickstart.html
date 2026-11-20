@@ -1,0 +1,103 @@
+<!doctype html>
+<!-- Minimal Gemini Live API voice client over WebRTC.
+     Serve over http://localhost so the browser allows microphone access. -->
+<meta charset="utf-8">
+<title>Gemini Live API over WebRTC: voice</title>
+<button id="start">Start</button> <button id="stop" disabled>Stop</button>
+<audio id="player" autoplay></audio>
+<pre id="log"></pre>
+<script>
+const PROJECT_ID = "your-project-id";
+const LOCATION = "us";  // "us" or "eu"
+
+// Option A (recommended): a backend proxy that adds the Authorization header,
+// such as ws_proxy.py in this folder.
+const WS_URL = "ws://localhost:8080";
+// Option B: connect directly with a short-lived token minted by your backend.
+// const ACCESS_TOKEN = "ya29...";
+// const WS_URL = `wss://aiplatform.${LOCATION}.rep.googleapis.com/ws/` +
+//   "google.cloud.aiplatform.v1.LlmBidiService/BidiGenerateContent" +
+//   `?access_token=${encodeURIComponent(ACCESS_TOKEN)}`;
+
+let ws = null, pc = null, mic = null;
+const log = (line) => (document.getElementById("log").textContent += line + "\n");
+
+async function start() {
+  document.getElementById("start").disabled = true;
+
+  // 1. Create the peer connection and the offer. Add every transceiver first,
+  // so the microphone permission prompt appears when the user clicks Start.
+  mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true } });
+  const peer = pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+  peer.addTransceiver(mic.getAudioTracks()[0], { direction: "sendonly" });  // Your voice.
+  const modelAudio = peer.addTransceiver("audio", { direction: "recvonly" });  // Model's voice.
+  peer.onconnectionstatechange = () => {
+    log(`[webrtc] ${peer.connectionState}`);
+    if (peer === pc && peer.connectionState === "failed") stop();
+  };
+  await peer.setLocalDescription();
+  if (peer.iceGatheringState !== "complete") {
+    await new Promise((resolve) => {
+      peer.onicegatheringstatechange = () => peer.iceGatheringState === "complete" && resolve();
+      setTimeout(resolve, 2000);
+    });
+  }
+
+  // 2. Send the offer in setup, and apply the answer from setupComplete.
+  const socket = ws = new WebSocket(WS_URL);
+  socket.onopen = () => socket.send(JSON.stringify({
+    setup: {
+      model: `projects/${PROJECT_ID}/locations/${LOCATION}/publishers/google/models/gemini-3.8-live`,
+      generation_config: { response_modalities: ["AUDIO"] },
+      input_audio_transcription: {},
+      output_audio_transcription: {},
+      rtc_setup: { offer_sdp: peer.localDescription.sdp },
+    },
+  }));
+
+  socket.onmessage = async (event) => {
+    if (socket !== ws) return;  // Ignore a socket from a previous session.
+    // Server frames are binary (Blob).
+    const text = typeof event.data === "string" ? event.data : await event.data.text();
+    const msg = JSON.parse(text);
+    if (msg.setupComplete) {
+      log(`[setup] session ${msg.setupComplete.sessionId}`);
+      await peer.setRemoteDescription({ type: "answer", sdp: msg.setupComplete.rtcSetupComplete.answerSdp });
+      const player = document.getElementById("player");
+      player.srcObject = new MediaStream([modelAudio.receiver.track]);
+      await player.play();
+      document.getElementById("stop").disabled = false;
+    }
+    // Everything except media still arrives on the WebSocket. Transcripts
+    // arrive in small chunks; append them to the current speaker's line.
+    const content = msg.serverContent;
+    if (content?.inputTranscription?.text) log(`[you] ${content.inputTranscription.text}`);
+    if (content?.outputTranscription?.text) log(`[model] ${content.outputTranscription.text}`);
+    if (content?.turnComplete) log("[turn complete]");
+  };
+  socket.onclose = (event) => {
+    log(`[closed] ${event.code} ${event.reason}`);
+    if (socket === ws) stop();
+  };
+}
+
+// 3. The WebSocket and the peer connection close together.
+function stop() {
+  const socket = ws;
+  ws = null;
+  socket?.close();
+  pc?.close();
+  pc = null;
+  mic?.getTracks().forEach((track) => track.stop());
+  mic = null;
+  document.getElementById("start").disabled = false;
+  document.getElementById("stop").disabled = true;
+}
+
+// Start from a click so the browser allows audio playback.
+document.getElementById("start").onclick = () => start().catch((err) => {
+  log(`[error] ${err.message}`);
+  stop();
+});
+document.getElementById("stop").onclick = stop;
+</script>
