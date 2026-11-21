@@ -124,7 +124,7 @@ npm run typecheck                         # TypeScript check of the frontend (ts
 
 The frontend files (except the `frontend/material.js` module) are classic scripts sharing one global scope (see `frontend/index.html`), so a class one file uses from another is declared in `/* global */` and `/* exported */` comments at the top of each file; ESLint reports undeclared names.
 
-`npm run typecheck` runs `tsc` over the frontend scripts with no build or emit. Only files that start with `// @ts-check` report errors (so far `frontend/gemini-live-api.js`); add that line and JSDoc types to opt another file in. The check is strict about `null` but lets untyped parameters stay `any`.
+`npm run typecheck` runs `tsc` over the frontend scripts with no build or emit. Only files that start with `// @ts-check` report errors (so far `frontend/gemini-live-api.js` and `frontend/live-media-manager.js`); add that line and JSDoc types to opt another file in. The check is strict about `null` but lets untyped parameters stay `any`.
 
 `scripts/smoke_test.py` runs a real session through a running server, the way the browser does, and reports setup latency, media received, and the transcript:
 
