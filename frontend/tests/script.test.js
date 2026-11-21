@@ -484,6 +484,33 @@ test("an unknown saved response type keeps the page's default selected", async (
     );
 });
 
+test("a malformed old settings cookie is skipped and deleted; restore goes on", async () => {
+    const storage = fakeStorage();
+    const app = loadApp({ localStorage: storage });
+    const writes = [];
+    Object.defineProperty(app.document, "cookie", {
+        get: () => "CookieJar_systemInstructions=%E0%A4%A; CookieJar_location=us-east5",
+        set: (value) => {
+            writes.push(value);
+        },
+    });
+    app.element("location").value = "us-central1";
+    app.element("systemInstructions").value = "Page default";
+    await app.context.restoreSettings();
+
+    assert.deepEqual(
+        writes.map((cookie) => cookie.split("=")[0]),
+        ["CookieJar_systemInstructions", "CookieJar_location"]
+    );
+    assert.ok(writes.every((cookie) => cookie.includes("expires=Thu, 01 Jan 1970")));
+    assert.equal(app.element("systemInstructions").value, "Page default");
+    assert.equal(app.element("location").value, "us-east5");
+    // Change listeners are attached, so later edits are saved.
+    app.element("systemInstructions").value = "Edited";
+    for (const listener of app.element("systemInstructions").listeners.input) listener();
+    assert.equal(JSON.parse(storage.getItem(SETTINGS_KEY)).systemInstructions, "Edited");
+});
+
 /** The "Start speaking" / text input path, with a microphone that starts when the test says. */
 function loadSession() {
     const mic = { starts: [], fails: [] };

@@ -252,7 +252,11 @@ function loadSavedSettings() {
     for (const id of ["systemInstructions", "location"]) {
         const match = document.cookie.match(new RegExp(`(?:^|;\\s*)CookieJar_${id}=([^;]*)`));
         if (match) {
-            if (saved[id] === undefined) saved[id] = decodeURIComponent(match[1]);
+            try {
+                if (saved[id] === undefined) saved[id] = decodeURIComponent(match[1]);
+            } catch {
+                // Not percent-encoded by us (any app on this host can set it); drop it.
+            }
             document.cookie = `CookieJar_${id}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
         }
     }
