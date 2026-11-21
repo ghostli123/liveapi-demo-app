@@ -102,3 +102,90 @@ test("only the newest of two overlapping startMicrophone() calls keeps its strea
     assert.equal(requests[1].track.readyState, "live");
     assert.equal(sent.at(-1), requests[1].track);
 });
+
+// A LiveScreenManager whose getDisplayMedia() calls stay pending until the
+// test resolves them, like a screen picker the user hasn't answered yet.
+function screenManagerWithPendingPicker() {
+    const requests = [];
+    const intervals = new Set();
+    const getDisplayMedia = () =>
+        new Promise((resolve, reject) => {
+            const listeners = [];
+            const track = {
+                readyState: "live",
+                stop() { this.readyState = "ended"; },
+                addEventListener: (type, listener) => listeners.push(listener),
+                end() { this.readyState = "ended"; listeners.forEach((l) => l()); },
+            };
+            const stream = { getTracks: () => [track], getVideoTracks: () => [track] };
+            const cancel = () => reject(Object.assign(new Error("cancelled"), { name: "NotAllowedError" }));
+            requests.push({ track, stream, pick: () => resolve(stream), cancel });
+        });
+    const context = loadScript("live-media-manager.js", ["LiveScreenManager"], {
+        navigator: { mediaDevices: { getDisplayMedia } },
+        setInterval: () => {
+            const id = {};
+            intervals.add(id);
+            return id;
+        },
+        clearInterval: (id) => intervals.delete(id),
+    });
+    const video = { srcObject: null };
+    const canvas = { getContext: () => ({}) };
+    const manager = new context.LiveScreenManager(video, canvas);
+    return { manager, requests, intervals, video };
+}
+
+test("startCapture shares the picked screen and sends frames", async () => {
+    const { manager, requests, intervals, video } = screenManagerWithPendingPicker();
+    const starting = manager.startCapture({ sendFrames: true });
+    requests[0].pick();
+    assert.equal(await starting, true);
+    assert.equal(manager.stream, requests[0].stream);
+    assert.equal(video.srcObject, requests[0].stream);
+    assert.equal(intervals.size, 1);
+});
+
+test("a screen picked after stopCapture() is stopped, not shared", async () => {
+    const { manager, requests, intervals, video } = screenManagerWithPendingPicker();
+    const starting = manager.startCapture({ sendFrames: true });
+    manager.stopCapture(); // Disconnect while the picker is open.
+    requests[0].pick();
+    assert.equal(await starting, false);
+    assert.equal(manager.stream, null);
+    assert.equal(video.srcObject, null);
+    assert.equal(intervals.size, 0);
+    assert.equal(requests[0].track.readyState, "ended");
+});
+
+test("a new pick replaces a running share; cancelling keeps it", async () => {
+    const { manager, requests, intervals } = screenManagerWithPendingPicker();
+    const first = manager.startCapture();
+    requests[0].pick();
+    await first;
+    const cancelled = manager.startCapture();
+    requests[1].cancel();
+    await assert.rejects(cancelled, { name: "NotAllowedError" });
+    assert.equal(manager.stream, requests[0].stream);
+    assert.equal(requests[0].track.readyState, "live");
+    const second = manager.startCapture();
+    assert.equal(requests[0].track.readyState, "live"); // Shared until the pick.
+    requests[2].pick();
+    assert.equal(await second, true);
+    assert.equal(manager.stream, requests[2].stream);
+    assert.equal(requests[0].track.readyState, "ended");
+    assert.equal(intervals.size, 1);
+});
+
+test("ending a share from the browser doesn't drop a pick in progress", async () => {
+    const { manager, requests } = screenManagerWithPendingPicker();
+    const first = manager.startCapture();
+    requests[0].pick();
+    await first;
+    const second = manager.startCapture();
+    requests[0].track.end(); // The browser's "Stop sharing" on the old share.
+    assert.equal(manager.stream, null);
+    requests[1].pick();
+    assert.equal(await second, true);
+    assert.equal(manager.stream, requests[1].stream);
+});
