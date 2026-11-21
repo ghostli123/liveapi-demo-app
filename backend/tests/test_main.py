@@ -622,6 +622,25 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 status, body = await self.connect_session("s27")
                 self.assertEqual(status, 200, body)
 
+    async def test_rejected_connect_skips_simulator_init(self):
+        # Connects at the limit each built a genai chat in a pool thread
+        # before getting 503.
+        with flagsaver.flagsaver(max_sessions=1):
+            status, body = await self.connect_session("s28")
+            self.assertEqual(status, 200, body)
+            init = mock.Mock(side_effect=RuntimeError("no creds"))
+            with mock.patch.object(main, "initialize_gemini_chat_session", init):
+                results = await asyncio.gather(
+                    *(self.connect_session(f"s29-{i}") for i in range(5))
+                )
+                self.assertEqual([status for status, _ in results], [503] * 5)
+                self.assertIn("session limit (1)", results[0][1]["error"])
+                init.assert_not_called()
+                # A retry for the pending session still fits and still inits.
+                status, body = await self.connect_session("s28")
+                self.assertEqual(status, 200, body)
+                init.assert_called_once()
+
     async def test_control_reports_idle_timeout(self):
         # The browser enforces it, so it must learn the server's value.
         for idle_timeout_s in (0, 120):
@@ -1511,6 +1530,18 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         d = session_management.SessionBaseModel("d", "host")
         self.assertTrue(await manager.add_unless_connected("d", d))
         self.assertEqual(len(await manager.all_items()), 3)
+
+    async def test_check_limit(self):
+        manager = session_management.SessionManager()
+        await manager.check_limit("a", 1)
+        a = session_management.SessionBaseModel("a", "host")
+        self.assertTrue(await manager.add_unless_connected("a", a, max_sessions=1))
+        with self.assertRaises(session_management.SessionLimitError):
+            await manager.check_limit("b", 1)
+        # Its own ID fits, and 0 means no limit; nothing is stored.
+        await manager.check_limit("a", 1)
+        await manager.check_limit("b", 0)
+        self.assertIsNone(await manager.search_item("b"))
 
 
 if __name__ == "__main__":

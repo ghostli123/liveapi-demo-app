@@ -470,6 +470,11 @@ async def handle_control_request(request: web.Request):
     session_handler = await SESSION_MANAGER.search_item(session_id)
     if session_handler and session_handler.websocket_handler:
         return _json_error("Already running", 409)
+    # Before the simulator init: a rejected connect shouldn't build a chat.
+    try:
+        await SESSION_MANAGER.check_limit(session_id, MAX_SESSIONS.value)
+    except session_management.SessionLimitError as e:
+        return _session_limit_response(session_id, e)
 
     fr_session, fr_error = None, ""
     try:
@@ -488,12 +493,7 @@ async def handle_control_request(request: web.Request):
             session_id, session_handler, max_sessions=MAX_SESSIONS.value
         )
     except session_management.SessionLimitError as e:
-        logging.warning("Rejected session %s: %s", session_id, e)
-        # The frontend retries 503s, which also covers a resume whose old
-        # session hasn't been removed yet.
-        response = _json_error(f"{e}; try again later", 503)
-        response.headers["Retry-After"] = "1"
-        return response
+        return _session_limit_response(session_id, e)
     if not added:
         return _json_error("Already running", 409)
     session_handler.expiry_task = asyncio.create_task(
@@ -506,6 +506,17 @@ async def handle_control_request(request: web.Request):
             "idle_timeout_s": IDLE_TIMEOUT_S.value,
         }
     )
+
+
+def _session_limit_response(
+    session_id: str, error: session_management.SessionLimitError
+) -> web.Response:
+    logging.warning("Rejected session %s: %s", session_id, error)
+    # The frontend retries 503s, which also covers a resume whose old
+    # session hasn't been removed yet.
+    response = _json_error(f"{error}; try again later", 503)
+    response.headers["Retry-After"] = "1"
+    return response
 
 
 async def _remove_if_never_connected(

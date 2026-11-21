@@ -80,15 +80,25 @@ class SessionManager:
             current = self._sessions.get(session_id)
             if current and current.websocket_handler:
                 return False
-            if not current and 0 < max_sessions <= len(self._sessions):
-                raise SessionLimitError(
-                    f"Server is at its session limit ({max_sessions})"
-                )
+            self._check_limit_locked(session_id, max_sessions)
             self._sessions[session_id] = data
         logging.info("Session %s added", session_id)
         if current:
             await current.del_session()
         return True
+
+    async def check_limit(self, session_id: str, max_sessions: int) -> None:
+        """Raises SessionLimitError if session_id couldn't be added right now.
+
+        A cheap early check, so a request that would be rejected skips costly
+        setup; add_unless_connected checks again atomically.
+        """
+        async with self._lock:
+            self._check_limit_locked(session_id, max_sessions)
+
+    def _check_limit_locked(self, session_id: str, max_sessions: int) -> None:
+        if session_id not in self._sessions and 0 < max_sessions <= len(self._sessions):
+            raise SessionLimitError(f"Server is at its session limit ({max_sessions})")
 
     async def claim_websocket(
         self, session_id: str, record: SessionBaseModel, handler: WebsocketHandler
