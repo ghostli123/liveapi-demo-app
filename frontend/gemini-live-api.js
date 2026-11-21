@@ -1164,8 +1164,11 @@ class GeminiLiveAPI {
             return null;
         }
         const config = {};
-        if (this.resumptionHandle && this.resumptionHandle.trim() !== "") {
-            config.handle = this.resumptionHandle;
+        // A handle pasted into Advanced Settings can carry a trailing newline
+        // or space; send only the handle itself.
+        const handle = typeof this.resumptionHandle === "string" ? this.resumptionHandle.trim() : "";
+        if (handle) {
+            config.handle = handle;
         }
         return config;
     }

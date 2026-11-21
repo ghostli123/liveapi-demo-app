@@ -612,6 +612,22 @@ test("setup message carries the configured fields", async () => {
     assert.equal(setup.generation_config.speech_config.voice_config.prebuilt_voice_config.voice_name, "puck");
 });
 
+test("a pasted resumption handle is sent without surrounding whitespace", async () => {
+    const sentResumption = async (handle) => {
+        const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+        api.webSocket = new FakeWebSocket();
+        api.transportMode = "websocket";
+        api.setBitrates("", "");
+        api.setResumption(true, handle);
+        await api.sendInitialSetupMessages();
+        return plain(api.webSocket.sent[0].setup.session_resumption);
+    };
+    assert.deepEqual(await sentResumption("  abc123\n"), { handle: "abc123" });
+    // Blank means "start a resumable session", not a resume of handle " ".
+    assert.deepEqual(await sentResumption(" \t\n"), {});
+    assert.deepEqual(await sentResumption(""), {});
+});
+
 // A connected session whose server set --idle_timeout_s=idleS.
 async function idleApi(idleS = 120) {
     const api = connectedApi();
