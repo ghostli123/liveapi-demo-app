@@ -64,6 +64,10 @@ function fakeElement(id) {
         addEventListener(type, listener) {
             (this.listeners[type] ||= []).push(listener);
         },
+        attributes: {},
+        setAttribute(name, value) {
+            this.attributes[name] = value;
+        },
         replaceChildren() {},
         appendChild() {},
         focus() {},
@@ -83,8 +87,25 @@ function fakeStorage(items = new Map()) {
 function loadApp(globals = {}, { radios = [] } = {}) {
     const elements = new Map();
     const getElementById = (id) => {
-        if (!elements.has(id)) elements.set(id, fakeElement(id));
+        if (!elements.has(id)) {
+            const element = fakeElement(id);
+            element.focus = () => {
+                document.activeElement = element;
+            };
+            elements.set(id, element);
+        }
         return elements.get(id);
+    };
+    const document = {
+        getElementById,
+        addEventListener() {},
+        querySelector: () => null,
+        querySelectorAll: () => radios,
+        createElement: () => fakeElement(""),
+        createTextNode: () => ({}),
+        cookie: "",
+        /** @type {object | null} */
+        activeElement: null,
     };
     const exportNames = [
         "AppState",
@@ -98,17 +119,11 @@ function loadApp(globals = {}, { radios = [] } = {}) {
         "newUserMessage",
         "turnBtnClick",
         "handleFunctionCallRequest",
+        "initDOMEventListeners",
     ];
     const context = loadScript("script.js", exportNames, {
         window: { location: { protocol: "http:", host: "localhost:1234" }, addEventListener() {} },
-        document: {
-            getElementById,
-            addEventListener() {},
-            querySelectorAll: () => radios,
-            createElement: () => fakeElement(""),
-            createTextNode: () => ({}),
-            cookie: "",
-        },
+        document,
         localStorage: fakeStorage(),
         customElements: { whenDefined: () => Promise.resolve() },
         GeminiLiveAPI: FakeGeminiLiveAPI,
@@ -120,7 +135,7 @@ function loadApp(globals = {}, { radios = [] } = {}) {
         LiveScreenManager: class extends FakeFrameSource {},
         ...globals,
     });
-    return { context, element: getElementById };
+    return { context, element: getElementById, document };
 }
 
 test("the managers exist once the script has loaded, wired to the session", () => {
@@ -250,6 +265,45 @@ test("a mic granted after the recording dialog closed is released, not recorded"
     assert.equal(devices.prompts[0].track.stopped, true);
     assert.equal(devices.recorders.length, 0);
     assert.equal(context.AppState.isRecording, false);
+});
+
+test("the branded-voice dialog takes focus, makes the page inert, and gives focus back on Escape", () => {
+    const { context, element, document } = loadApp();
+    context.initDOMEventListeners();
+    const modal = element("brandedVoiceModal");
+    const opener = element("createVoiceBtn");
+    opener.focus();
+    const recordButtonParts = [];
+    element("recordButton").appendChild = (child) => recordButtonParts.push(child);
+
+    context.openModal();
+    assert.equal(modal.style.display, "flex");
+    assert.equal(document.activeElement, element("newVoiceName"));
+    assert.equal(element("appHeader").inert, true);
+    assert.equal(element("appContainer").inert, true);
+    // The icon's ligature text ("mic") isn't part of the button's name.
+    assert.equal(recordButtonParts[0].textContent, "mic");
+    assert.equal(recordButtonParts[0].attributes["aria-hidden"], "true");
+
+    // Reopened after a failed recording: focus still goes back to the opener.
+    context.openModal();
+    const press = (key) => {
+        const event = { key, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+        for (const listener of modal.listeners.keydown) listener(event);
+        return event;
+    };
+    assert.equal(press("Enter").defaultPrevented, false);
+    assert.equal(modal.style.display, "flex");
+    assert.equal(press("Escape").defaultPrevented, true);
+    assert.equal(modal.style.display, "none");
+    assert.equal(element("appHeader").inert, false);
+    assert.equal(element("appContainer").inert, false);
+    assert.equal(document.activeElement, opener);
+
+    // Closing it again (a finished recording after Escape) leaves focus alone.
+    element("text-message").focus();
+    context.closeModal();
+    assert.equal(document.activeElement, element("text-message"));
 });
 
 const SETTINGS_KEY = "liveapi-demo-settings";

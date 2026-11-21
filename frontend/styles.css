@@ -93,7 +93,7 @@ details .details-content {
   border-radius: 0;
 }
 
-#video-preview-container:not(.avatar-mode) h3 {
+#video-preview-container:not(.avatar-mode) h2 {
   display: none;
 }
 
@@ -231,6 +231,12 @@ details .details-content {
   padding: 10px;
 }
 
+/* An h2 for the heading order, sized like the h3 it was. */
+#metrics-title {
+  font-size: 1.17em;
+  margin: 1em 0;
+}
+
 .metrics-panel {
   display: none;
   /* Hidden by default */
@@ -258,6 +264,8 @@ details .details-content {
   --gcp-border: #DADCE0;
   --gcp-sidebar-bg: #F1F3F4;
   --gcp-active-blue-bg: #E8F0FE;
+  /* --gcp-blue is under 4.5:1 on the active background. */
+  --gcp-active-blue-text: #1967D2;
   --font-family: 'Roboto', sans-serif;
 }
 
@@ -371,11 +379,11 @@ body {
   color: white;
 }
 
-#video-preview-container h3 {
-  margin-top: 0;
+#video-preview-container h2 {
+  margin: 0 0 1em;
   font-size: 14px;
   font-weight: 500;
-  color: #ccc;
+  color: var(--gcp-text-secondary);
 }
 
 video {
@@ -421,12 +429,12 @@ video {
 
 .nav-item.active {
   background-color: var(--gcp-active-blue-bg);
-  color: var(--gcp-blue);
+  color: var(--gcp-active-blue-text);
   font-weight: 500;
 }
 
 .nav-item.active .material-icons {
-  color: var(--gcp-blue);
+  color: var(--gcp-active-blue-text);
 }
 
 .nav-header {
@@ -502,7 +510,13 @@ video {
 }
 
 /* --- Modal for Branded Voice Creation from BrandedVoice.html --- */
+/* Buttons styled as links. */
 .create-voice-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  text-align: left;
   color: var(--gcp-blue);
   font-size: 14px;
   font-weight: 500;

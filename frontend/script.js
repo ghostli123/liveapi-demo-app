@@ -86,6 +86,7 @@ const AppUI = {
         if (iconName) {
             const span = document.createElement("span");
             span.className = "material-icons";
+            span.setAttribute("aria-hidden", "true"); // The ligature name isn't a label.
             span.textContent = iconName;
             button.appendChild(span);
         }
@@ -117,6 +118,8 @@ const AppState = {
     /** @type {(() => void) | null} */
     cancelRecording: null, // Stops the voice recording in progress, if any
     recordingAttempt: 0, // Advanced by each Record click and by closing the dialog
+    /** @type {HTMLElement | null} */
+    modalOpener: null, // Had focus when the branded-voice dialog opened; gets it back on close
     turnStarting: false, // "Start speaking" is waiting for the microphone
     /** @type {string | null} */
     preferredTransport: null, // The transport the user last picked
@@ -401,6 +404,13 @@ function initDOMEventListeners() {
     if (brandedVoiceModal) {
         window.addEventListener("click", (event) => {
             if (event.target === brandedVoiceModal) {
+                closeModal();
+            }
+        });
+        // Escape in the message dialog on top of it doesn't reach here.
+        brandedVoiceModal.addEventListener("keydown", (event) => {
+            if (event.key === "Escape") {
+                event.preventDefault();
                 closeModal();
             }
         });
@@ -1621,12 +1631,39 @@ function disconnectBtnClick() {
 }
 
 // --- Branded Voice / Reference Voice Modal Operations ---
-function openModal() {
+// The page behind the branded-voice dialog; inert while it's open, so Tab
+// and screen readers stay in the dialog.
+const MODAL_BACKGROUND_IDS = ["appHeader", "appContainer"];
+
+function isModalOpen() {
     const modal = AppUI.getElement("brandedVoiceModal");
-    if (modal) modal.style.display = "flex";
+    return Boolean(modal && modal.style.display === "flex");
+}
+
+/** @param {boolean} open */
+function setModalOpen(open) {
+    const modal = AppUI.getElement("brandedVoiceModal");
+    if (!modal || open === isModalOpen()) return;
+    if (open) AppState.modalOpener = /** @type {HTMLElement | null} */ (document.activeElement);
+    modal.style.display = open ? "flex" : "none";
+    for (const id of MODAL_BACKGROUND_IDS) {
+        const element = AppUI.getElement(id);
+        if (element) element.inert = open;
+    }
+    if (!open && AppState.modalOpener) {
+        AppState.modalOpener.focus();
+        AppState.modalOpener = null;
+    }
+}
+
+function openModal() {
+    setModalOpen(true);
 
     const nameInput = AppUI.getControl("newVoiceName");
-    if (nameInput) nameInput.value = "";
+    if (nameInput) {
+        nameInput.value = "";
+        nameInput.focus();
+    }
 
     AppUI.setDisabled("recordButton", false);
     AppUI.setButtonWithIcon("recordButton", "mic", "Record reference voice");
@@ -1638,8 +1675,7 @@ function openModal() {
 }
 
 function closeModal() {
-    const modal = AppUI.getElement("brandedVoiceModal");
-    if (modal) modal.style.display = "none";
+    setModalOpen(false);
     // Closing the dialog abandons a recording in progress, or one still
     // waiting for the microphone.
     AppState.recordingAttempt++;
@@ -1716,11 +1752,12 @@ async function handleRecordClick() {
                 try {
                     const { base64 } = await toVoiceSample(await audioBlob.arrayBuffer());
                     addBrandedVoice(voiceName, base64);
+                    // Close first, so the message dialog returns focus to the page.
+                    closeModal();
                     AppUI.showModal(
                         `New branded voice "${voiceName}" has been created and selected. ` +
                         "It applies from the next connection."
                     );
-                    closeModal();
                 } catch (error) {
                     console.error("Could not process the recording:", error);
                     AppUI.showModal(`Could not process the recording: ${error.message}`);
