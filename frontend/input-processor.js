@@ -1,6 +1,9 @@
-// input-processor.js
+// @ts-check
 
+// Converts microphone audio to 16-bit PCM and posts each render quantum to the
+// main thread as an Int16Array.
 class InputProcessor extends AudioWorkletProcessor {
+  /** @param {Float32Array[][]} inputs */
   process(inputs) {
     // Get the audio data from the first input channel.
     const input = inputs[0];

@@ -1,0 +1,11 @@
+{
+    // Type check for the AudioWorklet processors (second half of npm run
+    // typecheck). They run in AudioWorkletGlobalScope, which has no DOM, so
+    // they get the ES lib plus types/audioworklet.d.ts instead of tsconfig.json's
+    // DOM lib, and the main scripts can't see registerProcessor.
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "lib": ["es2022"]
+    },
+    "include": ["frontend/input-processor.js", "frontend/pcm-processor.js", "types/audioworklet.d.ts"]
+}
