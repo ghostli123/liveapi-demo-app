@@ -129,6 +129,8 @@ function loadApp(globals = {}, { radios = [] } = {}) {
         "initDOMEventListeners",
         "startCameraCapture",
         "startScreenCapture",
+        "setAppStatus",
+        "connectBtnClick",
     ];
     const context = loadScript("script.js", exportNames, {
         window: { location: { protocol: "http:", host: "localhost:1234" }, addEventListener() {} },
@@ -721,4 +723,73 @@ test("a typed interval is replaced by the one the app will use", () => {
     assert.equal(change("audioInterval", ""), "200");
     assert.equal(change("videoInterval", "-5"), "400");
     assert.equal(change("videoInterval", "7"), "100");
+});
+
+test("multi-part avatar recordings become links, released by the next Connect", () => {
+    const urls = { created: [], revoked: [] };
+    const { context, element, document } = loadApp({
+        URL: {
+            createObjectURL(blob) {
+                urls.created.push(blob);
+                return `blob:${urls.created.length}`;
+            },
+            revokeObjectURL: (url) => urls.revoked.push(url),
+        },
+        getAvatarVideoElement: () => null, // From live-media-manager.js.
+        // connectBtnClick configures the session through many setters.
+        GeminiLiveAPI: class extends FakeGeminiLiveAPI {
+            constructor(...args) {
+                super(...args);
+                return new Proxy(this, { get: (target, name) => (name in target ? target[name] : () => {}) });
+            }
+        },
+    });
+    document.createElement = () => {
+        const link = fakeElement("");
+        link.removeAttribute = (name) => {
+            delete link[name];
+        };
+        return link;
+    };
+    const lines = [];
+    element("text-chat").appendChild = (line) => {
+        line.children = [];
+        line.append = (...nodes) => line.children.push(...nodes.filter((node) => typeof node !== "string"));
+        lines.push(line);
+    };
+    let recordings = ["mp4 one", "mp4 two"];
+    const { AppState } = context;
+    AppState.liveVideoOutputManager.getRecordings = () => recordings;
+    AppState.liveVideoOutputManager.clearRecordedChunks = () => {
+        recordings = [];
+    };
+    AppState.liveAudioOutputManager.resume = () => {};
+    element("location").value = "us-central1";
+
+    context.setAppStatus("disconnected");
+    assert.equal(lines.length, 1);
+    const links = lines[0].children;
+    assert.deepEqual(urls.created, ["mp4 one", "mp4 two"]);
+    assert.deepEqual(links.map((link) => [link.href, link.textContent]), [
+        ["blob:1", "part 1"],
+        ["blob:2", "part 2"],
+    ]);
+    assert.match(links[1].download, /^received_video_\d+_part2\.mp4$/);
+    assert.deepEqual(urls.revoked, []);
+
+    // A second multi-part session gets its own line rather than collapsing
+    // into the first one, which would replace its links.
+    context.connectBtnClick();
+    assert.deepEqual(urls.revoked, ["blob:1", "blob:2"]);
+    assert.deepEqual(links.map((link) => [link.href, link.download, link.textContent]), [
+        [undefined, undefined, "part 1 (expired)"],
+        [undefined, undefined, "part 2 (expired)"],
+    ]);
+    recordings = ["mp4 three", "mp4 four"];
+    context.setAppStatus("disconnected");
+    assert.equal(lines.length, 2);
+    assert.equal(lines[0].textContent, "Saved avatar video:");
+    assert.deepEqual(lines[1].children.map((link) => link.href), ["blob:3", "blob:4"]);
+    context.connectBtnClick();
+    assert.deepEqual(urls.revoked, ["blob:1", "blob:2", "blob:3", "blob:4"]);
 });
