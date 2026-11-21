@@ -116,6 +116,7 @@ const AppState = {
     userTurnActive: false, // Between "Start speaking" and "Done speaking"
     /** @type {(() => void) | null} */
     cancelRecording: null, // Stops the voice recording in progress, if any
+    recordingAttempt: 0, // Advanced by each Record click and by closing the dialog
     turnStarting: false, // "Start speaking" is waiting for the microphone
     /** @type {string | null} */
     preferredTransport: null, // The transport the user last picked
@@ -1519,7 +1520,9 @@ function openModal() {
 function closeModal() {
     const modal = AppUI.getElement("brandedVoiceModal");
     if (modal) modal.style.display = "none";
-    // Closing the dialog abandons a recording in progress.
+    // Closing the dialog abandons a recording in progress, or one still
+    // waiting for the microphone.
+    AppState.recordingAttempt++;
     if (AppState.cancelRecording) AppState.cancelRecording();
     AppState.isRecording = false;
 }
@@ -1555,8 +1558,15 @@ async function handleRecordClick() {
     } else {
         /** @type {MediaStream | null} */
         let stream = null;
+        // A second click while the first waits for the microphone supersedes it.
+        const attempt = ++AppState.recordingAttempt;
         try {
             stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            if (attempt !== AppState.recordingAttempt) {
+                // The dialog was closed, or Record clicked again, meanwhile.
+                stream.getTracks().forEach((track) => track.stop());
+                return;
+            }
             // Let the browser choose the format (Safari records audio/mp4,
             // not WAV or WebM); toVoiceSample() decodes whatever it is.
             const recorder = new MediaRecorder(stream);
