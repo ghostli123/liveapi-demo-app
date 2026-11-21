@@ -84,6 +84,62 @@ class ResolveWsHostTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 main.resolve_ws_host("aiplatform.googleapis.com", "us-central1")
 
+    def test_allowed_host_suffixes_match_at_a_dot(self):
+        for suffixes in ([".googleapis.com"], ["googleapis.com"], ["GoogleAPIs.com."]):
+            with self.subTest(suffixes=suffixes):
+                with flagsaver.flagsaver(allowed_host_suffixes=suffixes):
+                    self.assertEqual(
+                        main.resolve_ws_host("aiplatform.googleapis.com", "us"),
+                        "aiplatform.us.rep.googleapis.com",
+                    )
+                    # "evilgoogleapis.com" ends with "googleapis.com" but is
+                    # someone else's domain.
+                    for endpoint in (
+                        "x.rep.evilgoogleapis.com",
+                        "global-evilgoogleapis.com",
+                    ):
+                        with self.assertRaises(ValueError, msg=endpoint):
+                            main.resolve_ws_host(endpoint, "us")
+        with flagsaver.flagsaver(allowed_host_suffixes=["live.rep.example.com"]):
+            self.assertEqual(
+                main.resolve_ws_host("live.rep.example.com", "us"),
+                "live.rep.example.com",
+            )
+
+    def test_blank_allowed_host_suffix_matches_nothing(self):
+        # A trailing comma in the flag adds "", which every host ends with.
+        with flagsaver.flagsaver(allowed_host_suffixes=[".googleapis.com", ""]):
+            with self.assertRaises(ValueError):
+                main.resolve_ws_host("evil.rep.attacker.com", "us")
+            self.assertEqual(
+                main.resolve_ws_host("aiplatform.googleapis.com", "global"),
+                "aiplatform.googleapis.com",
+            )
+
+    def test_allowed_host_suffixes_validator(self):
+        for entry in [
+            "com",
+            ".com",
+            "*",
+            "googleapis.com/x",
+            "a..b.com",
+            "https://x.com",
+        ]:
+            with self.assertRaises(flags.IllegalFlagValueError, msg=entry):
+                with flagsaver.flagsaver(
+                    allowed_host_suffixes=[".googleapis.com", entry]
+                ):
+                    pass
+        with flagsaver.flagsaver(
+            allowed_host_suffixes=[
+                ".googleapis.com",
+                "example.com",
+                " .Example.ORG. ",
+                "",
+            ]
+        ):
+            pass
+
 
 class FakeUpstream:
     """A local stand-in for the Live API, reached through the common BAG route."""
