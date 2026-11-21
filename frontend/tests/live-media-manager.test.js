@@ -445,3 +445,70 @@ test("audio chunks share one context and worklet", async () => {
     assert.equal(manager.workletNode.posted.length, 3);
     assert.equal(manager.workletNode.posted[2], "clear");
 });
+
+test("recordChunk sends the buffered samples as base64 16-bit little-endian PCM", () => {
+    const context = loadScript("live-media-manager.js", ["LiveAudioInputManager"], { btoa });
+    const manager = new context.LiveAudioInputManager();
+    const sent = [];
+    manager.onNewAudioRecordingChunk = (b64AudioData) => sent.push(b64AudioData);
+    // 10,000 bytes: more than one of recordChunk's 8 KB conversion slices.
+    const samples = Array.from({ length: 5000 }, (_, i) => ((i * 37) % 65536) - 32768);
+    manager.pcmData = samples.slice();
+    manager.recordChunk();
+    const expected = Buffer.alloc(samples.length * 2);
+    samples.forEach((sample, i) => expected.writeInt16LE(sample, i * 2));
+    assert.deepEqual(sent, [expected.toString("base64")]);
+    assert.equal(manager.pcmData.length, 0);
+});
+
+function fakeGatheringPeerConnection() {
+    const listeners = new Set();
+    return {
+        iceGatheringState: "gathering",
+        listeners,
+        addEventListener: (type, listener) => listeners.add(listener),
+        removeEventListener: (type, listener) => listeners.delete(listener),
+        finishGathering() {
+            this.iceGatheringState = "complete";
+            [...listeners].forEach((listener) => listener());
+        },
+    };
+}
+
+function webRtcManagerWithManualTimeout() {
+    const timeout = { fire: null };
+    const context = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
+        document: { getElementById: () => null },
+        setTimeout: (fn) => {
+            timeout.fire = fn;
+            return 1;
+        },
+        clearTimeout: () => (timeout.fire = null),
+    });
+    return { manager: new context.G3RtcWebRtcManager(null), timeout };
+}
+
+test("waitForIceGathering resolves when gathering completes and removes its listener", async () => {
+    const { manager, timeout } = webRtcManagerWithManualTimeout();
+    const pc = fakeGatheringPeerConnection();
+    manager.pc = pc;
+    let resolved = false;
+    const waiting = manager.waitForIceGathering().then(() => (resolved = true));
+    await settle();
+    assert.equal(resolved, false);
+    pc.finishGathering();
+    await waiting;
+    assert.equal(pc.listeners.size, 0);
+    assert.equal(timeout.fire, null);
+});
+
+test("waitForIceGathering times out after close() and removes its listener", async () => {
+    const { manager, timeout } = webRtcManagerWithManualTimeout();
+    const pc = fakeGatheringPeerConnection();
+    manager.pc = pc;
+    const waiting = manager.waitForIceGathering();
+    manager.pc = null; // What close() leaves; a closed pc fires no more events.
+    timeout.fire();
+    await waiting;
+    assert.equal(pc.listeners.size, 0);
+});

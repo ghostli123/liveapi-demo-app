@@ -1,3 +1,4 @@
+// @ts-check
 /* exported LiveAudioOutputManager, LiveAudioInputManager, MicLevelMeter, LiveVideoManager,
    LiveScreenManager, LiveVideoOutputManager, G3RtcWebRtcManager */
 
@@ -5,7 +6,8 @@ class LiveAudioOutputManager {
     constructor() {
         this.audioContext = null;
         this.workletNode = null;
-        this.ready = null; // Promise for the worklet; see initializeAudioContext().
+        /** @type {Promise<AudioWorkletNode> | null} */
+        this.ready = null; // Resolves to workletNode; see initializeAudioContext().
     }
 
     /**
@@ -23,8 +25,8 @@ class LiveAudioOutputManager {
             return;
         }
         this.initializeAudioContext()
-            .then(() => {
-                this.workletNode.port.postMessage(float32Data, [float32Data.buffer]);
+            .then((workletNode) => {
+                workletNode.port.postMessage(float32Data, [float32Data.buffer]);
             })
             .catch((error) => console.error("Error playing audio chunk:", error));
         this.resume();
@@ -36,7 +38,7 @@ class LiveAudioOutputManager {
         // before this call are posted (and dropped) before the clear.
         if (this.ready) {
             this.ready
-                .then(() => this.workletNode.port.postMessage("clear"))
+                .then((workletNode) => workletNode.port.postMessage("clear"))
                 .catch(() => {}); // The worklet failed to load; nothing to clear.
         }
     }
@@ -47,7 +49,7 @@ class LiveAudioOutputManager {
      */
     resume() {
         this.initializeAudioContext();
-        if (this.audioContext.state === "suspended") {
+        if (this.audioContext?.state === "suspended") {
             this.audioContext.resume().catch((error) => {
                 console.warn("Could not resume audio playback:", error);
             });
@@ -66,10 +68,12 @@ class LiveAudioOutputManager {
             const ready = audioContext.audioWorklet
                 .addModule("/frontend/pcm-processor.js")
                 .then(() => {
-                    this.workletNode = new AudioWorkletNode(audioContext, "pcm-processor", {
+                    const workletNode = new AudioWorkletNode(audioContext, "pcm-processor", {
                         outputChannelCount: [1],
                     });
-                    this.workletNode.connect(audioContext.destination);
+                    workletNode.connect(audioContext.destination);
+                    this.workletNode = workletNode;
+                    return workletNode;
                 });
             ready.catch((error) => {
                 console.error("Could not load the audio player:", error);
@@ -107,8 +111,7 @@ class LiveAudioOutputManager {
 
 class LiveAudioInputManager {
     constructor() {
-        this.audioContext;
-        this.mediaRecorder;
+        this.audioContext = null;
         this.processor = null;
         this.pcmData = [];
         this.generation = 0;
@@ -119,6 +122,7 @@ class LiveAudioInputManager {
         this.stream = null;
         this.intervalMs = 1000;
 
+        /** @type {(b64AudioData: string) => void} */
         this.onNewAudioRecordingChunk = () => {
             console.log("New audio recording ");
         };
@@ -204,7 +208,7 @@ class LiveAudioInputManager {
         const chunkSize = 8192; // Process in 8KB chunks
         for (let i = 0; i < uint8Array.length; i += chunkSize) {
             const chunk = uint8Array.subarray(i, i + chunkSize);
-            binaryString += String.fromCharCode.apply(null, chunk);
+            binaryString += String.fromCharCode(...chunk);
         }
 
         const base64 = btoa(binaryString);
@@ -308,6 +312,7 @@ class LiveFrameSource {
         this.stream = null;
         this.interval = null;
         this.intervalMs = 5000;
+        /** @type {(b64JpegData: string) => void} */
         this.onNewFrame = () => {};
     }
 
@@ -447,6 +452,16 @@ const VIDEO_STOPPED_MESSAGE =
     "The avatar video stopped after a playback error. Audio and transcripts still work; " +
     "reconnect to restart the video.";
 
+/** @returns {HTMLVideoElement | null} The avatar's <video>, shared by both transports. */
+function getAvatarVideoElement() {
+    return /** @type {HTMLVideoElement | null} */ (document.getElementById("video_player"));
+}
+
+/** @returns {HTMLImageElement | null} Shows avatar JPEG frames (WebSocket mode). */
+function getAvatarFrameElement() {
+    return /** @type {HTMLImageElement | null} */ (document.getElementById("avatar_frame_img"));
+}
+
 /** Plays the avatar's fragmented-MP4 stream (WebSocket mode) through MSE. */
 class LiveVideoOutputManager {
     constructor() {
@@ -469,6 +484,7 @@ class LiveVideoOutputManager {
         this.playbackFailed = false;
         // Called once per stream with a message for the user when it can't be
         // played. Audio and transcripts keep working.
+        /** @type {(message: string) => void} */
         this.onPlaybackError = () => {};
     }
 
@@ -483,7 +499,7 @@ class LiveVideoOutputManager {
         this.initialized = false;
         this.playbackFailed = false;
 
-        const video = document.getElementById('video_player');
+        const video = getAvatarVideoElement();
         if (!video) {
             this.failPlayback("video_player element not found for LiveVideoOutputManager", null);
             return;
@@ -563,8 +579,8 @@ class LiveVideoOutputManager {
             mimeType === "video/jpeg" ||
             mimeType.startsWith("image/")
         ) {
-            let imgEl = document.getElementById("avatar_frame_img");
-            const video = document.getElementById("video_player");
+            let imgEl = getAvatarFrameElement();
+            const video = getAvatarVideoElement();
             if (!imgEl && video && video.parentElement) {
                 imgEl = document.createElement("img");
                 imgEl.id = "avatar_frame_img";
@@ -611,13 +627,14 @@ class LiveVideoOutputManager {
      * @returns {boolean} Whether a removal started (wait for updateend).
      */
     trimBuffer(keepSeconds) {
-        const video = document.getElementById("video_player");
-        const buffered = this.sourceBuffer.buffered;
-        if (!video || buffered.length === 0) return false;
+        const video = getAvatarVideoElement();
+        const sourceBuffer = this.sourceBuffer;
+        if (!video || !sourceBuffer || sourceBuffer.buffered.length === 0) return false;
+        const buffered = sourceBuffer.buffered;
         const removeEnd = video.currentTime - keepSeconds;
         if (removeEnd <= buffered.start(0)) return false;
         try {
-            this.sourceBuffer.remove(buffered.start(0), removeEnd);
+            sourceBuffer.remove(buffered.start(0), removeEnd);
             return true;
         } catch (e) {
             console.warn("Error trimming video buffer:", e);
@@ -626,7 +643,8 @@ class LiveVideoOutputManager {
     }
 
     processQueue() {
-        if (!this.initialized || !this.sourceBuffer) return;
+        // mediaSource is set whenever sourceBuffer is.
+        if (!this.initialized || !this.sourceBuffer || !this.mediaSource) return;
         if (this.sourceBuffer.updating) return;
         // Once open, a MediaSource only leaves "open" on a playback error
         // (e.g. a decode error ends it); resetPlayer() clears it first.
@@ -665,14 +683,15 @@ class LiveVideoOutputManager {
      * @returns {boolean} Whether a removal started (wait for updateend).
      */
     dropStaleBuffer() {
-        const video = document.getElementById("video_player");
-        const buffered = this.sourceBuffer.buffered;
-        if (!video || buffered.length === 0) return false;
+        const video = getAvatarVideoElement();
+        const sourceBuffer = this.sourceBuffer;
+        if (!video || !sourceBuffer || sourceBuffer.buffered.length === 0) return false;
+        const buffered = sourceBuffer.buffered;
         const liveEdge = buffered.end(buffered.length - 1);
         const removeEnd = liveEdge - VIDEO_BACK_BUFFER_S;
         if (removeEnd <= buffered.start(0)) return false;
         try {
-            this.sourceBuffer.remove(buffered.start(0), removeEnd);
+            sourceBuffer.remove(buffered.start(0), removeEnd);
         } catch (e) {
             console.warn("Error dropping stale video:", e);
             return false;
@@ -684,9 +703,10 @@ class LiveVideoOutputManager {
     }
 
     trimBufferIfLarge() {
-        const video = document.getElementById("video_player");
-        const buffered = this.sourceBuffer.buffered;
-        if (!video || buffered.length === 0) return false;
+        const video = getAvatarVideoElement();
+        const sourceBuffer = this.sourceBuffer;
+        if (!video || !sourceBuffer || sourceBuffer.buffered.length === 0) return false;
+        const buffered = sourceBuffer.buffered;
         if (video.currentTime - buffered.start(0) < 2 * VIDEO_BACK_BUFFER_S) return false;
         return this.trimBuffer(VIDEO_BACK_BUFFER_S);
     }
@@ -722,12 +742,12 @@ class LiveVideoOutputManager {
                 console.warn("resetPlayer endOfStream warning:", e);
             }
         }
-        const imgEl = document.getElementById("avatar_frame_img");
+        const imgEl = getAvatarFrameElement();
         if (imgEl) {
             imgEl.style.display = "none";
             imgEl.src = "";
         }
-        const video = document.getElementById("video_player");
+        const video = getAvatarVideoElement();
         if (video) {
             video.style.display = "block";
         }
@@ -889,24 +909,21 @@ class G3RtcWebRtcManager {
         if (!this.pc || this.pc.iceGatheringState === "complete") {
             return Promise.resolve();
         }
-        return new Promise((resolve) => {
+        const pc = this.pc;
+        return /** @type {Promise<void>} */ (new Promise((resolve) => {
             const timer = setTimeout(() => {
-                if (this.pc) {
-                    this.pc.removeEventListener("icegatheringstatechange", checkState);
-                }
+                pc.removeEventListener("icegatheringstatechange", checkState);
                 resolve();
             }, timeoutMs);
             const checkState = () => {
-                if (!this.pc || this.pc.iceGatheringState === "complete") {
+                if (!this.pc || pc.iceGatheringState === "complete") {
                     clearTimeout(timer);
-                    if (this.pc) {
-                        this.pc.removeEventListener("icegatheringstatechange", checkState);
-                    }
+                    pc.removeEventListener("icegatheringstatechange", checkState);
                     resolve();
                 }
             };
-            this.pc.addEventListener("icegatheringstatechange", checkState);
-        });
+            pc.addEventListener("icegatheringstatechange", checkState);
+        }));
     }
 
     async completeSession(answerSdp) {
@@ -1013,7 +1030,7 @@ class G3RtcWebRtcManager {
                 let bytesReceived = 0;
                 let bytesSent = 0;
                 let packetsLost = 0;
-                let framesPerSecond = null;
+                let framesPerSecond = /** @type {number | null} */ (null);
 
                 stats.forEach((report) => {
                     if (report.type === "inbound-rtp") {
