@@ -44,6 +44,10 @@ class AccessToken:
 
 _lock = threading.Lock()
 _cached_token: AccessToken | None = None
+# Failed fetches so far, and the last one's error. Callers that waited on _lock
+# while a fetch failed get its error instead of each trying every source again.
+_failed_fetches = 0
+_last_failure = ""
 _adc_credentials: google.auth.credentials.Credentials | None = None
 
 
@@ -116,10 +120,16 @@ _SOURCES = (
 
 def get_access_token() -> AccessToken:
     """Returns a cached or freshly fetched token. Blocks; call off the event loop."""
-    global _cached_token
+    global _cached_token, _failed_fetches, _last_failure
+    failed_before = _failed_fetches
     with _lock:
         if _cached_token and _cached_token.expiry - _utcnow() > _EXPIRY_MARGIN:
             return _cached_token
+        # A fetch failed while this call waited. The sources' timeouts (30 s
+        # for gcloud) would otherwise add up per queued session, and the
+        # waiting threads fill the to_thread pool that /api/control also uses.
+        if _failed_fetches != failed_before:
+            raise RuntimeError(_last_failure)
         errors = []
         for name, fetch in _SOURCES:
             try:
@@ -136,7 +146,9 @@ def get_access_token() -> AccessToken:
             )
             _cached_token = token
             return token
-        raise RuntimeError("No access token available. " + " | ".join(errors))
+        _last_failure = "No access token available. " + " | ".join(errors)
+        _failed_fetches += 1
+        raise RuntimeError(_last_failure)
 
 
 class ChainCredentials(google.auth.credentials.Credentials):
