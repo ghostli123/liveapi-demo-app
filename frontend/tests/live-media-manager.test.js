@@ -31,15 +31,27 @@ test("applyG3rtcAttributesToSdp tags each grouped m-section", () => {
     );
 });
 
+// A MediaStreamTrack stand-in. Like a real one, stop() doesn't fire "ended";
+// end() is the device being unplugged or the browser ending it.
+function fakeTrack() {
+    const listeners = [];
+    return {
+        readyState: "live",
+        stop() { this.readyState = "ended"; },
+        addEventListener: (type, listener) => listeners.push(listener),
+        end() { this.readyState = "ended"; listeners.forEach((l) => l()); },
+    };
+}
+
 // A fake getUserMedia whose calls stay pending until the test resolves them,
 // like a permission prompt the user hasn't answered yet.
 function pendingMediaDevices() {
     const requests = [];
     const getUserMedia = () =>
         new Promise((resolve) => {
-            const track = { readyState: "live", stop() { this.readyState = "ended"; } };
-            const stream = { getTracks: () => [track], getAudioTracks: () => [track] };
-            requests.push({ track, grant: () => resolve(stream) });
+            const track = fakeTrack();
+            const stream = { getTracks: () => [track], getAudioTracks: () => [track], getVideoTracks: () => [track] };
+            requests.push({ track, stream, grant: () => resolve(stream) });
         });
     return { requests, mediaDevices: { getUserMedia } };
 }
@@ -103,6 +115,127 @@ test("only the newest of two overlapping startMicrophone() calls keeps its strea
     assert.equal(sent.at(-1), requests[1].track);
 });
 
+test("a microphone that ends on its own is reported; a replaced one isn't", async () => {
+    const { manager, requests } = webRtcManagerWithPendingMic();
+    let ended = 0;
+    manager.onMicrophoneEnded = () => ended++;
+    const first = manager.startMicrophone("a");
+    requests[0].grant();
+    await first;
+    const second = manager.startMicrophone("b"); // A device change.
+    requests[1].grant();
+    await second;
+    requests[0].track.end(); // Ending the replaced device changes nothing.
+    assert.equal(ended, 0);
+    requests[1].track.end(); // The microphone in use is unplugged.
+    assert.equal(ended, 1);
+});
+
+/** A LiveAudioInputManager (WebSocket mic) on fake audio nodes. */
+function audioInputWithPendingMic() {
+    const devices = pendingMediaDevices();
+    const intervals = new Set();
+    class FakeAudioContext {
+        constructor() {
+            this.state = "running";
+            this.audioWorklet = { addModule: async () => {} };
+        }
+        createMediaStreamSource() {
+            return { connect() {} };
+        }
+        close() {
+            this.state = "closed";
+        }
+    }
+    class FakeWorkletNode {
+        constructor() {
+            this.port = {};
+        }
+        disconnect() {}
+    }
+    const context = loadScript("live-media-manager.js", ["LiveAudioInputManager"], {
+        navigator: { mediaDevices: devices.mediaDevices },
+        AudioContext: FakeAudioContext,
+        AudioWorkletNode: FakeWorkletNode,
+        setInterval: () => {
+            const id = {};
+            intervals.add(id);
+            return id;
+        },
+        clearInterval: (id) => intervals.delete(id),
+    });
+    return { manager: new context.LiveAudioInputManager(), requests: devices.requests, intervals };
+}
+
+test("a WebSocket microphone that ends on its own is reported; one turned off isn't", async () => {
+    const { manager, requests, intervals } = audioInputWithPendingMic();
+    let ended = 0;
+    manager.onMicrophoneEnded = () => ended++;
+    let connecting = manager.connectMicrophone();
+    requests[0].grant();
+    await connecting;
+    assert.equal(intervals.size, 1);
+    manager.disconnectMicrophone();
+    requests[0].track.end();
+    assert.equal(ended, 0);
+
+    connecting = manager.connectMicrophone();
+    requests[1].grant();
+    await connecting;
+    requests[1].track.end();
+    assert.equal(ended, 1);
+});
+
+/** A LiveVideoManager whose getUserMedia() calls wait for the test. */
+function cameraManagerWithPendingCamera() {
+    const devices = pendingMediaDevices();
+    const intervals = new Set();
+    const context = loadScript("live-media-manager.js", ["LiveVideoManager"], {
+        navigator: { mediaDevices: devices.mediaDevices },
+        setInterval: () => {
+            const id = {};
+            intervals.add(id);
+            return id;
+        },
+        clearInterval: (id) => intervals.delete(id),
+    });
+    const video = { srcObject: null };
+    const manager = new context.LiveVideoManager(video, { getContext: () => ({}) });
+    return { manager, requests: devices.requests, intervals, video };
+}
+
+test("a camera that ends on its own is detached and reported with its track", async () => {
+    const { manager, requests, intervals, video } = cameraManagerWithPendingCamera();
+    const ended = [];
+    manager.onEnded = (track) => ended.push(track);
+    const starting = manager.startWebcam({ sendFrames: true });
+    requests[0].grant();
+    await starting;
+    assert.equal(video.srcObject, requests[0].stream);
+    assert.equal(intervals.size, 1);
+    requests[0].track.end(); // Unplugged, or access revoked.
+    assert.deepEqual(ended, [requests[0].track]);
+    assert.equal(manager.stream, null);
+    assert.equal(video.srcObject, null);
+    assert.equal(intervals.size, 0);
+});
+
+test("a camera stopped by the app isn't reported when its track ends later", async () => {
+    const { manager, requests } = cameraManagerWithPendingCamera();
+    const ended = [];
+    manager.onEnded = (track) => ended.push(track);
+    let starting = manager.startWebcam();
+    requests[0].grant();
+    await starting;
+    manager.stopWebcam();
+    starting = manager.startWebcam();
+    requests[1].grant();
+    await starting;
+    requests[0].track.end();
+    assert.deepEqual(ended, []);
+    assert.equal(manager.stream.getVideoTracks()[0], requests[1].track);
+});
+
 test("completeSession after close() starts no stats polling or connect timer", async () => {
     let finishSetRemote;
     const timers = new Set();
@@ -142,13 +275,7 @@ function screenManagerWithPendingPicker() {
     const intervals = new Set();
     const getDisplayMedia = () =>
         new Promise((resolve, reject) => {
-            const listeners = [];
-            const track = {
-                readyState: "live",
-                stop() { this.readyState = "ended"; },
-                addEventListener: (type, listener) => listeners.push(listener),
-                end() { this.readyState = "ended"; listeners.forEach((l) => l()); },
-            };
+            const track = fakeTrack();
             const stream = { getTracks: () => [track], getVideoTracks: () => [track] };
             const cancel = () => reject(Object.assign(new Error("cancelled"), { name: "NotAllowedError" }));
             requests.push({ track, stream, pick: () => resolve(stream), cancel });
@@ -214,9 +341,12 @@ test("ending a share from the browser doesn't drop a pick in progress", async ()
     const first = manager.startCapture();
     requests[0].pick();
     await first;
+    const ended = [];
+    manager.onEnded = (track) => ended.push(track);
     const second = manager.startCapture();
     requests[0].track.end(); // The browser's "Stop sharing" on the old share.
     assert.equal(manager.stream, null);
+    assert.deepEqual(ended, [requests[0].track]);
     requests[1].pick();
     assert.equal(await second, true);
     assert.equal(manager.stream, requests[1].stream);

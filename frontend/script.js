@@ -189,6 +189,18 @@ function initApplicationManagers() {
     AppState.liveScreenManager.onNewFrame = (b64Image) => {
         AppState.geminiLiveApi.sendImageMessage(b64Image);
     };
+
+    AppState.liveAudioInputManager.onMicrophoneEnded = microphoneEnded;
+    if (AppState.geminiLiveApi.webRtcManager) {
+        AppState.geminiLiveApi.webRtcManager.onMicrophoneEnded = microphoneEnded;
+    }
+    AppState.liveVideoManager.onEnded = (track) => {
+        stopSendingVideoTrack(track);
+        showCameraState(false);
+        AppUI.showModal(CAMERA_ENDED_MESSAGE);
+    };
+    // The user ended the share with the browser's "Stop sharing" button.
+    AppState.liveScreenManager.onEnded = stopSendingVideoTrack;
 }
 
 initApplicationManagers();
@@ -1151,6 +1163,20 @@ function micOffBtnClick() {
     startAudioInput();
 }
 
+const MIC_ENDED_MESSAGE =
+    "The microphone stopped: it was unplugged or the browser's access to it was turned off. " +
+    "Turn the mic back on to keep talking.";
+const CAMERA_ENDED_MESSAGE =
+    "The camera stopped: it was unplugged or the browser's access to it was turned off. " +
+    "Turn the camera back on to keep sharing video.";
+
+// The microphone's track ended without the app stopping it.
+function microphoneEnded() {
+    if (!isMicOn()) return;
+    micBtnClick();
+    AppUI.showModal(MIC_ENDED_MESSAGE);
+}
+
 // With automatic activity detection disabled, the server only knows where a
 // spoken turn starts and ends from activity_start/activity_end messages.
 function setUserTurnActive(active) {
@@ -1243,6 +1269,15 @@ async function startScreenCapture() {
     showCameraState(false);
     if (webRtcManager) {
         await webRtcManager.attachVideoStream(screen.stream);
+    }
+}
+
+// A camera or screen track ended; stop the WebRTC sender if it was sending it,
+// so the session (and a renegotiated one after resumption) doesn't keep it.
+function stopSendingVideoTrack(track) {
+    const webRtcManager = AppState.geminiLiveApi.webRtcManager;
+    if (webRtcManager && webRtcManager.videoTrack === track) {
+        webRtcManager.detachVideoStream();
     }
 }
 

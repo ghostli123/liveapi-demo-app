@@ -109,6 +109,20 @@ class LiveAudioOutputManager {
     }
 }
 
+/**
+ * Calls `listener(track)` when one of `tracks` ends without the app stopping
+ * it: a device unplugged, access revoked, or the browser's own "Stop" button.
+ * MediaStreamTrack.stop() doesn't fire "ended", so turning a source off
+ * doesn't reach the listener.
+ * @param {MediaStreamTrack[]} tracks
+ * @param {(track: MediaStreamTrack) => void} listener
+ */
+function onTrackEnded(tracks, listener) {
+    for (const track of tracks) {
+        track.addEventListener("ended", () => listener(track));
+    }
+}
+
 class LiveAudioInputManager {
     constructor() {
         this.audioContext = null;
@@ -126,6 +140,8 @@ class LiveAudioInputManager {
         this.onNewAudioRecordingChunk = () => {
             console.log("New audio recording ");
         };
+        // Called when the microphone stops on its own (unplugged, access revoked).
+        this.onMicrophoneEnded = () => {};
     }
 
     // Update the audio interval in milliseconds (based on user input)
@@ -169,6 +185,9 @@ class LiveAudioInputManager {
         }
         this.audioContext = audioContext;
         this.stream = stream;
+        onTrackEnded(stream.getAudioTracks(), () => {
+            if (this.stream === stream) this.onMicrophoneEnded();
+        });
         const source = this.audioContext.createMediaStreamSource(this.stream);
 
         // Create an AudioWorkletNode.
@@ -314,6 +333,12 @@ class LiveFrameSource {
         this.intervalMs = 5000;
         /** @type {(b64JpegData: string) => void} */
         this.onNewFrame = () => {};
+        /**
+         * Called after the source stopped on its own (camera unplugged, access
+         * revoked, the browser's "Stop sharing") and was detached.
+         * @type {(track: MediaStreamTrack) => void}
+         */
+        this.onEnded = () => {};
     }
 
     /** Shows `stream` in the preview and, if asked, starts sending frames. */
@@ -323,6 +348,11 @@ class LiveFrameSource {
         if (sendFrames) {
             this.interval = setInterval(() => this.newFrame(), this.intervalMs);
         }
+        onTrackEnded(stream.getVideoTracks(), (track) => {
+            if (this.stream !== stream) return; // Already replaced or stopped.
+            this._detach();
+            this.onEnded(track);
+        });
     }
 
     _detach() {
@@ -425,12 +455,6 @@ class LiveScreenManager extends LiveFrameSource {
         }
         this._detach(); // A share already running is replaced.
         this._attach(stream, sendFrames);
-        // The browser's own "Stop sharing" button ends the track.
-        stream.getVideoTracks().forEach((track) =>
-            track.addEventListener("ended", () => {
-                if (this.stream === stream) this._detach();
-            })
-        );
         return true;
     }
 
@@ -788,6 +812,8 @@ class G3RtcWebRtcManager {
         this.onConnectionFailed = () => {};
         // Called when the browser refuses to start playback without a click.
         this.onAutoplayBlocked = () => {};
+        // Called when the microphone stops on its own (unplugged, access revoked).
+        this.onMicrophoneEnded = () => {};
         this.lastBytesReceived = 0;
         this.lastBytesSent = 0;
         this.lastStatsTimeMs = 0;
@@ -985,6 +1011,9 @@ class G3RtcWebRtcManager {
             return;
         }
         this.micStream = stream;
+        onTrackEnded(stream.getAudioTracks(), () => {
+            if (this.micStream === stream) this.onMicrophoneEnded();
+        });
         const audioTrack = this.micStream.getAudioTracks()[0] || null;
         if (this.audioSender && audioTrack) {
             await this.audioSender.replaceTrack(audioTrack);
