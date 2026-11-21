@@ -1,12 +1,15 @@
-// End-to-end checks of the app in headless Chrome against a running server and
-// a real Live API endpoint. Needs credentials on the server and
+// End-to-end checks of the app in headless Chrome or Firefox against a running
+// server and a real Live API endpoint. Needs credentials on the server and
 // `npm install` (for playwright-core). Usage:
 //
 //   node scripts/browser_e2e.js [--server=http://localhost:8080]
 //       [--environment=prod-us-rep] [--model=gemini-3.8-live]
-//       [--chrome=/usr/bin/google-chrome] [--speech=sample.wav] [--mock]
+//       [--browser=chromium|firefox] [--chrome=/usr/bin/google-chrome]
+//       [--speech=sample.wav] [--mock]
 //
-// --speech feeds a WAV file to the fake microphone to test voice turns.
+// --browser=firefox runs Playwright's Firefox build (`npx playwright-core
+// install firefox`) instead of the Chrome at --chrome.
+// --speech feeds a WAV file to Chrome's fake microphone to test voice turns.
 // --mock runs against scripts/mock_live_api.py instead, which needs no
 // credentials: start the server with --common_bag_ws_port set to the mock's
 // port. The environment defaults to autopush-common, which the server routes
@@ -19,11 +22,11 @@
 
 /* global window, document, customElements, AppState, handleSessionResumptionReconnect, axe -- used in
    page.evaluate() callbacks, which run in the app page */
-const { chromium } = require("playwright-core");
+const { chromium, firefox } = require("playwright-core");
 const fs = require("fs");
 const path = require("path");
 
-const FLAGS = ["server", "environment", "model", "chrome", "speech", "mock"];
+const FLAGS = ["server", "environment", "model", "browser", "chrome", "speech", "mock"];
 const args = {};
 for (const arg of process.argv.slice(2)) {
     const [name, value] = arg.replace(/^--/, "").split(/=(.*)/s);
@@ -39,6 +42,11 @@ const MOCK = "mock" in args;
 const ENVIRONMENT = args.environment || (MOCK ? "autopush-common" : "prod-us-rep");
 const MODEL = args.model || "gemini-3.8-live";
 const CHROME = args.chrome || process.env.CHROME_PATH || "/usr/bin/google-chrome";
+const BROWSER = args.browser || "chromium";
+if (!["chromium", "firefox"].includes(BROWSER)) {
+    console.error(`unknown --browser=${BROWSER}; use chromium or firefox`);
+    process.exit(2);
+}
 const FC_DEFINITION = require(path.join(__dirname, "..", "fc_definition.json"));
 
 async function newPage(browser, pages) {
@@ -168,6 +176,29 @@ async function accessibilityViolations(page) {
         return result.violations.map((v) => `${v.id} (${v.nodes.map((n) => n.target.join(" ")).join(", ")})`);
     });
     return violations;
+}
+
+// Launches the browser with a fake camera and microphone that need no
+// permission prompt, and autoplay allowed. chromeArgs are added for Chrome.
+function launch(chromeArgs = []) {
+    if (BROWSER === "firefox") {
+        return firefox.launch({
+            firefoxUserPrefs: {
+                "media.navigator.streams.fake": true,
+                "media.navigator.permission.disabled": true,
+                "media.autoplay.default": 0, // Allowed.
+            },
+        });
+    }
+    return chromium.launch({
+        executablePath: CHROME,
+        args: [
+            "--use-fake-ui-for-media-stream",
+            "--use-fake-device-for-media-stream",
+            "--autoplay-policy=no-user-gesture-required",
+            ...chromeArgs,
+        ],
+    });
 }
 
 class Skip extends Error {}
@@ -467,15 +498,9 @@ const scenarios = {
     async "voice turn from the microphone"(browser, run) {
         if (MOCK) skip("the mock ignores audio");
         if (!args.speech) skip("pass --speech=file.wav");
-        const voiceBrowser = await chromium.launch({
-            executablePath: CHROME,
-            args: [
-                "--use-fake-ui-for-media-stream",
-                "--use-fake-device-for-media-stream",
-                `--use-file-for-fake-audio-capture=${path.resolve(args.speech)}%noloop`,
-                "--autoplay-policy=no-user-gesture-required",
-            ],
-        });
+        // Firefox's fake microphone plays a tone; only Chrome's takes a file.
+        if (BROWSER !== "chromium") skip("--speech needs Chrome");
+        const voiceBrowser = await launch([`--use-file-for-fake-audio-capture=${path.resolve(args.speech)}%noloop`]);
         try {
             const page = await run.newPage(voiceBrowser);
             await connect(page, { transport: "webrtc", modality: "AUDIO" });
@@ -492,14 +517,8 @@ const scenarios = {
 };
 
 (async () => {
-    const browser = await chromium.launch({
-        executablePath: CHROME,
-        args: [
-            "--use-fake-ui-for-media-stream",
-            "--use-fake-device-for-media-stream",
-            "--autoplay-policy=no-user-gesture-required",
-        ],
-    });
+    const browser = await launch();
+    console.log(`${BROWSER} ${browser.version()}`);
     const counts = { PASS: 0, "PASS*": 0, SKIP: 0, FAIL: 0 };
     for (const [name, scenario] of Object.entries(scenarios)) {
         const started = Date.now();
