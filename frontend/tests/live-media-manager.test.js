@@ -817,3 +817,97 @@ test("the WebRTC state reads negotiating while a session is set up, not closed",
     manager.close();
     assert.equal(stateEl.textContent, "closed");
 });
+
+// A WebRTC manager whose peer connections hold every replaceTrack() until the
+// test releases it. Chrome resolves a held one even after pc.close().
+function webRtcManagerWithHeldReplaceTrack() {
+    const pcs = [];
+    const held = [];
+    class FakePeerConnection {
+        constructor() {
+            pcs.push(this);
+            this.transceivers = [];
+            this.iceGatheringState = "complete";
+            this.localDescription = { sdp: "v=0\r\n" };
+        }
+        createDataChannel() { return { close() {} }; }
+        addTransceiver(kind, { direction }) {
+            const sender = { replaceTrack: () => new Promise((resolve) => held.push(resolve)) };
+            const transceiver = { kind, direction, sender, receiver: { track: {} }, mid: null };
+            this.transceivers.push(transceiver);
+            return transceiver;
+        }
+        async setLocalDescription() {}
+        close() {}
+    }
+    const context = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
+        document: { getElementById: () => null },
+        RTCPeerConnection: FakePeerConnection,
+        MediaStream: class { addTrack() {} },
+        crypto: { randomUUID: () => "id" },
+        clearTimeout,
+        clearInterval,
+    });
+    const manager = new context.G3RtcWebRtcManager(null);
+    manager.micStream = { getAudioTracks: () => [fakeTrack()], getTracks: () => [] };
+    const releaseAll = () => held.splice(0).forEach((resolve) => resolve());
+    return { manager, pcs, releaseAll };
+}
+
+test("close() while initiateSession sends the mic ends it with the closed error and no new stream", async () => {
+    const { manager, releaseAll } = webRtcManagerWithHeldReplaceTrack();
+    const offering = manager.initiateSession().catch((error) => error);
+    await settle();
+    manager.close({ keepLocalMedia: true }); // Disconnect while the mic is attached.
+    releaseAll();
+    const error = await offering;
+    assert.equal(error.message, "The WebRTC session was closed.");
+    assert.equal(manager.remoteStream, null);
+});
+
+test("an initiateSession overtaken by a newer one leaves the newer connection alone", async () => {
+    const { manager, pcs, releaseAll } = webRtcManagerWithHeldReplaceTrack();
+    const first = manager.initiateSession().catch((error) => error);
+    await settle();
+    const second = manager.initiateSession();
+    await settle();
+    releaseAll();
+    await settle();
+    releaseAll();
+    assert.equal((await first).message, "The WebRTC session was closed.");
+    await second;
+    assert.equal(manager.pc, pcs[1]);
+    const recvonly = (pc) => pc.transceivers.filter((t) => t.direction === "recvonly").length;
+    assert.equal(recvonly(pcs[0]), 0);
+    assert.equal(recvonly(pcs[1]), 2); // Audio and video, once.
+});
+
+test("stats that arrive after close() aren't shown", async () => {
+    const elements = new Map();
+    const element = (id) => {
+        if (!elements.has(id)) elements.set(id, { textContent: "--" });
+        return elements.get(id);
+    };
+    const ticks = [];
+    const context = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
+        document: { getElementById: element },
+        setInterval: (fn) => ticks.push(fn),
+        clearInterval() {},
+        clearTimeout,
+        performance: { now: () => 0 },
+    });
+    const manager = new context.G3RtcWebRtcManager(null);
+    let deliverStats;
+    manager.pc = {
+        getStats: () => new Promise((resolve) => (deliverStats = resolve)),
+        close() {},
+    };
+    manager.startStatsPolling();
+    const polling = ticks[0]();
+    manager.close(); // Disconnect while getStats() is pending.
+    deliverStats(new Map([["in", { type: "inbound-rtp", kind: "video", bytesReceived: 4096, packetsLost: 3, framesPerSecond: 30 }]]));
+    await polling;
+    assert.equal(element("download-speed").textContent, "--");
+    assert.equal(element("webrtc-packet-loss").textContent, "--");
+    assert.equal(element("webrtc-fps").textContent, "--");
+});
