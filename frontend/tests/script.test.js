@@ -135,6 +135,7 @@ function loadApp(globals = {}, { radios = [] } = {}) {
         "connectBtnClick",
         "handleAudioFileInputChange",
         "handleAvatarFileInputChange",
+        "handleFcFileInputChange",
         "AppUI",
         "toggleSchedulingDisable",
         "endSession",
@@ -1224,6 +1225,50 @@ test("a voice file over the size limit is refused before it is read", async () =
         'Could not use "huge.wav" as a voice sample: it is 200.1 MB; files are limited to 200 MB.'
     );
     assert.equal(context.AppState.customVoiceBase64, "");
+});
+
+test("a function declarations file that can't be read is reported, and the same file can be picked again", async () => {
+    // Reads through `file.text()`, like the browser's reader reads the file.
+    class TextFileReader {
+        readAsText(file) {
+            file.text().then(
+                (text) => {
+                    this.result = text;
+                    this.onload?.();
+                },
+                (error) => {
+                    this.error = error;
+                    this.onerror?.();
+                }
+            );
+        }
+    }
+    const { context, element } = loadApp({
+        FileReader: TextFileReader,
+        GeminiLiveAPI: class extends FakeGeminiLiveAPI {
+            static toFunctionDeclarations = (json) => (Array.isArray(json) ? json : [json]);
+        },
+    });
+    const notReadable = Object.assign(new Error("The requested file could not be read."), { name: "NotReadableError" });
+    let contents = Promise.reject(notReadable);
+    contents.catch(() => {});
+    const input = { value: "tools.json", files: [{ name: "tools.json", text: () => contents }] };
+    await context.handleFcFileInputChange({ target: input });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(
+        element("dialogMessage").textContent,
+        'Could not use "tools.json": the file can\'t be read (The requested file could not be read.)'
+    );
+    assert.equal(input.value, "");
+    assert.equal(context.AppState.functionCallDefinition, null);
+
+    contents = Promise.resolve('[{"name": "get_weather"}]');
+    input.value = "tools.json";
+    await context.handleFcFileInputChange({ target: input });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.match(element("dialogMessage").textContent, /^Loaded 1 function declaration\(s\) from "tools.json"/);
+    assert.equal(element("fcFileName").textContent, "File: tools.json (get_weather)");
+    assert.equal(input.value, "");
 });
 
 test("a recording stops itself at the sample limit and is kept, cut to the limit", async () => {

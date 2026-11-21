@@ -750,32 +750,33 @@ async function handleAudioFileInputChange(event) {
     }
 }
 
-function handleFcFileInputChange(event) {
+async function handleFcFileInputChange(event) {
     const file = event.target.files[0];
     if (!file) return;
+    event.target.value = ""; // So choosing the same file again fires change.
 
-    const reader = new FileReader();
-    reader.onload = () => {
-        try {
-            const declarations = GeminiLiveAPI.toFunctionDeclarations(JSON.parse(String(reader.result)));
-            const unnamed = declarations.filter((d) => !d || typeof d.name !== "string");
-            if (declarations.length === 0 || unnamed.length > 0) {
-                throw new Error("expected a list of function declarations, each with a name");
-            }
-            AppState.functionCallDefinition = declarations;
-            const names = declarations.map((d) => d.name).join(", ");
-            AppUI.setText("fcFileName", `File: ${file.name} (${names})`);
-            AppUI.setHidden("fcRemove", false);
-            AppUI.showModal(
-                `Loaded ${declarations.length} function declaration(s) from "${file.name}". ` +
-                "They apply from the next connection."
-            );
-        } catch (error) {
-            AppUI.showModal(`Could not use "${file.name}": ${error.message}`);
+    try {
+        // Rejects if the file was moved or changed since it was picked. The
+        // browsers' messages ("The operation was aborted.") don't say that.
+        const text = await file.text().catch((error) => {
+            throw new Error(`the file can't be read (${(error && (error.message || error.name)) || error})`);
+        });
+        const declarations = GeminiLiveAPI.toFunctionDeclarations(JSON.parse(text));
+        const unnamed = declarations.filter((d) => !d || typeof d.name !== "string");
+        if (declarations.length === 0 || unnamed.length > 0) {
+            throw new Error("expected a list of function declarations, each with a name");
         }
-        event.target.value = ""; // So choosing the same file again fires change.
-    };
-    reader.readAsText(file);
+        AppState.functionCallDefinition = declarations;
+        const names = declarations.map((d) => d.name).join(", ");
+        AppUI.setText("fcFileName", `File: ${file.name} (${names})`);
+        AppUI.setHidden("fcRemove", false);
+        AppUI.showModal(
+            `Loaded ${declarations.length} function declaration(s) from "${file.name}". ` +
+            "They apply from the next connection."
+        );
+    } catch (error) {
+        AppUI.showModal(`Could not use "${file.name}": ${error.message}`);
+    }
 }
 
 function removeFunctionDeclarations() {
