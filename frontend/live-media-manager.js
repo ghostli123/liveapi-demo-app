@@ -430,6 +430,12 @@ class LiveScreenManager extends LiveFrameSource {
 const VIDEO_BACK_BUFFER_S = 10;
 // When playback starts this far behind the newest video, skip to the newest.
 const VIDEO_MAX_LAG_S = 2;
+const VIDEO_UNSUPPORTED_MESSAGE =
+    "This browser can't play the avatar video over the WebSocket transport. " +
+    "Audio and transcripts still work; try the WebRTC transport or another browser.";
+const VIDEO_STOPPED_MESSAGE =
+    "The avatar video stopped after a playback error. Audio and transcripts still work; " +
+    "reconnect to restart the video.";
 
 /** Plays the avatar's fragmented-MP4 stream (WebSocket mode) through MSE. */
 class LiveVideoOutputManager {
@@ -448,32 +454,37 @@ class LiveVideoOutputManager {
         this.videoListenersAttached = false;
         // Called when the browser refuses to start playback without a click.
         this.onAutoplayBlocked = () => {};
+        // Set once the current stream can't be played; its chunks are then
+        // dropped instead of queued (they arrive at about 1 MB per second).
+        this.playbackFailed = false;
+        // Called once per stream with a message for the user when it can't be
+        // played. Audio and transcripts keep working.
+        this.onPlaybackError = () => {};
     }
 
     /** Starts a new stream. Each connection sends its own MP4 init segment. */
     initMediaSource() {
-        const video = document.getElementById('video_player');
-        if (!video) {
-            console.error("video_player element not found for LiveVideoOutputManager");
-            return;
-        }
-
-        const MediaSourceClass = window.ManagedMediaSource || window.MediaSource;
-        if (!MediaSourceClass) {
-            console.error('MediaSource API not supported in this browser');
-            return;
-        }
-        if (!MediaSourceClass.isTypeSupported(this.codec)) {
-            console.error('Unsupported MIME type or codec:', this.codec);
-            return;
-        }
-
         // Chunks of the previous stream can't be appended to the new one, and
         // can't share a file with it either.
         this.finishRecording();
         this.chunkQueue = [];
+        this.mediaSource = null;
         this.sourceBuffer = null;
         this.initialized = false;
+        this.playbackFailed = false;
+
+        const video = document.getElementById('video_player');
+        if (!video) {
+            this.failPlayback("video_player element not found for LiveVideoOutputManager", null);
+            return;
+        }
+
+        const MediaSourceClass = window.ManagedMediaSource || window.MediaSource;
+        if (!MediaSourceClass || !MediaSourceClass.isTypeSupported(this.codec)) {
+            this.failPlayback(`Media Source Extensions can't play ${this.codec}`, VIDEO_UNSUPPORTED_MESSAGE);
+            return;
+        }
+
         if (this.objectUrl) {
             URL.revokeObjectURL(this.objectUrl);
         }
@@ -488,7 +499,7 @@ class LiveVideoOutputManager {
                 this.initialized = true;
                 this.processQueue();
             } catch (e) {
-                console.error("Error adding source buffer:", e);
+                this.failPlayback(`Error adding source buffer: ${e}`, VIDEO_UNSUPPORTED_MESSAGE);
             }
         });
         mediaSource.addEventListener('error', e => console.error('MediaSource error', e));
@@ -562,11 +573,27 @@ class LiveVideoOutputManager {
             return;
         }
         const arrayBuffer = LiveVideoOutputManager.base64ToArrayBuffer(base64Chunk);
-        this.chunkQueue.push(arrayBuffer);
+        // Recording is the user's choice and doesn't need the player.
         if (this.recordingEnabled) {
             this.recordedChunks.push(arrayBuffer);
         }
+        if (this.playbackFailed) return;
+        this.chunkQueue.push(arrayBuffer);
         this.processQueue();
+    }
+
+    /**
+     * Gives up on playing the current stream: drops queued chunks and stops
+     * queuing new ones until the next initMediaSource().
+     * @param {string} detail - Logged to the console.
+     * @param {?string} userMessage - Passed to onPlaybackError, if set.
+     */
+    failPlayback(detail, userMessage) {
+        this.chunkQueue = [];
+        if (this.playbackFailed) return;
+        this.playbackFailed = true;
+        console.error(detail);
+        if (userMessage) this.onPlaybackError(userMessage);
     }
 
     /**
@@ -591,7 +618,12 @@ class LiveVideoOutputManager {
     processQueue() {
         if (!this.initialized || !this.sourceBuffer) return;
         if (this.sourceBuffer.updating) return;
-        if (this.mediaSource.readyState !== "open") return;
+        // Once open, a MediaSource only leaves "open" on a playback error
+        // (e.g. a decode error ends it); resetPlayer() clears it first.
+        if (this.mediaSource.readyState !== "open") {
+            this.failPlayback(`MediaSource is ${this.mediaSource.readyState}`, VIDEO_STOPPED_MESSAGE);
+            return;
+        }
 
         // Trim in batches of VIDEO_BACK_BUFFER_S rather than on every append.
         if (this.trimBufferIfLarge()) return;
@@ -604,7 +636,7 @@ class LiveVideoOutputManager {
                 if (e.name === "QuotaExceededError") {
                     // Make room and retry the same chunk on updateend.
                     this.chunkQueue.unshift(chunk);
-                    if (!this.trimBuffer(1)) {
+                    if (!this.trimBuffer(1) && !this.dropStaleBuffer()) {
                         console.error("Video buffer full and nothing to trim; dropping chunk.");
                         this.chunkQueue.shift();
                     }
@@ -613,6 +645,32 @@ class LiveVideoOutputManager {
                 }
             }
         }
+    }
+
+    /**
+     * Makes room when the playhead isn't moving (paused, autoplay blocked)
+     * and so nothing is behind it to trim: removes all but the newest
+     * VIDEO_BACK_BUFFER_S and moves the playhead to the live edge, so playback
+     * resumes on live video instead of the buffer filling up for good.
+     * @returns {boolean} Whether a removal started (wait for updateend).
+     */
+    dropStaleBuffer() {
+        const video = document.getElementById("video_player");
+        const buffered = this.sourceBuffer.buffered;
+        if (!video || buffered.length === 0) return false;
+        const liveEdge = buffered.end(buffered.length - 1);
+        const removeEnd = liveEdge - VIDEO_BACK_BUFFER_S;
+        if (removeEnd <= buffered.start(0)) return false;
+        try {
+            this.sourceBuffer.remove(buffered.start(0), removeEnd);
+        } catch (e) {
+            console.warn("Error dropping stale video:", e);
+            return false;
+        }
+        if (video.currentTime < removeEnd) {
+            video.currentTime = liveEdge - 0.3;
+        }
+        return true;
     }
 
     trimBufferIfLarge() {
@@ -668,6 +726,7 @@ class LiveVideoOutputManager {
         this.sourceBuffer = null;
         this.mediaSource = null;
         this.initialized = false;
+        this.playbackFailed = false;
     }
 
     static base64ToArrayBuffer(base64) {

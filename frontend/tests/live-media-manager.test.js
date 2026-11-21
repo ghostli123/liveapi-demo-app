@@ -189,3 +189,144 @@ test("ending a share from the browser doesn't drop a pick in progress", async ()
     assert.equal(await second, true);
     assert.equal(manager.stream, requests[1].stream);
 });
+
+// A LiveVideoOutputManager on a fake MediaSource. `buffered` is one range the
+// test sets; appendBuffer() throws `appendError` when it's set.
+function videoOutputWithFakeMediaSource({ codecSupported = true, addSourceBufferError = null } = {}) {
+    const fake = { mediaSources: [], appendError: null, buffered: null };
+    class FakeMediaSource {
+        static isTypeSupported() { return codecSupported; }
+        constructor() {
+            this.readyState = "closed";
+            this.listeners = {};
+            fake.mediaSources.push(this);
+        }
+        addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }
+        open() {
+            this.readyState = "open";
+            (this.listeners.sourceopen || []).forEach((l) => l());
+        }
+        addSourceBuffer() {
+            if (addSourceBufferError) throw addSourceBufferError;
+            const listeners = [];
+            this.sourceBuffer = {
+                updating: false,
+                appended: [],
+                removed: [],
+                get buffered() {
+                    const range = fake.buffered;
+                    return range
+                        ? { length: 1, start: () => range[0], end: () => range[1] }
+                        : { length: 0 };
+                },
+                addEventListener: (type, listener) => listeners.push(listener),
+                appendBuffer(chunk) {
+                    if (fake.appendError) throw fake.appendError;
+                    this.appended.push(chunk);
+                },
+                remove(start, end) {
+                    this.removed.push([start, end]);
+                    this.updating = true;
+                },
+                // Finishes a pending remove(), as the browser does later.
+                finishUpdate() {
+                    this.updating = false;
+                    listeners.forEach((l) => l());
+                },
+            };
+            return this.sourceBuffer;
+        }
+        endOfStream() { this.readyState = "ended"; }
+    }
+    const video = { style: {}, currentTime: 0, addEventListener() {}, play: () => Promise.resolve() };
+    const context = loadScript("live-media-manager.js", ["LiveVideoOutputManager"], {
+        window: { MediaSource: FakeMediaSource, atob },
+        document: { getElementById: (id) => (id === "video_player" ? video : null) },
+        URL: { createObjectURL: () => "blob:x", revokeObjectURL() {} },
+    });
+    const manager = new context.LiveVideoOutputManager();
+    const errors = [];
+    manager.onPlaybackError = (message) => errors.push(message);
+    return { manager, fake, video, errors };
+}
+
+const VIDEO_CHUNK = Buffer.from("fake mp4 fragment").toString("base64");
+
+test("an unsupported codec is reported once and chunks aren't queued", () => {
+    const { manager, fake, errors } = videoOutputWithFakeMediaSource({ codecSupported: false });
+    manager.recordingEnabled = true;
+    manager.initMediaSource();
+    for (let i = 0; i < 100; i++) manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(fake.mediaSources.length, 0);
+    assert.equal(manager.chunkQueue.length, 0);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /can't play the avatar video/);
+    // Recording doesn't need the player, so it still works.
+    assert.equal(manager.recordedChunks.length, 100);
+});
+
+test("a failed addSourceBuffer() is reported once and chunks aren't queued", () => {
+    const error = Object.assign(new Error("unsupported"), { name: "NotSupportedError" });
+    const { manager, fake, errors } = videoOutputWithFakeMediaSource({ addSourceBufferError: error });
+    manager.initMediaSource();
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4"); // Queued until sourceopen.
+    fake.mediaSources[0].open();
+    for (let i = 0; i < 100; i++) manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(manager.chunkQueue.length, 0);
+    assert.equal(errors.length, 1);
+});
+
+test("a MediaSource that ends mid-stream is reported and stops queuing; a new stream plays", () => {
+    const { manager, fake, errors } = videoOutputWithFakeMediaSource();
+    manager.initMediaSource();
+    fake.mediaSources[0].open();
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(fake.mediaSources[0].sourceBuffer.appended.length, 1);
+    fake.mediaSources[0].readyState = "ended"; // What a decode error does.
+    for (let i = 0; i < 100; i++) manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(manager.chunkQueue.length, 0);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /stopped after a playback error/);
+
+    manager.initMediaSource(); // A resume streams a new MP4.
+    fake.mediaSources[1].open();
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(fake.mediaSources[1].sourceBuffer.appended.length, 1);
+    assert.equal(errors.length, 1);
+});
+
+test("a full buffer with the playhead stopped drops stale video and keeps the live chunk", () => {
+    const { manager, fake, video, errors } = videoOutputWithFakeMediaSource();
+    manager.initMediaSource();
+    fake.mediaSources[0].open();
+    const sourceBuffer = fake.mediaSources[0].sourceBuffer;
+    // 150 s buffered while paused (or autoplay blocked) at 0, so nothing is
+    // behind the playhead to trim.
+    fake.buffered = [0, 150];
+    fake.appendError = Object.assign(new Error("full"), { name: "QuotaExceededError" });
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.deepEqual(sourceBuffer.removed, [[0, 140]]);
+    assert.ok(video.currentTime > 149, `playhead at ${video.currentTime}, not the live edge`);
+    assert.equal(manager.chunkQueue.length, 1); // Retried after the removal.
+
+    fake.appendError = null;
+    fake.buffered = [140, 150];
+    sourceBuffer.finishUpdate();
+    assert.equal(sourceBuffer.appended.length, 1);
+    assert.equal(manager.chunkQueue.length, 0);
+    assert.equal(errors.length, 0);
+});
+
+test("a full buffer while playing trims behind the playhead and leaves it alone", () => {
+    const { manager, fake, video } = videoOutputWithFakeMediaSource();
+    manager.initMediaSource();
+    fake.mediaSources[0].open();
+    const sourceBuffer = fake.mediaSources[0].sourceBuffer;
+    fake.buffered = [0, 15];
+    video.currentTime = 12;
+    fake.appendError = Object.assign(new Error("full"), { name: "QuotaExceededError" });
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.deepEqual(sourceBuffer.removed, [[0, 11]]);
+    assert.equal(video.currentTime, 12);
+    assert.equal(manager.chunkQueue.length, 1);
+});
