@@ -914,14 +914,54 @@ test("disconnect() stops the idle timer, and idle_timeout_s 0 disables it", asyn
     assert.equal(off.idleTimer, null);
 });
 
-test("a resume keeps the conversation's idle timer", async () => {
+// Resumes `api` from a server that now sets --idle_timeout_s=idleS.
+async function resumeWithIdle(api, idleS) {
+    api.sendPostRequest = async () => ({ project_id: "p", idle_timeout_s: idleS });
+    if (api.webSocket) {
+        api.webSocket.close = () => {};
+        api.webSocket.readyState = FakeWebSocket.CLOSED;
+    }
+    await api.resume("h"); // setupWebSocketToService is a no-op: no new socket.
+}
+
+test("a resume keeps the conversation's last activity", async () => {
     const api = await idleApi(120);
-    const timer = api.idleTimer;
-    api.lastActivityAt = 12345;
-    api.webSocket.close = () => {};
-    api.webSocket.readyState = FakeWebSocket.CLOSED;
-    await api.resume("h");
-    assert.equal(api.idleTimer, timer);
-    assert.equal(timers[timer - 1].cleared, false);
-    assert.equal(api.lastActivityAt, 12345);
+    const lastActivityAt = Date.now() - 30000;
+    api.lastActivityAt = lastActivityAt;
+    await resumeWithIdle(api, 120);
+    assert.equal(api.lastActivityAt, lastActivityAt);
+    // The deadline stays 120 s after the last activity, not after the resume.
+    assert.ok(Math.abs(timers[api.idleTimer - 1].ms - 90000) < 1000);
+    fireIdleTimer(api, 120000);
+    assert.deepEqual(plain(api.idleMessages), ["Disconnected after 2 minutes without activity."]);
+});
+
+test("a resume that turns the idle timeout off stops the timer", async () => {
+    const api = await idleApi(120);
+    const old = timers[api.idleTimer - 1];
+    await resumeWithIdle(api, 0);
+    assert.equal(old.cleared, true);
+    assert.equal(api.idleTimer, null);
+    // Had it fired while the resume was still preparing, it ends nothing.
+    old.fn();
+    assert.deepEqual(plain(api.idleMessages), []);
+});
+
+test("a resume that turns the idle timeout on or changes it re-arms the timer", async () => {
+    const api = await idleApi(0);
+    assert.equal(api.idleTimer, null);
+    api.lastActivityAt = Date.now() - 10000;
+    await resumeWithIdle(api, 60);
+    assert.ok(Math.abs(timers[api.idleTimer - 1].ms - 50000) < 1000);
+
+    const old = timers[api.idleTimer - 1];
+    await resumeWithIdle(api, 20);
+    assert.equal(old.cleared, true);
+    assert.ok(Math.abs(timers[api.idleTimer - 1].ms - 10000) < 1000);
+    // Already idle longer than the new timeout: it fires on the next tick.
+    api.lastActivityAt = Date.now() - 30000;
+    await resumeWithIdle(api, 20);
+    assert.equal(timers[api.idleTimer - 1].ms, 0);
+    timers[api.idleTimer - 1].fn();
+    assert.deepEqual(plain(api.idleMessages), ["Disconnected after 20 seconds without activity."]);
 });

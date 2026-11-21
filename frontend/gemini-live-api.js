@@ -541,7 +541,6 @@ class GeminiLiveAPI {
             if (!(await this.prepare(attempt))) return; // Cancelled by disconnect().
             console.log("connect(): Preparation successful. Starting WebSocket connection...");
             this.setupWebSocketToService();
-            // Resumes keep the timer: they continue the same conversation.
             this.startIdleTimer();
         } catch (error) {
             console.error("connect(): Connection sequence failed.", error);
@@ -624,6 +623,9 @@ class GeminiLiveAPI {
             return;
         }
         this.setupWebSocketToService();
+        // The same conversation goes on, so its last activity still counts;
+        // re-arm because the server's idle_timeout_s may have changed.
+        this.startIdleTimer({ keepActivity: true });
     }
 
     /**
@@ -724,27 +726,33 @@ class GeminiLiveAPI {
      * Ends the session (through onIdleTimeout) once noteActivity() hasn't
      * been called for idleTimeoutMs, so an abandoned tab doesn't hold a
      * server session and its upstream connection indefinitely.
+     * @param {{keepActivity?: boolean}} [options] - keepActivity counts from
+     *     the last noteActivity() (a resume) instead of from now (a connect).
      */
-    startIdleTimer() {
+    startIdleTimer({ keepActivity = false } = {}) {
         clearTimeout(this.idleTimer);
         this.idleTimer = null;
+        // Even with the timeout off, so a resume that turns it on has a start.
+        if (!keepActivity) this.noteActivity();
         if (!this.idleTimeoutMs) return;
-        this.noteActivity();
         // Browsers run a timeout longer than 2^31-1 ms (~24.8 days) at once,
         // so a longer --idle_timeout_s would make check() spin; it re-arms.
-        const wait = (ms) => setTimeout(check, Math.min(ms, MAX_TIMEOUT_MS));
+        const wait = (ms) => setTimeout(check, Math.min(Math.max(0, ms), MAX_TIMEOUT_MS));
         const check = () => {
+            this.idleTimer = null;
+            // A resume's prepare() may have turned the timeout off.
+            if (!this.idleTimeoutMs) return;
             const left = this.lastActivityAt + this.idleTimeoutMs - Date.now();
             if (left > 0) {
                 this.idleTimer = wait(left);
                 return;
             }
-            this.idleTimer = null;
             this.onIdleTimeout(
                 `Disconnected after ${describeDuration(this.idleTimeoutMs)} without activity.`
             );
         };
-        this.idleTimer = wait(this.idleTimeoutMs);
+        const left = keepActivity ? this.lastActivityAt + this.idleTimeoutMs - Date.now() : this.idleTimeoutMs;
+        this.idleTimer = wait(left);
     }
 
     /**
