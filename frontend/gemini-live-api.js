@@ -399,8 +399,8 @@ class GeminiLiveAPI {
 
     /**
      * Configures audio and video bitrates for the connection.
-     * @param {number} audioBitrate - Audio bitrate in bits per second.
-     * @param {number} videoBitrate - Video bitrate in bits per second.
+     * @param {number | string} audioBitrate - Audio bitrate in bits per second.
+     * @param {number | string} videoBitrate - Video bitrate in bits per second.
      */
     setBitrates(audioBitrate, videoBitrate) {
         this.audioBitrate = Number(audioBitrate) || 0;

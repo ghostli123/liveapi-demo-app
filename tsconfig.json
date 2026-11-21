@@ -1,7 +1,7 @@
 {
     // Type check for the frontend's classic scripts (npm run typecheck); no
-    // build step. Only files that start with `// @ts-check` report errors,
-    // so the remaining files can opt in one at a time. The scripts share
+    // build step. Only files that start with `// @ts-check` report errors;
+    // all the scripts listed in `include` do. The scripts share
     // one global scope, as in index.html, so cross-file classes resolve.
     // The AudioWorklet processors have their own scope: tsconfig.worklet.json.
     "compilerOptions": {
@@ -16,5 +16,5 @@
         "useUnknownInCatchVariables": false,
         "skipLibCheck": true
     },
-    "include": ["frontend/gemini-live-api.js", "frontend/live-media-manager.js", "types/globals.d.ts"]
+    "include": ["frontend/gemini-live-api.js", "frontend/live-media-manager.js", "frontend/script.js", "types/globals.d.ts"]
 }
