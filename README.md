@@ -56,7 +56,7 @@ Requires Python 3.11 or later.
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `--project_id` | `$GOOGLE_CLOUD_PROJECT`, then `live-api-webrtc-testing` | Project used for Live API sessions and the function-call simulator. |
-| `--allowed_host_suffixes` | `.googleapis.com` | Upstream hosts the proxy may connect to. The proxy sends its access token to these hosts, so keep the list tight. |
+| `--allowed_host_suffixes` | `.googleapis.com` | Upstream hosts the proxy may connect to. The proxy sends its access token to these hosts, so keep the list tight. Upstream redirects aren't followed, so the token can't reach a host outside the list. |
 | `--allowed_hosts` | none | Extra host names browsers may use to reach the server, such as a custom domain or the public host of a proxy that rewrites `Host`. localhost, IP addresses, this machine's names, and `*.run.app` on Cloud Run are always allowed. Entries are host names with an optional port (`demo.example.com:8443`); the server refuses to start on anything else, such as a URL. |
 | `--fr_simulator_model` | `gemini-3-flash-preview` | Model that simulates function responses. |
 | `--fr_simulator_thinking_level` | `low` | Its thinking level; empty uses the model's default. |

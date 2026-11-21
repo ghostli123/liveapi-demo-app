@@ -32,6 +32,19 @@ _UPSTREAM_LOGGER = std_logging.getLogger("websockets.client.upstream")
 _UPSTREAM_LOGGER.setLevel(std_logging.INFO)
 
 
+class _NoRedirectConnect(websockets.connect):
+    """websockets.connect that fails on redirects instead of following them.
+
+    websockets follows up to 10 redirects and sends the same headers to each
+    new host, so a redirect from an allowed host would hand the access token to
+    a host that --allowed_host_suffixes never checked. The Live API doesn't
+    redirect, so a redirect is reported as the handshake error it came with.
+    """
+
+    def process_redirect(self, exc: Exception) -> Exception | str:
+        return exc
+
+
 def truncate_close_reason(reason: str) -> str:
     """Cuts reason to fit a close frame without splitting a UTF-8 sequence."""
     encoded = reason.encode("utf-8")
@@ -149,17 +162,14 @@ class WebsocketHandler:
             "close_timeout": UPSTREAM_CLOSE_TIMEOUT_S,
             "logger": _UPSTREAM_LOGGER,
         }
-        if token is None:
-            return websockets.connect(self.liveapi_service_url, **options)
-        return websockets.connect(
-            self.liveapi_service_url,
-            additional_headers={
+        if token is not None:
+            options["additional_headers"] = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {token}",
-            },
-            ssl=ssl.create_default_context(cafile=certifi.where()),
-            **options,
-        )
+            }
+        if self.liveapi_service_url.startswith("wss://"):
+            options["ssl"] = ssl.create_default_context(cafile=certifi.where())
+        return _NoRedirectConnect(self.liveapi_service_url, **options)
 
     async def create_proxy(self) -> None:
         """Connects upstream and relays in both directions until one side closes."""

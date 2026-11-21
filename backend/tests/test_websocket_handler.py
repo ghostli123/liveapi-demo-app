@@ -66,7 +66,7 @@ class UpstreamLoggingTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(root.setLevel, root.level)
         root.setLevel(logging.DEBUG)  # What --debug does.
         handler = websocket_handler.WebsocketHandler("wss://unused", "s", None)
-        with mock.patch.object(websockets, "connect") as connect:
+        with mock.patch.object(websocket_handler, "_NoRedirectConnect") as connect:
             handler._connect_upstream("secret-token")
         options = dict(connect.call_args.kwargs)
         del options["ssl"]  # The test server is plain ws://.
@@ -84,6 +84,45 @@ class UpstreamLoggingTest(unittest.IsolatedAsyncioTestCase):
                 async with websockets.connect(f"ws://127.0.0.1:{port}", **options):
                     pass
         self.assertNotIn("secret-token", "\n".join(logs.output))
+
+
+class UpstreamRedirectTest(unittest.IsolatedAsyncioTestCase):
+    async def test_redirect_is_not_followed_with_the_token(self):
+        received = []
+
+        async def target(connection):
+            received.append(connection.request.headers.get("Authorization"))
+            await connection.close()
+
+        def redirect_to_target(connection, request):
+            response = connection.respond(302, "")
+            response.headers["Location"] = f"ws://localhost:{target_port}/elsewhere"
+            return response
+
+        quiet = logging.getLogger("test.quiet_server")
+        quiet.setLevel(logging.INFO)
+        async with (
+            websockets.serve(target, "127.0.0.1", 0, logger=quiet) as target_server,
+            websockets.serve(
+                target,
+                "127.0.0.1",
+                0,
+                logger=quiet,
+                process_request=redirect_to_target,
+            ) as redirector,
+        ):
+            target_port = next(iter(target_server.sockets)).getsockname()[1]
+            port = next(iter(redirector.sockets)).getsockname()[1]
+            handler = websocket_handler.WebsocketHandler(
+                f"ws://127.0.0.1:{port}/ws", "s", None
+            )
+            with self.assertRaises(websockets.exceptions.InvalidStatus) as caught:
+                await handler._connect_upstream("secret-token")
+        self.assertEqual(received, [])
+        self.assertEqual(
+            websocket_handler.describe_connect_error(caught.exception),
+            "Upstream HTTP 302",
+        )
 
 
 if __name__ == "__main__":
