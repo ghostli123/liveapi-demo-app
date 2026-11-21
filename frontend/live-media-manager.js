@@ -9,6 +9,12 @@ class LiveAudioOutputManager {
         this.workletNode = null;
         /** @type {Promise<AudioWorkletNode> | null} */
         this.ready = null; // Resolves to workletNode; see initializeAudioContext().
+        // After a failed start: the rejection returned until retryAt (a
+        // Date.now() time), and the current wait between retries.
+        /** @type {Promise<AudioWorkletNode> | null} */
+        this.failed = null;
+        this.retryAt = 0;
+        this.retryDelayMs = 0;
     }
 
     /**
@@ -26,11 +32,14 @@ class LiveAudioOutputManager {
             return;
         }
         this.initializeAudioContext()
-            .then((workletNode) => {
-                workletNode.port.postMessage(float32Data, [float32Data.buffer]);
-            })
+            .then(
+                (workletNode) => {
+                    workletNode.port.postMessage(float32Data, [float32Data.buffer]);
+                },
+                () => {} // Logged once per attempt by initializeAudioContext(); the chunk is dropped.
+            )
             .catch((error) => console.error("Error playing audio chunk:", error));
-        this.resume();
+        this.resumeContext();
     }
 
     /** Drops audio that hasn't played yet, e.g. when the model is interrupted. */
@@ -49,6 +58,13 @@ class LiveAudioOutputManager {
      * gesture (e.g. the Connect click) so autoplay rules allow it.
      */
     resume() {
+        // A new Connect retries a player that failed to start right away.
+        this.failed = null;
+        this.retryDelayMs = 0;
+        this.resumeContext();
+    }
+
+    resumeContext() {
         // Failures are logged where they happen; Connect goes on without sound.
         this.initializeAudioContext().catch(() => {});
         if (this.audioContext?.state === "suspended") {
@@ -62,10 +78,13 @@ class LiveAudioOutputManager {
      * Creates the audio context and worklet once; later calls return the same
      * promise, so concurrent chunks can't create a second context. If the
      * worklet fails to load (e.g. during a deploy), or the browser refuses
-     * the context, the next call starts over.
+     * the context, calls return that rejection for a while (1 s, doubling to
+     * 30 s), so a response's chunks don't each build a context and refetch
+     * the worklet; the first call after that, or a resume(), starts over.
      */
     initializeAudioContext() {
         if (this.ready) return this.ready;
+        if (this.failed && Date.now() < this.retryAt) return this.failed;
         let audioContext;
         try {
             audioContext = new (window.AudioContext ||
@@ -75,7 +94,10 @@ class LiveAudioOutputManager {
             // without Web Audio. Callers get a rejection rather than a throw,
             // so Connect still opens the session.
             console.error("Could not create the audio player:", error);
-            return Promise.reject(error);
+            const failed = Promise.reject(error);
+            failed.catch(() => {});
+            this.backOff(failed);
+            return failed;
         }
         const ready = audioContext.audioWorklet
             .addModule("/frontend/pcm-processor.js")
@@ -85,6 +107,8 @@ class LiveAudioOutputManager {
                 });
                 workletNode.connect(audioContext.destination);
                 this.workletNode = workletNode;
+                this.failed = null;
+                this.retryDelayMs = 0;
                 return workletNode;
             });
         ready.catch((error) => {
@@ -94,11 +118,19 @@ class LiveAudioOutputManager {
             // attempt needs a new context.
             this.audioContext = null;
             this.ready = null;
+            this.backOff(ready);
             audioContext.close().catch(() => {});
         });
         this.audioContext = audioContext;
         this.ready = ready;
         return ready;
+    }
+
+    /** @param {Promise<AudioWorkletNode>} failed */
+    backOff(failed) {
+        this.retryDelayMs = Math.min(30000, this.retryDelayMs * 2 || 1000);
+        this.retryAt = Date.now() + this.retryDelayMs;
+        this.failed = failed;
     }
 
     static base64ToArrayBuffer(base64) {

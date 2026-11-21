@@ -754,10 +754,19 @@ test("a full buffer while playing trims behind the playhead and leaves it alone"
 });
 
 // A LiveAudioOutputManager on fake AudioContexts. `fake.failNextLoad` makes the
-// next addModule() reject; like Chrome and Firefox, a context whose load
-// failed keeps rejecting.
+// next addModule() reject (`fake.failAllLoads` every one); like Chrome and
+// Firefox, a context whose load failed keeps rejecting. `fake.now` is the
+// script's Date.now().
 function audioOutputWithFakeContexts() {
-    const fake = { contexts: [], failNextLoad: false, refuseContexts: false, errors: [] };
+    const fake = {
+        contexts: [],
+        loads: 0,
+        failNextLoad: false,
+        failAllLoads: false,
+        refuseContexts: false,
+        errors: [],
+        now: 0,
+    };
     class FakeAudioContext {
         constructor() {
             if (fake.refuseContexts) throw new Error("NotSupportedError");
@@ -766,7 +775,8 @@ function audioOutputWithFakeContexts() {
             let failed = false;
             this.audioWorklet = {
                 addModule: async () => {
-                    if (fake.failNextLoad) {
+                    fake.loads++;
+                    if (fake.failNextLoad || fake.failAllLoads) {
                         fake.failNextLoad = false;
                         failed = true;
                     }
@@ -795,6 +805,7 @@ function audioOutputWithFakeContexts() {
     const context = loadScript("live-media-manager.js", ["LiveAudioOutputManager"], {
         window: { AudioContext: FakeAudioContext, atob },
         AudioWorkletNode: FakeWorkletNode,
+        Date: { now: () => fake.now },
         console: { log() {}, warn() {}, error: (message) => fake.errors.push(message) },
     });
     return { manager: new context.LiveAudioOutputManager(), fake };
@@ -814,6 +825,12 @@ test("a failed audio worklet load is retried on a new context", async () => {
         await settle();
         assert.equal(fake.contexts[0].state, "closed");
 
+        // Chunks right after the failure wait for the retry delay.
+        manager.playAudioChunk(AUDIO_CHUNK);
+        await settle();
+        assert.equal(fake.contexts.length, 1);
+
+        fake.now = 1000;
         manager.playAudioChunk(AUDIO_CHUNK);
         await settle();
         assert.equal(fake.contexts.length, 2);
@@ -843,6 +860,12 @@ test("a refused AudioContext rejects instead of throwing, and is retried later",
         assert.ok(fake.errors.includes("Could not create the audio player:"));
 
         fake.refuseContexts = false;
+        manager.playAudioChunk(AUDIO_CHUNK); // Within the retry delay: dropped.
+        await settle();
+        assert.equal(fake.contexts.length, 0);
+        assert.equal(fake.errors.filter((e) => e === "Could not create the audio player:").length, 1);
+
+        fake.now = 1000;
         manager.playAudioChunk(AUDIO_CHUNK);
         await settle();
         assert.equal(fake.contexts.length, 1);
@@ -851,6 +874,50 @@ test("a refused AudioContext rejects instead of throwing, and is retried later",
     } finally {
         process.off("unhandledRejection", onUnhandled);
     }
+});
+
+test("a worklet that keeps failing is retried with a growing delay, and at once on Connect", async () => {
+    const { manager, fake } = audioOutputWithFakeContexts();
+    fake.failAllLoads = true;
+    manager.resume(); // The Connect click.
+    await settle();
+    for (let i = 0; i < 20; i++) manager.playAudioChunk(AUDIO_CHUNK);
+    await settle();
+    // Before, each chunk built a context, refetched the worklet and logged twice.
+    assert.equal(fake.contexts.length, 1);
+    assert.equal(fake.loads, 1);
+    assert.deepEqual(fake.errors, ["Could not load the audio player:"]);
+
+    const loadsAt = async (now) => {
+        fake.now = now;
+        manager.playAudioChunk(AUDIO_CHUNK);
+        await settle();
+        return fake.loads;
+    };
+    assert.equal(await loadsAt(999), 1);
+    assert.equal(await loadsAt(1000), 2); // Then wait 2 s.
+    assert.equal(await loadsAt(2999), 2);
+    assert.equal(await loadsAt(3000), 3); // 4 s.
+    assert.equal(await loadsAt(7000), 4); // 8 s.
+    assert.equal(await loadsAt(15000), 5); // 16 s.
+    assert.equal(await loadsAt(31000), 6); // 30 s from here on.
+    assert.equal(await loadsAt(60999), 6);
+    assert.equal(await loadsAt(61000), 7);
+    assert.ok(fake.contexts.slice(0, -1).every((context) => context.state === "closed"));
+
+    manager.resume(); // A new Connect doesn't wait.
+    await settle();
+    assert.equal(fake.loads, 8);
+
+    fake.failAllLoads = false;
+    fake.now += 1000;
+    manager.playAudioChunk(AUDIO_CHUNK);
+    await settle();
+    assert.equal(fake.loads, 9);
+    assert.equal(manager.workletNode.posted.length, 1);
+    assert.equal(manager.workletNode.context.state, "running");
+    // A later failure (after a success) starts again at 1 s.
+    assert.equal(manager.retryDelayMs, 0);
 });
 
 test("audio chunks share one context and worklet", async () => {
