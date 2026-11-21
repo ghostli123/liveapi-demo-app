@@ -904,14 +904,13 @@ class G3RtcWebRtcManager {
         });
 
         const pc = this.pc;
+        // close() above showed "closed"; this connection is still being set up.
+        G3RtcWebRtcManager.showState("negotiating");
         pc.onconnectionstatechange = () => {
             const state = pc.connectionState;
             console.log("[WebRTC] connectionState:", state);
             if (this.pc !== pc) return; // A newer session replaced this one.
-            const stateEl = document.getElementById("webrtc-state");
-            if (stateEl) {
-                stateEl.textContent = state;
-            }
+            G3RtcWebRtcManager.showState(state);
             if (state === "failed") {
                 this.onConnectionFailed();
             }
@@ -1208,9 +1207,14 @@ class G3RtcWebRtcManager {
         if (videoEl && videoEl.srcObject) {
             videoEl.srcObject = null;
         }
+        G3RtcWebRtcManager.showState("closed");
+    }
+
+    /** Shows the connection state in the metrics panel. */
+    static showState(state) {
         const stateEl = document.getElementById("webrtc-state");
         if (stateEl) {
-            stateEl.textContent = "closed";
+            stateEl.textContent = state;
         }
     }
 }

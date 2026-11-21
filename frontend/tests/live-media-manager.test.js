@@ -778,3 +778,42 @@ test("waitForIceGathering times out after close() and removes its listener", asy
     await waiting;
     assert.equal(pc.listeners.size, 0);
 });
+
+test("the WebRTC state reads negotiating while a session is set up, not closed", async () => {
+    const stateEl = { textContent: "negotiating" }; // What connectBtnClick shows.
+    let finishOffer;
+    let pc;
+    class FakePeerConnection {
+        constructor() {
+            pc = this;
+            this.iceGatheringState = "complete";
+            this.connectionState = "new";
+            this.localDescription = { sdp: "v=0\r\n" };
+        }
+        createDataChannel() { return { close() {} }; }
+        addTransceiver() { return { sender: { replaceTrack: async () => {} }, receiver: { track: {} }, mid: null }; }
+        setLocalDescription() { return new Promise((resolve) => (finishOffer = resolve)); }
+        close() {}
+    }
+    const context = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
+        document: { getElementById: (id) => (id === "webrtc-state" ? stateEl : null) },
+        RTCPeerConnection: FakePeerConnection,
+        MediaStream: class { addTrack() {} },
+        crypto: { randomUUID: () => "id" },
+        clearTimeout,
+        clearInterval,
+    });
+    const manager = new context.G3RtcWebRtcManager(null);
+    const offering = manager.initiateSession();
+    assert.equal(stateEl.textContent, "negotiating"); // close() of the old session ran first.
+    finishOffer();
+    await settle();
+    finishOffer();
+    await offering;
+    assert.equal(stateEl.textContent, "negotiating");
+    pc.connectionState = "connecting";
+    pc.onconnectionstatechange();
+    assert.equal(stateEl.textContent, "connecting");
+    manager.close();
+    assert.equal(stateEl.textContent, "closed");
+});
