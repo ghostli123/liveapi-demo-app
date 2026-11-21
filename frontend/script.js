@@ -1888,9 +1888,14 @@ async function handleRecordClick() {
                 }
                 const audioBlob = new Blob(AppState.audioChunks, { type: recorder.mimeType });
                 AppState.audioChunks = [];
+                // Closing the dialog while the take is processed abandons it
+                // too, and the dialog may since hold a newer recording, which
+                // the closeModal()/openModal() below would stop or orphan.
+                const abandoned = () => attempt !== AppState.recordingAttempt;
                 try {
                     // The encoder can add a few milliseconds past the limit.
                     const { base64 } = await toVoiceSample(await audioBlob.arrayBuffer(), { clip: true });
+                    if (abandoned()) return;
                     addBrandedVoice(voiceName, base64);
                     // Close first, so the message dialog returns focus to the page.
                     closeModal();
@@ -1901,6 +1906,7 @@ async function handleRecordClick() {
                     );
                 } catch (error) {
                     console.error("Could not process the recording:", error);
+                    if (abandoned()) return;
                     AppUI.showModal(`Could not process the recording: ${error.message}`);
                     openModal();
                 }

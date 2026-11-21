@@ -1033,3 +1033,46 @@ test("closing the dialog cancels the recording's limit timer", async () => {
     timers[0].callback(); // Even if it had fired, it must not touch the closed dialog.
     assert.notEqual(element("recordStatus").textContent, "Processing recorded sample...");
 });
+
+test("a take still processing when the dialog closes doesn't touch a newer recording", async () => {
+    for (const outcome of ["decoded", "failed"]) {
+        const devices = fakeRecordingDevices();
+        let finishDecode;
+        const OfflineAudioContext = class extends fakeOfflineAudioContext(12) {
+            decodeAudioData() {
+                return new Promise((resolve, reject) => {
+                    finishDecode = () => (outcome === "decoded" ? resolve({ duration: 12 }) : reject(new Error("bad audio")));
+                });
+            }
+        };
+        const { context, element } = loadApp({ ...devices.globals, OfflineAudioContext, FileReader: FakeFileReader, Blob });
+        context.openModal();
+        element("newVoiceName").value = "First";
+        const first = context.handleRecordClick();
+        devices.prompts[0].grant();
+        await first;
+        context.AppState.recordingStartTime -= 11000; // Past the 10 s minimum.
+        await context.handleRecordClick(); // Stop: the take is now decoding.
+        await flush();
+
+        // Close during "Processing...", reopen, and record again.
+        context.closeModal();
+        context.openModal();
+        element("newVoiceName").value = "Second";
+        const second = context.handleRecordClick();
+        devices.prompts[1].grant();
+        await second;
+        element("dialogMessage").textContent = "";
+
+        finishDecode();
+        await flush();
+        assert.equal(devices.recorders[1].state, "recording", outcome);
+        assert.equal(devices.prompts[1].track.stopped, false, outcome);
+        assert.equal(context.AppState.isRecording, true, outcome);
+        assert.equal(context.AppState.customVoiceBase64, "", outcome);
+        assert.equal(element("dialogMessage").textContent, "", outcome);
+        context.closeModal();
+        await flush();
+        assert.equal(devices.prompts[1].track.stopped, true, outcome);
+    }
+});
