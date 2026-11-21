@@ -320,6 +320,74 @@ test("the branded-voice dialog takes focus, makes the page inert, and gives focu
     assert.equal(document.activeElement, element("text-message"));
 });
 
+test("the metrics icon toggles its panel from the keyboard and closes on Escape or focus leaving", () => {
+    const { context, element, document } = loadApp();
+    const icon = element("metrics-icon");
+    const panel = element("metrics-panel");
+    const container = fakeElement("metrics-container");
+    container.contains = (node) => node === container || node === icon || node === panel;
+    icon.parentElement = container;
+    context.initDOMEventListeners();
+    const fire = (target, type, props = {}) => {
+        const event = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...props };
+        for (const listener of target.listeners[type] || []) listener(event);
+        return event;
+    };
+    const isOpen = () => panel.classList.contains("open");
+    assert.equal(isOpen(), false);
+
+    assert.equal(fire(icon, "keydown", { key: "Enter" }).defaultPrevented, true);
+    assert.equal(isOpen(), true);
+    assert.equal(icon.attributes["aria-expanded"], "true");
+    // Space toggles too, without scrolling the page.
+    assert.equal(fire(icon, "keydown", { key: " " }).defaultPrevented, true);
+    assert.equal(isOpen(), false);
+    assert.equal(icon.attributes["aria-expanded"], "false");
+    assert.equal(fire(icon, "keydown", { key: "Tab" }).defaultPrevented, false);
+    assert.equal(isOpen(), false);
+
+    fire(icon, "click");
+    assert.equal(isOpen(), true);
+    // Escape from inside the panel closes it and puts focus back on the icon.
+    document.activeElement = panel;
+    assert.equal(fire(container, "keydown", { key: "Escape" }).defaultPrevented, true);
+    assert.equal(isOpen(), false);
+    assert.equal(document.activeElement, icon);
+    // With the panel closed, Escape is left to others.
+    assert.equal(fire(container, "keydown", { key: "Escape" }).defaultPrevented, false);
+
+    fire(icon, "click");
+    fire(container, "focusout", { relatedTarget: panel }); // Selecting the session ID.
+    assert.equal(isOpen(), true);
+    fire(container, "focusout", { relatedTarget: element("text-message") });
+    assert.equal(isOpen(), false);
+    fire(icon, "click");
+    fire(container, "focusout", { relatedTarget: null }); // A click on the page background.
+    assert.equal(isOpen(), false);
+});
+
+test("connection changes are announced once each; model turns aren't", () => {
+    const { context, element } = loadApp({
+        LiveVideoOutputManager: class {
+            getRecordings = () => [];
+            clearRecordedChunks() {}
+        },
+    });
+    const announcer = element("connection-announcer");
+    const announced = [];
+    Object.defineProperty(announcer, "textContent", {
+        set: (text) => {
+            announced.push(text);
+        },
+    });
+    for (const status of ["connecting", "connected", "speaking", "connected", "speaking", "connecting", "connected"]) {
+        context.setAppStatus(status);
+    }
+    context.setAppStatus("disconnected");
+    context.setAppStatus("disconnected");
+    assert.deepEqual(announced, ["Connecting", "Connected", "Connecting", "Connected", "Disconnected"]);
+});
+
 const SETTINGS_KEY = "liveapi-demo-settings";
 
 /** Loads the app with the page's transport and environment selects and restores `storage`. */
