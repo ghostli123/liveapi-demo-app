@@ -13,16 +13,26 @@
 // to that port. The mock sends no avatar video or WebRTC answer, so those
 // checks become checks of the audio-only and WebSocket-fallback paths; the
 // function-response simulator (a Gemini call) is answered in the browser; and
-// the GoAway scenarios run, since only the mock can be told to send one.
+// the GoAway scenarios run, since only the mock can be told to send one. A
+// scenario that passes with some of its checks left out prints "PASS*" and
+// says which.
 
 /* global document, customElements, AppState, handleSessionResumptionReconnect -- used in
    page.evaluate() callbacks, which run in the app page */
 const { chromium } = require("playwright-core");
 const path = require("path");
 
-const args = Object.fromEntries(
-    process.argv.slice(2).map((arg) => arg.replace(/^--/, "").split(/=(.*)/s).slice(0, 2))
-);
+const FLAGS = ["server", "environment", "model", "chrome", "speech", "mock"];
+const args = {};
+for (const arg of process.argv.slice(2)) {
+    const [name, value] = arg.replace(/^--/, "").split(/=(.*)/s);
+    // A mistyped flag would otherwise run against the defaults (e.g. :8080).
+    if (!arg.startsWith("--") || !FLAGS.includes(name)) {
+        console.error(`unknown argument ${arg}; flags: ${FLAGS.map((f) => `--${f}`).join(" ")}`);
+        process.exit(2);
+    }
+    args[name] = value;
+}
 const SERVER = (args.server || "http://localhost:8080").replace(/\/$/, "");
 const MOCK = "mock" in args;
 const ENVIRONMENT = args.environment || (MOCK ? "autopush-common" : "prod-us-rep");
@@ -30,8 +40,9 @@ const MODEL = args.model || "gemini-3.8-live";
 const CHROME = args.chrome || process.env.CHROME_PATH || "/usr/bin/google-chrome";
 const FC_DEFINITION = require(path.join(__dirname, "..", "fc_definition.json"));
 
-async function newPage(browser) {
+async function newPage(browser, pages) {
     const page = await browser.newPage();
+    pages.push(page); // Closed by the runner, which ends a session a failed check left running.
     page.errors = [];
     page.on("console", (m) => {
         // Retried requests log while a server restarts; everything else is a bug.
@@ -133,28 +144,58 @@ function check(condition, message) {
     if (!condition) throw new Error(message);
 }
 
+const checkNoErrors = (page) => check(page.errors.length === 0, `console errors: ${page.errors}`);
+
+// Disconnects and checks that it went quietly.
+async function endSession(page) {
+    await page.click("#disconnectBtn");
+    await page.waitForTimeout(1000);
+    check((await dialog(page)) === null, `disconnect showed: ${await dialog(page)}`);
+    checkNoErrors(page);
+}
+
+class Skip extends Error {}
+const skip = (reason) => {
+    throw new Skip(reason);
+};
+
+// Each scenario gets one of these: pages it opens are closed after it ends,
+// and notes say which of its checks it left out.
+class Run {
+    pages = [];
+    notes = [];
+    newPage(browser) {
+        return newPage(browser, this.pages);
+    }
+    notChecked(what) {
+        this.notes.push(what);
+    }
+    async close() {
+        await Promise.all(this.pages.map((page) => page.close().catch(() => {})));
+    }
+}
+
 const scenarios = {
-    async "text turn over WebSocket with avatar video"(browser) {
-        const page = await newPage(browser);
+    async "text turn over WebSocket with avatar video"(browser, run) {
+        const page = await run.newPage(browser);
         await connect(page, { transport: "websocket" });
         await waitConnected(page);
         await say(page, "Say hello in one short sentence.");
         check((await modelLines(page)).length > 0, "no model reply");
-        if (!MOCK) {
+        if (MOCK) {
+            run.notChecked("avatar video (the mock sends none)");
+        } else {
             const video = await page.evaluate(() => {
                 const v = document.getElementById("video_player");
                 return { width: v.videoWidth, time: v.currentTime };
             });
             check(video.width > 0 && video.time > 0, `avatar video not playing: ${JSON.stringify(video)}`);
         }
-        await page.click("#disconnectBtn");
-        await page.waitForTimeout(1000);
-        check((await dialog(page)) === null, `disconnect showed: ${await dialog(page)}`);
-        check(page.errors.length === 0, `console errors: ${page.errors}`);
+        await endSession(page);
     },
 
-    async "text turn over WebRTC"(browser) {
-        const page = await newPage(browser);
+    async "text turn over WebRTC"(browser, run) {
+        const page = await run.newPage(browser);
         await connect(page, { transport: "webrtc" });
         await waitConnected(page);
         await say(page, "Say hello in one short sentence.");
@@ -171,15 +212,15 @@ const scenarios = {
             );
             const lines = await chat(page);
             check(lines.some((l) => /didn't accept WebRTC/.test(l.text)), "no fallback message");
+            run.notChecked("WebRTC media (the mock sends no answer; checked the fallback to WebSocket)");
         } else {
             check(state.webrtc === "connected", `WebRTC state ${state.webrtc}`);
         }
-        await page.click("#disconnectBtn");
-        check(page.errors.length === 0, `console errors: ${page.errors}`);
+        await endSession(page);
     },
 
-    async "resumption keeps the conversation"(browser) {
-        const page = await newPage(browser);
+    async "resumption keeps the conversation"(browser, run) {
+        const page = await run.newPage(browser);
         await connect(page, { transport: "websocket", modality: "AUDIO" });
         await waitConnected(page);
         await say(page, "My favorite fruit is mango. Just say OK.", 6000);
@@ -189,13 +230,14 @@ const scenarios = {
         await page.waitForTimeout(1000);
         const answer = await reply(page, "What is my favorite fruit? One word.");
         check(/mango/i.test(answer), `reply after resume: ${answer || "none"}`);
-        await page.click("#disconnectBtn");
+        await endSession(page);
     },
 
-    async "function calling"(browser) {
-        const page = await newPage(browser);
+    async "function calling"(browser, run) {
+        const page = await run.newPage(browser);
         if (MOCK) {
             // The simulator is a Gemini call, which needs credentials.
+            run.notChecked("the function-response simulator (answered in the browser)");
             await page.route("**/api/post_endpoint", (route) =>
                 route.request().postDataJSON().objective === "fr_generate"
                     ? route.fulfill({ json: { response: '{"appointment_id": "APT-1234"}' } })
@@ -223,20 +265,21 @@ const scenarios = {
         check(replies.length > 0, "no reply after the function response");
         // The mock's reply quotes the function response it got.
         check(!MOCK || /APT-1234/.test(replies.pop().text), "the reply doesn't use the function response");
-        await page.click("#disconnectBtn");
+        await endSession(page);
     },
 
-    async "upstream errors are shown with their reason"(browser) {
-        const page = await newPage(browser);
+    async "upstream errors are shown with their reason"(browser, run) {
+        const page = await run.newPage(browser);
         await connect(page, { transport: "websocket", model: "no-such-model" });
         await page.waitForFunction(() => document.getElementById("dialog").open, null, { timeout: 20000 });
         const message = await dialog(page);
         check(/code 1008/.test(message) && /no-such-model/.test(message), `dialog: ${message}`);
+        checkNoErrors(page);
     },
 
-    async "GoAway resumes the session"(browser) {
-        if (!MOCK) return "skipped (needs --mock)";
-        const page = await newPage(browser);
+    async "GoAway resumes the session"(browser, run) {
+        if (!MOCK) skip("needs --mock");
+        const page = await run.newPage(browser);
         await connect(page, { transport: "websocket", modality: "AUDIO" });
         await waitConnected(page);
         await say(page, "My favorite fruit is mango.", 1000);
@@ -257,13 +300,12 @@ const scenarios = {
         const answer = await reply(page, "What is my favorite fruit?", 2000);
         check(/mango/i.test(answer), `reply after resume: ${answer || "none"}`);
         check((await dialog(page)) === null, `GoAway showed: ${await dialog(page)}`);
-        check(page.errors.length === 0, `console errors: ${page.errors}`);
-        await page.click("#disconnectBtn");
+        await endSession(page);
     },
 
-    async "repeated GoAways stop resuming after the limit"(browser) {
-        if (!MOCK) return "skipped (needs --mock)";
-        const page = await newPage(browser);
+    async "repeated GoAways stop resuming after the limit"(browser, run) {
+        if (!MOCK) skip("needs --mock");
+        const page = await run.newPage(browser);
         await connect(page, { transport: "websocket", modality: "AUDIO" });
         await waitConnected(page);
         await say(page, "Hello.", 1000);
@@ -292,11 +334,11 @@ const scenarios = {
         );
         check(/code 1001/.test(await dialog(page)), `dialog: ${await dialog(page)}`);
         check(!(await page.evaluate(() => document.getElementById("connectBtn").disabled)), "Connect is disabled");
-        check(page.errors.length === 0, `console errors: ${page.errors}`);
+        checkNoErrors(page);
     },
 
-    async "an idle session ends with a reason"(browser) {
-        const page = await newPage(browser);
+    async "an idle session ends with a reason"(browser, run) {
+        const page = await run.newPage(browser);
         // Shortens the server's --idle_timeout_s (default 15 minutes) to 5 s.
         await page.route("**/api/control", async (route) => {
             const response = await route.fetch();
@@ -317,12 +359,12 @@ const scenarios = {
             `dialog: ${await dialog(page)}`
         );
         check(!(await page.evaluate(() => document.getElementById("connectBtn").disabled)), "Connect is disabled");
-        check(page.errors.length === 0, `console errors: ${page.errors}`);
+        checkNoErrors(page);
     },
 
-    async "voice turn from the microphone"() {
-        if (MOCK) return "skipped (the mock ignores audio)";
-        if (!args.speech) return "skipped (pass --speech=file.wav)";
+    async "voice turn from the microphone"(browser, run) {
+        if (MOCK) skip("the mock ignores audio");
+        if (!args.speech) skip("pass --speech=file.wav");
         const voiceBrowser = await chromium.launch({
             executablePath: CHROME,
             args: [
@@ -333,7 +375,7 @@ const scenarios = {
             ],
         });
         try {
-            const page = await newPage(voiceBrowser);
+            const page = await run.newPage(voiceBrowser);
             await connect(page, { transport: "webrtc", modality: "AUDIO" });
             await waitConnected(page);
             await page.click("#micOffBtn md-filled-icon-button");
@@ -356,17 +398,27 @@ const scenarios = {
             "--autoplay-policy=no-user-gesture-required",
         ],
     });
-    let failures = 0;
-    for (const [name, run] of Object.entries(scenarios)) {
+    const counts = { PASS: 0, "PASS*": 0, SKIP: 0, FAIL: 0 };
+    for (const [name, scenario] of Object.entries(scenarios)) {
         const started = Date.now();
+        const run = new Run();
+        let line;
         try {
-            const note = await run(browser);
-            console.log(`${note ? "SKIP" : "PASS"}  ${name} (${Date.now() - started} ms)${note ? `: ${note}` : ""}`);
+            await scenario(browser, run);
+            const ms = ` (${Date.now() - started} ms)`;
+            line = run.notes.length ? ["PASS*", `${ms}; not checked: ${run.notes.join("; ")}`] : ["PASS", ms];
         } catch (error) {
-            failures++;
-            console.log(`FAIL  ${name}: ${error.message}`);
+            line = [error instanceof Skip ? "SKIP" : "FAIL", `: ${error.message}`];
+        } finally {
+            await run.close();
         }
+        counts[line[0]]++;
+        console.log(`${line[0].padEnd(5)} ${name}${line[1]}`);
     }
     await browser.close();
-    process.exit(failures ? 1 : 0);
+    console.log(
+        `${counts.PASS + counts["PASS*"]} passed (${counts["PASS*"]} partly), ` +
+            `${counts.SKIP} skipped, ${counts.FAIL} failed`
+    );
+    process.exit(counts.FAIL ? 1 : 0);
 })();
