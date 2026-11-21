@@ -49,7 +49,8 @@ class LiveAudioOutputManager {
      * gesture (e.g. the Connect click) so autoplay rules allow it.
      */
     resume() {
-        this.initializeAudioContext();
+        // Failures are logged where they happen; Connect goes on without sound.
+        this.initializeAudioContext().catch(() => {});
         if (this.audioContext?.state === "suspended") {
             this.audioContext.resume().catch((error) => {
                 console.warn("Could not resume audio playback:", error);
@@ -60,35 +61,44 @@ class LiveAudioOutputManager {
     /**
      * Creates the audio context and worklet once; later calls return the same
      * promise, so concurrent chunks can't create a second context. If the
-     * worklet fails to load (e.g. during a deploy), the next call starts over.
+     * worklet fails to load (e.g. during a deploy), or the browser refuses
+     * the context, the next call starts over.
      */
     initializeAudioContext() {
-        if (!this.ready) {
-            const audioContext = new (window.AudioContext ||
+        if (this.ready) return this.ready;
+        let audioContext;
+        try {
+            audioContext = new (window.AudioContext ||
                 window.webkitAudioContext)({ sampleRate: 24000 });
-            const ready = audioContext.audioWorklet
-                .addModule("/frontend/pcm-processor.js")
-                .then(() => {
-                    const workletNode = new AudioWorkletNode(audioContext, "pcm-processor", {
-                        outputChannelCount: [1],
-                    });
-                    workletNode.connect(audioContext.destination);
-                    this.workletNode = workletNode;
-                    return workletNode;
-                });
-            ready.catch((error) => {
-                console.error("Could not load the audio player:", error);
-                // Chrome and Firefox remember a failed module fetch per
-                // context and reject a retry without fetching, so the next
-                // attempt needs a new context.
-                this.audioContext = null;
-                this.ready = null;
-                audioContext.close().catch(() => {});
-            });
-            this.audioContext = audioContext;
-            this.ready = ready;
+        } catch (error) {
+            // E.g. no audio device, an unsupported sample rate, or a browser
+            // without Web Audio. Callers get a rejection rather than a throw,
+            // so Connect still opens the session.
+            console.error("Could not create the audio player:", error);
+            return Promise.reject(error);
         }
-        return this.ready;
+        const ready = audioContext.audioWorklet
+            .addModule("/frontend/pcm-processor.js")
+            .then(() => {
+                const workletNode = new AudioWorkletNode(audioContext, "pcm-processor", {
+                    outputChannelCount: [1],
+                });
+                workletNode.connect(audioContext.destination);
+                this.workletNode = workletNode;
+                return workletNode;
+            });
+        ready.catch((error) => {
+            console.error("Could not load the audio player:", error);
+            // Chrome and Firefox remember a failed module fetch per
+            // context and reject a retry without fetching, so the next
+            // attempt needs a new context.
+            this.audioContext = null;
+            this.ready = null;
+            audioContext.close().catch(() => {});
+        });
+        this.audioContext = audioContext;
+        this.ready = ready;
+        return ready;
     }
 
     static base64ToArrayBuffer(base64) {
