@@ -459,9 +459,9 @@
             <b class="settings-subtitle">Sampling Rate</b><br />
             <div class="form-grid" style="margin-bottom: 20px;">
               <md-outlined-text-field id="audioInterval" type="number" label="Audio Interval (ms, WebSocket)"
-                value="200"></md-outlined-text-field>
+                value="200" min="20" max="1000"></md-outlined-text-field>
               <md-outlined-text-field id="videoInterval" type="number" label="Video Interval (ms, WebSocket)"
-                value="400"></md-outlined-text-field>
+                value="400" min="100" max="60000"></md-outlined-text-field>
             </div>
 
             <b class="settings-subtitle">Bitrates</b><br />

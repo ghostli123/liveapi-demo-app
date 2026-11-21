@@ -2,6 +2,13 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { loadScript } = require("./load-script");
 
+// script.js uses these live-media-manager.js helpers as they are.
+const intervalHelpers = (({ parseIntervalMs, AUDIO_INTERVAL_MS, VIDEO_INTERVAL_MS }) => ({
+    parseIntervalMs,
+    AUDIO_INTERVAL_MS,
+    VIDEO_INTERVAL_MS,
+}))(loadScript("live-media-manager.js", ["parseIntervalMs", "AUDIO_INTERVAL_MS", "VIDEO_INTERVAL_MS"]));
+
 // Stand-ins for the classes gemini-live-api.js and live-media-manager.js
 // define; they record what script.js does with them.
 class FakeGeminiLiveAPI {
@@ -120,6 +127,8 @@ function loadApp(globals = {}, { radios = [] } = {}) {
         "turnBtnClick",
         "handleFunctionCallRequest",
         "initDOMEventListeners",
+        "startCameraCapture",
+        "startScreenCapture",
     ];
     const context = loadScript("script.js", exportNames, {
         window: { location: { protocol: "http:", host: "localhost:1234" }, addEventListener() {} },
@@ -133,6 +142,7 @@ function loadApp(globals = {}, { radios = [] } = {}) {
         MicLevelMeter: FakeMicLevelMeter,
         LiveVideoManager: class extends FakeFrameSource {},
         LiveScreenManager: class extends FakeFrameSource {},
+        ...intervalHelpers,
         ...globals,
     });
     return { context, element: getElementById, document };
@@ -658,3 +668,57 @@ test("an answered call clears its timeout", async () => {
 function plainJson(value) {
     return JSON.parse(JSON.stringify(value));
 }
+
+test("camera and screen frames are sent at the clamped video interval", async () => {
+    const started = [];
+    const { context, element } = loadApp({
+        navigator: {},
+        requestAnimationFrame: () => 0, // Device lists refresh once the camera starts.
+        LiveVideoManager: class extends FakeFrameSource {
+            stopWebcam() {}
+            async startWebcam() {
+                started.push(["camera", this.intervalMs]);
+            }
+        },
+        LiveScreenManager: class extends FakeFrameSource {
+            stopCapture() {}
+            async startCapture() {
+                started.push(["screen", this.intervalMs]);
+                return false; // Dropped, so the test needs no camera stand-in to stop.
+            }
+        },
+    });
+    // parseInt read "-5" as -5 and "1e3" as 1: a 1024 px JPEG every few ms.
+    for (const typed of ["-5", "1e3", "3", ""]) {
+        element("videoInterval").value = typed;
+        await context.startCameraCapture();
+        await context.startScreenCapture();
+    }
+    assert.deepEqual(plainJson(started), [
+        ["camera", 400],
+        ["screen", 400],
+        ["camera", 1000],
+        ["screen", 1000],
+        ["camera", 100],
+        ["screen", 100],
+        ["camera", 400],
+        ["screen", 400],
+    ]);
+});
+
+test("a typed interval is replaced by the one the app will use", () => {
+    const { context, element, document } = loadApp();
+    document.querySelector = (selector) => (selector.startsWith("#") ? element(selector.slice(1)) : null);
+    context.initDOMEventListeners();
+    const change = (id, typed) => {
+        const field = element(id);
+        field.value = typed;
+        for (const listener of field.listeners.change) listener({ target: field });
+        return field.value;
+    };
+    assert.equal(change("audioInterval", "5000"), "1000");
+    assert.equal(change("audioInterval", "1e2"), "100");
+    assert.equal(change("audioInterval", ""), "200");
+    assert.equal(change("videoInterval", "-5"), "400");
+    assert.equal(change("videoInterval", "7"), "100");
+});

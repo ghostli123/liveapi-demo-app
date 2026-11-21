@@ -1,6 +1,7 @@
 // @ts-check
 /* exported LiveAudioOutputManager, LiveAudioInputManager, MicLevelMeter, LiveVideoManager,
-   LiveScreenManager, LiveVideoOutputManager, G3RtcWebRtcManager */
+   LiveScreenManager, LiveVideoOutputManager, G3RtcWebRtcManager, parseIntervalMs,
+   AUDIO_INTERVAL_MS, VIDEO_INTERVAL_MS */
 
 class LiveAudioOutputManager {
     constructor() {
@@ -123,6 +124,26 @@ function onTrackEnded(tracks, listener) {
     }
 }
 
+// How often WebSocket mode sends buffered microphone audio and camera or
+// screen frames, in ms. Below the minimums the app sends a frame per audio
+// render quantum or a 1024 px JPEG every few ms; above the audio maximum the
+// model hears the user late.
+const AUDIO_INTERVAL_MS = { min: 20, max: 1000, fallback: 200 };
+const VIDEO_INTERVAL_MS = { min: 100, max: 60000, fallback: 400 };
+
+/**
+ * Parses an interval typed in the settings. Blank, non-numeric, zero and
+ * negative values give `fallback`; others are rounded into [min, max].
+ * @param {unknown} value
+ * @param {{min: number, max: number, fallback: number}} limits
+ * @returns {number}
+ */
+function parseIntervalMs(value, { min, max, fallback }) {
+    const ms = Number(value);
+    if (!Number.isFinite(ms) || ms <= 0) return fallback;
+    return Math.min(max, Math.max(min, Math.round(ms)));
+}
+
 class LiveAudioInputManager {
     constructor() {
         this.audioContext = null;
@@ -146,7 +167,7 @@ class LiveAudioInputManager {
 
     // Update the audio interval in milliseconds (based on user input)
     async updateAudioInterval(interval) {
-        this.intervalMs = parseInt(interval, 10) || 1000;
+        this.intervalMs = parseIntervalMs(interval, AUDIO_INTERVAL_MS);
         this.disconnectMicrophone();
         await this.connectMicrophone();
     }
