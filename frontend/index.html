@@ -25,52 +25,52 @@
 <body>
 
   <!-- Header -->
-  <header class="header">
+  <header class="header" id="appHeader">
     <div class="header-left">
-      <span class="material-icons">menu</span>
+      <span class="material-icons" aria-hidden="true">menu</span>
       <div class="logo">Google Cloud</div>
     </div>
     <div class="header-right">
-      <span class="material-icons">help_outline</span>
-      <span class="material-icons">notifications</span>
-      <span class="material-icons">apps</span>
+      <span class="material-icons" aria-hidden="true">help_outline</span>
+      <span class="material-icons" aria-hidden="true">notifications</span>
+      <span class="material-icons" aria-hidden="true">apps</span>
       <div class="user-avatar"></div>
     </div>
   </header>
 
   <!-- App Container -->
-  <div class="app-container">
+  <div class="app-container" id="appContainer">
     <!-- Left Sidebar -->
     <nav class="left-sidebar">
-      <div class="nav-item"><span class="material-icons">dashboard</span> Dashboard</div>
-      <div class="nav-item"><span class="material-icons">interests</span> Model Garden</div>
+      <div class="nav-item"><span class="material-icons" aria-hidden="true">dashboard</span> Dashboard</div>
+      <div class="nav-item"><span class="material-icons" aria-hidden="true">interests</span> Model Garden</div>
       <div class="nav-header">Vertex AI Studio</div>
-      <div class="nav-item"><span class="material-icons">edit</span> Create prompt</div>
-      <div class="nav-item"><span class="material-icons">perm_media</span> Media Studio</div>
-      <div class="nav-item active"><span class="material-icons">sensors</span> Stream realtime</div>
-      <div class="nav-item"><span class="material-icons">collections_bookmark</span> Prompt gallery</div>
+      <div class="nav-item"><span class="material-icons" aria-hidden="true">edit</span> Create prompt</div>
+      <div class="nav-item"><span class="material-icons" aria-hidden="true">perm_media</span> Media Studio</div>
+      <div class="nav-item active"><span class="material-icons" aria-hidden="true">sensors</span> Stream realtime</div>
+      <div class="nav-item"><span class="material-icons" aria-hidden="true">collections_bookmark</span> Prompt gallery</div>
     </nav>
 
     <!-- Main Content -->
     <main class="main-content">
       <div class="main-header">
-        <span class="material-icons">arrow_back</span>
+        <span class="material-icons" aria-hidden="true">arrow_back</span>
         <h1>Gemini Live</h1>
       </div>
 
       <div id="model-state">
-        <div id="disconnected" class="state"><span class="material-symbols-outlined">cloud_off</span><span
+        <div id="disconnected" class="state"><span class="material-symbols-outlined" aria-hidden="true">cloud_off</span><span
             class="icon-text">disconnected</span></div>
-        <div id="connecting" class="state" hidden><span class="material-symbols-outlined">hourglass_empty</span><span
+        <div id="connecting" class="state" hidden><span class="material-symbols-outlined" aria-hidden="true">hourglass_empty</span><span
             class="icon-text">connecting...</span></div>
-        <div id="connected" class="state" hidden><span class="material-symbols-outlined">cloud_done</span><span
+        <div id="connected" class="state" hidden><span class="material-symbols-outlined" aria-hidden="true">cloud_done</span><span
             class="icon-text">connected</span></div>
-        <div id="speaking" class="state" hidden><span class="material-symbols-outlined">graphic_eq</span><span
+        <div id="speaking" class="state" hidden><span class="material-symbols-outlined" aria-hidden="true">graphic_eq</span><span
             class="icon-text">model speaking</span></div>
         <div class="metrics-container">
           <div class="metrics-icon" id="metrics-icon" tabindex="0" role="button" aria-label="Transport metrics">📊</div>
           <div class="metrics-panel" id="metrics-panel">
-            <h3 id="metrics-title">Transport Metrics</h3>
+            <h2 id="metrics-title">Transport Metrics</h2>
             <p>Transport: <span id="active-transport">WebRTC</span> (<span id="webrtc-state">idle</span>)</p>
             <p>Download: <span id="download-speed">0.00</span> KB/s</p>
             <p>Upload: <span id="upload-speed">0.00</span> KB/s</p>
@@ -86,7 +86,7 @@
 
       <div id="video-preview-container" class="avatar-mode">
         <div class="input-container">
-          <h3>Input (Camera/Screen)</h3>
+          <h2>Input (Camera/Screen)</h2>
           <div class="preview-frame">
             <video id="video" autoplay playsinline muted></video>
             <div id="previewPlaceholder" class="preview-placeholder">Camera and screen sharing are off</div>
@@ -94,7 +94,7 @@
           <canvas id="canvas" style="display: none;"></canvas>
         </div>
         <div class="avatar-output-container">
-          <h3>Avatar Output</h3>
+          <h2>Avatar Output</h2>
           <video id="video_player" autoplay controls disableRemotePlayback></video>
         </div>
       </div>
@@ -264,9 +264,9 @@
             style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--gcp-border); background-color: var(--gcp-surface);">
             <option value="">None (use Voice Name)</option>
           </select>
-          <div class="create-voice-link" id="createVoiceBtn">
+          <button type="button" class="create-voice-link" id="createVoiceBtn">
             + Create a new branded voice
-          </div>
+          </button>
           <div class="button-group">
             <input type="file" id="audioFileInput" accept="audio/*" style="display: none;">
             <md-outlined-button id="audioUploadBtn">Upload audio file
@@ -292,7 +292,7 @@
 
           <span id="fcFileName"
             style="font-size: 12px; color: var(--gcp-text-secondary); margin-top: 8px; display: block;"></span>
-          <span id="fcRemove" class="create-voice-link" hidden>Remove</span>
+          <button type="button" id="fcRemove" class="create-voice-link" hidden>Remove</button>
         </div>
         <div style="margin-top: 12px;">
           <md-outlined-select label="Tool Behavior" id="toolBehavior">
@@ -316,7 +316,7 @@
           </md-outlined-select>
         </div>
         <div class="checkbox-row">
-          <md-checkbox id="enableGoogleSearch" touch-target="wrapper" checked></md-checkbox>
+          <md-checkbox id="enableGoogleSearch" touch-target="wrapper" checked aria-label="Enable Google Search"></md-checkbox>
           <label for="enableGoogleSearch">Enable Google Search</label>
         </div>
       </div>
@@ -324,11 +324,11 @@
       <div class="config-section">
         <h3>Avatar</h3>
         <div class="checkbox-row">
-          <md-checkbox id="enableAvatarMode" touch-target="wrapper" checked></md-checkbox>
+          <md-checkbox id="enableAvatarMode" touch-target="wrapper" checked aria-label="Show input and avatar side by side"></md-checkbox>
           <label for="enableAvatarMode">Show input and avatar side by side</label>
         </div>
         <div class="checkbox-row">
-          <md-checkbox id="saveAvatarVideo" touch-target="wrapper"></md-checkbox>
+          <md-checkbox id="saveAvatarVideo" touch-target="wrapper" aria-label="Save avatar video (WebSocket) as MP4 on disconnect"></md-checkbox>
           <label for="saveAvatarVideo">Save avatar video (WebSocket) as MP4 on disconnect</label>
         </div>
         <div class="button-group">
@@ -337,8 +337,8 @@
           </md-outlined-button>
         </div>
         <span id="avatarName" class="file-note">Avatar: Piper (stock)</span>
-        <span id="avatarSampleLink" class="create-voice-link">Use the sample image</span>
-        <span id="avatarStockLink" class="create-voice-link" hidden>Use the stock avatar</span>
+        <button type="button" id="avatarSampleLink" class="create-voice-link">Use the sample image</button>
+        <button type="button" id="avatarStockLink" class="create-voice-link" hidden>Use the stock avatar</button>
         <p class="file-note">Custom images need a project allowlisted for custom avatars; they apply from the next
           connection.</p>
       </div>
@@ -346,7 +346,7 @@
       <div class="config-section">
         <h3>Translation</h3>
         <div class="checkbox-row">
-          <md-checkbox id="enableS2ST" touch-target="wrapper"></md-checkbox>
+          <md-checkbox id="enableS2ST" touch-target="wrapper" aria-label="Enable Speech-to-Speech Translation"></md-checkbox>
           <label for="enableS2ST">Enable Speech-to-Speech Translation</label>
         </div>
 
@@ -427,32 +427,32 @@
           <div class="details-content">
             <b>Transcription</b><br />
             <div class="checkbox-row">
-              <md-checkbox id="inputTranscript" touch-target="wrapper" checked></md-checkbox>
+              <md-checkbox id="inputTranscript" touch-target="wrapper" checked aria-label="Input Audio Transcripts"></md-checkbox>
               <label for="inputTranscript">Input Audio Transcripts</label><br />
             </div>
             <div class="checkbox-row">
-              <md-checkbox id="outputTranscript" touch-target="wrapper" checked></md-checkbox>
+              <md-checkbox id="outputTranscript" touch-target="wrapper" checked aria-label="Output Audio Transcripts"></md-checkbox>
               <label for="outputTranscript">Output Audio Transcripts</label><br /><br />
             </div>
 
             <b>Session Resumption</b><br />
             <div class="checkbox-row">
-              <md-checkbox id="resumption" touch-target="wrapper" checked></md-checkbox>
+              <md-checkbox id="resumption" touch-target="wrapper" checked aria-label="Enable session resumption"></md-checkbox>
               <label for="resumption">Enable session resumption</label><br />
             </div>
             <md-outlined-text-field id="handle" label="Resumption Handle"></md-outlined-text-field><br /><br />
 
             <b>VAD & Proactivity</b><br />
             <div class="checkbox-row">
-              <md-checkbox id="disableInterruption" touch-target="wrapper"></md-checkbox>
+              <md-checkbox id="disableInterruption" touch-target="wrapper" aria-label="Disable Interruption"></md-checkbox>
               <label for="disableInterruption">Disable Interruption</label><br />
             </div>
             <div class="checkbox-row">
-              <md-checkbox id="disableDetection" touch-target="wrapper"></md-checkbox>
+              <md-checkbox id="disableDetection" touch-target="wrapper" aria-label="Disable Audio Endpointing Detection"></md-checkbox>
               <label for="disableDetection">Disable Audio Endpointing Detection</label><br />
             </div>
             <div class="checkbox-row">
-              <md-checkbox id="proactiveVideo" touch-target="wrapper"></md-checkbox>
+              <md-checkbox id="proactiveVideo" touch-target="wrapper" aria-label="Enable Proactive Video"></md-checkbox>
               <label for="proactiveVideo">Enable Proactive Video</label><br /><br />
             </div>
 
@@ -506,10 +506,10 @@
 
   <!-- Branded Voice Creation Modal -->
   <div id="brandedVoiceModal" class="modal-backdrop">
-    <div class="modal-content">
+    <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="brandedVoiceTitle">
       <div class="modal-header">
-        <h2>Create a new branded voice</h2>
-        <button class="close-button" id="closeModalBtn">&times;</button>
+        <h2 id="brandedVoiceTitle">Create a new branded voice</h2>
+        <button type="button" class="close-button" id="closeModalBtn" aria-label="Close" title="Close">&times;</button>
       </div>
       <div class="modal-body">
         <!-- Step 2: Name the voice -->
@@ -534,7 +534,7 @@
             </p>
             <div class="record-controls">
               <button id="recordButton">
-                <span class="material-icons">mic</span>
+                <span class="material-icons" aria-hidden="true">mic</span>
                 Record reference voice
               </button>
               <div class="spinner" id="processingSpinner"></div>

@@ -17,9 +17,10 @@
 // scenario that passes with some of its checks left out prints "PASS*" and
 // says which.
 
-/* global window, document, customElements, AppState, handleSessionResumptionReconnect -- used in
+/* global window, document, customElements, AppState, handleSessionResumptionReconnect, axe -- used in
    page.evaluate() callbacks, which run in the app page */
 const { chromium } = require("playwright-core");
+const fs = require("fs");
 const path = require("path");
 
 const FLAGS = ["server", "environment", "model", "chrome", "speech", "mock"];
@@ -154,6 +155,21 @@ async function endSession(page) {
     checkNoErrors(page);
 }
 
+// Runs axe-core in the page and returns its WCAG 2.1 A/AA and best-practice
+// violations, one line each.
+async function accessibilityViolations(page) {
+    if (!(await page.evaluate(() => "axe" in window))) {
+        await page.evaluate(fs.readFileSync(require.resolve("axe-core/axe.min.js"), "utf8"));
+    }
+    const violations = await page.evaluate(async () => {
+        const tags = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "best-practice"];
+        // No preload: fetching the font stylesheets breaks the page's connect-src.
+        const result = await axe.run(document, { preload: false, runOnly: { type: "tag", values: tags } });
+        return result.violations.map((v) => `${v.id} (${v.nodes.map((n) => n.target.join(" ")).join(", ")})`);
+    });
+    return violations;
+}
+
 class Skip extends Error {}
 const skip = (reason) => {
     throw new Skip(reason);
@@ -176,6 +192,30 @@ class Run {
 }
 
 const scenarios = {
+    async "no accessibility violations (axe-core)"(browser, run) {
+        const page = await run.newPage(browser);
+        const audit = async (state) => {
+            const violations = await accessibilityViolations(page);
+            check(violations.length === 0, `${state}: ${violations.join("; ")}`);
+        };
+        await page.waitForTimeout(1000); // Let the Material components render.
+        await audit("idle");
+        await page.evaluate(() => document.querySelectorAll("details").forEach((d) => (d.open = true)));
+        await audit("settings open");
+        await page.click("#createVoiceBtn");
+        await audit("branded-voice dialog");
+        await page.keyboard.press("Escape");
+        check(
+            await page.evaluate(() => document.activeElement?.id === "createVoiceBtn"),
+            "Escape didn't close the dialog and return focus"
+        );
+        await connect(page, { transport: "websocket" });
+        await waitConnected(page);
+        await say(page, "Say hello in one short sentence.", 4000);
+        await audit("connected");
+        await endSession(page);
+    },
+
     async "text turn over WebSocket with avatar video"(browser, run) {
         const page = await run.newPage(browser);
         await connect(page, { transport: "websocket" });
