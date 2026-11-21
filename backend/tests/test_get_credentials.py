@@ -89,6 +89,29 @@ class GetAccessTokenTest(unittest.TestCase):
         self.assertEqual(len(set(errors)), 1)
         self.assertIn("gcloud down", errors[0])
 
+    def test_waiting_caller_gives_up_on_a_stuck_fetch(self):
+        self.enterContext(mock.patch.object(get_credentials, "FETCH_TIMEOUT_S", 0.3))
+        fetching, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def stuck():
+            fetching.set()
+            release.wait(10)
+            return _token(60, "late")
+
+        self.use_sources(stuck)
+        first = threading.Thread(target=get_credentials.get_access_token)
+        first.start()
+        self.assertTrue(fetching.wait(5))
+        started = time.monotonic()
+        with self.assertRaisesRegex(RuntimeError, "Timed out after 0.3 s"):
+            get_credentials.get_access_token()
+        self.assertLess(time.monotonic() - started, 3)
+        # The stuck fetch still caches its token for later callers.
+        release.set()
+        first.join(timeout=5)
+        self.assertEqual(get_credentials.get_access_token().source, "late")
+
     def test_retries_after_a_failed_fetch(self):
         fetch = mock.Mock(side_effect=[RuntimeError("down"), _token(60, "later")])
         self.use_sources(fetch)
@@ -117,10 +140,25 @@ class GetAccessTokenTest(unittest.TestCase):
             token = get_credentials._token_from_adc()
             get_credentials._token_from_adc()
         self.assertEqual((token.token, token.source), ("adc-token", "adc"))
+        self.assertIsInstance(
+            adc.refresh.call_args.args[0], get_credentials._TimedRequest
+        )
         self.assertIsNotNone(token.expiry.tzinfo)
         # The credentials object is created once and refreshed on each call.
         default.assert_called_once()
         self.assertEqual(adc.refresh.call_count, 2)
+
+    def test_adc_requests_time_out_sooner_than_google_auth_default(self):
+        session = mock.Mock()
+        request = get_credentials._TimedRequest(session=session)
+        request("https://oauth2.googleapis.com/token", method="POST")
+        self.assertEqual(
+            session.request.call_args.kwargs["timeout"],
+            get_credentials.ADC_REQUEST_TIMEOUT_S,
+        )
+        # A caller's own timeout (the metadata server's, say) still wins.
+        request("http://metadata.google.internal", timeout=3)
+        self.assertEqual(session.request.call_args.kwargs["timeout"], 3)
 
     def test_chain_credentials_refresh(self):
         self.use_sources(lambda: _token(60))

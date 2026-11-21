@@ -33,6 +33,13 @@ _SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
 _EXPIRY_MARGIN = datetime.timedelta(minutes=2)
 # Lifetime assumed when a source doesn't report one.
 _ASSUMED_LIFETIME = datetime.timedelta(minutes=30)
+# Callers give up on a token after this many seconds, including the wait for
+# another caller's fetch. With the upstream handshake's 10 s this stays under
+# the browser's 30 s setup timeout.
+FETCH_TIMEOUT_S = 15
+# Per HTTP request of an ADC refresh; google-auth's default is 120 s, all of
+# it spent holding _lock while every new session waits.
+ADC_REQUEST_TIMEOUT_S = 10
 
 
 @dataclasses.dataclass(frozen=True)
@@ -63,6 +70,21 @@ def _as_utc(expiry: datetime.datetime | None) -> datetime.datetime:
     return expiry
 
 
+class _TimedRequest(google.auth.transport.requests.Request):
+    """A google-auth transport whose default timeout is ADC_REQUEST_TIMEOUT_S."""
+
+    def __call__(
+        self,
+        url,
+        method="GET",
+        body=None,
+        headers=None,
+        timeout=ADC_REQUEST_TIMEOUT_S,
+        **kwargs,
+    ):
+        return super().__call__(url, method, body, headers, timeout, **kwargs)
+
+
 def _token_from_adc() -> AccessToken:
     global _adc_credentials
     credentials = _adc_credentials
@@ -70,7 +92,7 @@ def _token_from_adc() -> AccessToken:
         credentials, _ = google.auth.default(scopes=list(_SCOPES))
         _adc_credentials = credentials
     # Only called when the cache is stale, so always refresh.
-    credentials.refresh(google.auth.transport.requests.Request())
+    credentials.refresh(_TimedRequest())
     if not credentials.token:
         raise RuntimeError("ADC refresh returned no token")
     return AccessToken(credentials.token, _as_utc(credentials.expiry), "adc")
@@ -122,7 +144,13 @@ def get_access_token() -> AccessToken:
     """Returns a cached or freshly fetched token. Blocks; call off the event loop."""
     global _cached_token, _failed_fetches, _last_failure
     failed_before = _failed_fetches
-    with _lock:
+    # Waiting threads would otherwise pile up behind a stuck fetch, in the
+    # to_thread pool that /api/control also uses.
+    if not _lock.acquire(timeout=FETCH_TIMEOUT_S):
+        raise RuntimeError(
+            f"Timed out after {FETCH_TIMEOUT_S} s waiting for an access token"
+        )
+    try:
         if _cached_token and _cached_token.expiry - _utcnow() > _EXPIRY_MARGIN:
             return _cached_token
         # A fetch failed while this call waited. The sources' timeouts (30 s
@@ -149,6 +177,8 @@ def get_access_token() -> AccessToken:
         _last_failure = "No access token available. " + " | ".join(errors)
         _failed_fetches += 1
         raise RuntimeError(_last_failure)
+    finally:
+        _lock.release()
 
 
 class ChainCredentials(google.auth.credentials.Credentials):

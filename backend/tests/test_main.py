@@ -752,6 +752,40 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 status, body = await self.connect_session("s46")
             self.assertEqual(status, 200, body)
 
+    async def test_stuck_token_fetch_fails_sessions_within_the_deadline(self):
+        # It had no deadline, so one stuck source (an ADC refresh waits 120 s
+        # by default) held this session and, behind the lock, every new one.
+        fetching, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def stuck():
+            fetching.set()
+            release.wait(10)
+            raise RuntimeError("stuck source")
+
+        self.enterContext(
+            mock.patch.object(main.get_credentials, "_SOURCES", (("stuck", stuck),))
+        )
+        self.enterContext(
+            mock.patch.object(main.get_credentials, "_cached_token", None)
+        )
+        self.enterContext(
+            mock.patch.object(main.get_credentials, "FETCH_TIMEOUT_S", 0.5)
+        )
+        with flagsaver.flagsaver(ws_heartbeat_s=0):
+            await self.connect_session("s48", endpoint="aiplatform.googleapis.com")
+            await self.connect_session("s49", endpoint="aiplatform.googleapis.com")
+            ws = await self.client.ws_connect("/ws?session_id=s48")
+            await asyncio.to_thread(fetching.wait, 5)
+            ws2 = await self.client.ws_connect("/ws?session_id=s49")
+            async with asyncio.timeout(4):
+                first = await ws.receive()
+                second = await ws2.receive()
+        for msg in (first, second):
+            self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+            self.assertEqual(msg.data, 1011)
+            self.assertIn("Timed out after 0.5 s", str(msg.extra))
+
     async def test_messages_sent_while_connecting_are_forwarded(self):
         # The browser sends its setup as soon as the socket opens, while the
         # proxy is still connecting upstream.

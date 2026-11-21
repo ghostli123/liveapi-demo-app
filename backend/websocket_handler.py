@@ -195,7 +195,18 @@ class WebsocketHandler:
         """
         token = None
         if not self.liveapi_service_url.startswith("ws://"):
-            token = await asyncio.to_thread(get_credentials.get_access_token)
+            # The fetch can't be interrupted; if it finishes late, it caches
+            # the token for the next session.
+            try:
+                token = await asyncio.wait_for(
+                    asyncio.to_thread(get_credentials.get_access_token),
+                    get_credentials.FETCH_TIMEOUT_S,
+                )
+            except TimeoutError:
+                raise RuntimeError(
+                    f"Timed out after {get_credentials.FETCH_TIMEOUT_S} s "
+                    "waiting for an access token"
+                ) from None
         try:
             return await self._connect_upstream(token.token if token else None)
         except Exception as e:
