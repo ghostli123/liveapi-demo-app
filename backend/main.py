@@ -90,7 +90,9 @@ ALLOWED_HOST_SUFFIXES = flags.DEFINE_list(
     "allowed_host_suffixes",
     [".googleapis.com"],
     "Upstream hosts the proxy may connect to. The proxy sends its access token "
-    "to these hosts, so keep this list tight.",
+    "to these hosts, so keep this list tight. Each entry is a domain that "
+    "matches itself and its subdomains (example.com and .example.com both "
+    "match live.example.com, not evilexample.com).",
 )
 ALLOWED_HOSTS = flags.DEFINE_list(
     "allowed_hosts",
@@ -154,6 +156,32 @@ def project_id() -> str:
     )
 
 
+def _allowed_suffix_domain(entry: str) -> str:
+    """One --allowed_host_suffixes entry as a bare domain; "" for a blank."""
+    return entry.strip().lower().strip(".")
+
+
+def _is_in_domain(host: str, domain: str) -> bool:
+    # A plain endswith would let "googleapis.com" match "evilgoogleapis.com",
+    # a host anyone can register, and hand it the access token.
+    return bool(domain) and (host == domain or host.endswith("." + domain))
+
+
+def _validate_allowed_host_suffixes(entries: list[str]) -> bool:
+    for entry in entries:
+        domain = _allowed_suffix_domain(entry)
+        if domain and not _HOSTNAME_RE.fullmatch(domain):
+            raise flags.ValidationError(
+                f"invalid entry {entry!r}; expected a domain with at least two "
+                "labels, e.g. .googleapis.com"
+            )
+    return True
+
+
+# Checked when flags are parsed, so a typo stops the server at startup.
+flags.register_validator(ALLOWED_HOST_SUFFIXES, _validate_allowed_host_suffixes)
+
+
 def resolve_ws_host(endpoint: Any, location: Any) -> str:
     """Maps the frontend's endpoint and location to the upstream WebSocket host.
 
@@ -180,7 +208,8 @@ def resolve_ws_host(endpoint: Any, location: Any) -> str:
         ws_host = f"{location}-{endpoint}"
 
     if not _HOSTNAME_RE.fullmatch(ws_host) or not any(
-        ws_host.endswith(suffix) for suffix in ALLOWED_HOST_SUFFIXES.value
+        _is_in_domain(ws_host, _allowed_suffix_domain(suffix))
+        for suffix in ALLOWED_HOST_SUFFIXES.value
     ):
         raise ValueError(
             f"{ws_host!r} is not an allowed Live API host (see --allowed_host_suffixes)"
