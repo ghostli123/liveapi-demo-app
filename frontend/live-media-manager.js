@@ -677,6 +677,7 @@ class G3RtcWebRtcManager {
         this.videoSender = null;
         this.remoteStream = null;
         this.micStream = null;
+        this.micGeneration = 0;
         this.videoTrack = null;
         this.statsInterval = null;
         // Called when the peer connection fails, e.g. UDP is blocked.
@@ -861,6 +862,7 @@ class G3RtcWebRtcManager {
 
     async startMicrophone(deviceId = null) {
         this.stopMicrophone();
+        const generation = this.micGeneration;
         const audioConstraints = {
             channelCount: 1,
             sampleRate: 16000,
@@ -868,9 +870,16 @@ class G3RtcWebRtcManager {
         if (deviceId) {
             audioConstraints.deviceId = { exact: deviceId };
         }
-        this.micStream = await navigator.mediaDevices.getUserMedia({
+        const stream = await navigator.mediaDevices.getUserMedia({
             audio: audioConstraints,
         });
+        if (generation !== this.micGeneration) {
+            // stopMicrophone() (mic off, Disconnect) or a newer start ran
+            // while the permission prompt was open; don't send this one.
+            stream.getTracks().forEach((t) => t.stop());
+            return;
+        }
+        this.micStream = stream;
         const audioTrack = this.micStream.getAudioTracks()[0] || null;
         if (this.audioSender && audioTrack) {
             await this.audioSender.replaceTrack(audioTrack);
@@ -878,6 +887,7 @@ class G3RtcWebRtcManager {
     }
 
     stopMicrophone() {
+        this.micGeneration++; // Abandons a startMicrophone() still in flight.
         if (this.micStream) {
             this.micStream.getTracks().forEach((t) => t.stop());
             this.micStream = null;
