@@ -175,8 +175,8 @@ function audioInputWithPendingMic() {
         navigator: { mediaDevices: devices.mediaDevices },
         AudioContext: FakeAudioContext,
         AudioWorkletNode: FakeWorkletNode,
-        setInterval: () => {
-            const id = {};
+        setInterval: (callback, ms) => {
+            const id = { ms };
             intervals.add(id);
             return id;
         },
@@ -220,6 +220,49 @@ test("a WebSocket microphone refused after it was superseded doesn't throw or to
     const third = manager.connectMicrophone();
     requests[2].deny();
     await assert.rejects(third, { name: "NotAllowedError" });
+});
+
+test("parseIntervalMs clamps typed intervals and falls back on unusable ones", () => {
+    const context = loadScript("live-media-manager.js", ["parseIntervalMs", "AUDIO_INTERVAL_MS", "VIDEO_INTERVAL_MS"]);
+    const audio = (value) => context.parseIntervalMs(value, context.AUDIO_INTERVAL_MS);
+    const video = (value) => context.parseIntervalMs(value, context.VIDEO_INTERVAL_MS);
+    // parseInt read "1e3" as 1 and "-5" as -5: an audio frame per render quantum.
+    assert.equal(audio("1e3"), 1000);
+    assert.equal(audio("1"), 20);
+    assert.equal(audio("-5"), 200);
+    assert.equal(audio("0"), 200);
+    assert.equal(audio(""), 200);
+    assert.equal(audio(null), 200);
+    assert.equal(audio(undefined), 200);
+    assert.equal(audio("abc"), 200);
+    assert.equal(audio("Infinity"), 200);
+    assert.equal(audio("2147483647"), 1000); // Never fired while the mic showed on.
+    assert.equal(audio("99.6"), 100);
+    assert.equal(audio(" 300 "), 300);
+    assert.equal(video("-5"), 400);
+    assert.equal(video("3"), 100);
+    assert.equal(video("1500"), 1500);
+    assert.equal(video("1e9"), 60000);
+});
+
+test("updateAudioInterval sends audio at the clamped interval", async () => {
+    const { manager, requests, intervals } = audioInputWithPendingMic();
+    const cases = [
+        ["1e3", 1000],
+        ["1", 20],
+        ["-5", 200],
+        ["2147483647", 1000],
+    ];
+    for (const [i, [typed, ms]] of cases.entries()) {
+        const updating = manager.updateAudioInterval(typed);
+        requests[i].grant();
+        await updating;
+        assert.deepEqual(
+            [...intervals].map((id) => id.ms),
+            [ms],
+            `typed ${typed}`
+        );
+    }
 });
 
 /** A LiveVideoManager whose getUserMedia() calls wait for the test. */

@@ -6,7 +6,8 @@
  */
 
 /* global GeminiLiveAPI, LiveAudioOutputManager, LiveVideoOutputManager, LiveAudioInputManager,
-   MicLevelMeter, LiveVideoManager, LiveScreenManager, getAvatarVideoElement -- from
+   MicLevelMeter, LiveVideoManager, LiveScreenManager, getAvatarVideoElement, parseIntervalMs,
+   AUDIO_INTERVAL_MS, VIDEO_INTERVAL_MS -- from
    gemini-live-api.js and live-media-manager.js, loaded before this script (see index.html) */
 
 // --- Application Configuration ---
@@ -360,6 +361,8 @@ function initDOMEventListeners() {
         ["#avatarUploadBtn", "click", clickToOpen("avatarFileInput")],
         ["#avatarSampleLink", "click", useSampleAvatar],
         ["#avatarStockLink", "click", useStockAvatar],
+        ["#audioInterval", "change", (event) => showIntervalUsed(event.target, AUDIO_INTERVAL_MS)],
+        ["#videoInterval", "change", (event) => showIntervalUsed(event.target, VIDEO_INTERVAL_MS)],
         [
             "#enableS2ST",
             "change",
@@ -1174,9 +1177,7 @@ async function startAudioInput() {
             await webRtcManager.startMicrophone(deviceId);
         } else {
             AppState.liveAudioInputManager.deviceId = deviceId;
-            await AppState.liveAudioInputManager.updateAudioInterval(
-                AppUI.getValue("audioInterval") || "200"
-            );
+            await AppState.liveAudioInputManager.updateAudioInterval(AppUI.getValue("audioInterval"));
         }
         if (isMicOn()) {
             AppState.micLevelMeter.start(
@@ -1280,7 +1281,13 @@ function endUserTurn() {
 
 // --- Video & Screen Capturing ---
 function videoIntervalMs() {
-    return parseInt(AppUI.getValue("videoInterval"), 10) || 400;
+    return parseIntervalMs(AppUI.getValue("videoInterval"), VIDEO_INTERVAL_MS);
+}
+
+// Replaces a typed interval with the one the app will use: clamped, or the
+// default for a blank or unusable value.
+function showIntervalUsed(field, limits) {
+    field.value = String(parseIntervalMs(field.value, limits));
 }
 
 async function startCameraCapture() {
