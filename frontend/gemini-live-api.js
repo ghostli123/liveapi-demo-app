@@ -402,13 +402,20 @@ class GeminiLiveAPI {
     }
 
     /**
-     * Configures audio and video bitrates for the connection.
+     * Configures audio and video bitrates for the connection. The setup
+     * fields are integers, so a typed value is rounded; anything that isn't a
+     * positive finite number becomes 0 (not sent).
      * @param {number | string} audioBitrate - Audio bitrate in bits per second.
      * @param {number | string} videoBitrate - Video bitrate in bits per second.
      */
     setBitrates(audioBitrate, videoBitrate) {
-        this.audioBitrate = Number(audioBitrate) || 0;
-        this.videoBitrate = Number(videoBitrate) || 0;
+        /** @param {number | string} value */
+        const toBps = (value) => {
+            const bps = Math.round(Number(value));
+            return Number.isFinite(bps) && bps > 0 ? bps : 0;
+        };
+        this.audioBitrate = toBps(audioBitrate);
+        this.videoBitrate = toBps(videoBitrate);
     }
 
     /**

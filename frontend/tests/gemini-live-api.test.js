@@ -628,6 +628,25 @@ test("a pasted resumption handle is sent without surrounding whitespace", async 
     assert.deepEqual(await sentResumption(""), {});
 });
 
+test("typed bitrates are sent as positive integers or not at all", async () => {
+    const sentBitrates = async (audio, video) => {
+        const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+        api.webSocket = new FakeWebSocket();
+        api.transportMode = "websocket";
+        api.responseModalities = ["AUDIO", "VIDEO"];
+        api.setBitrates(audio, video);
+        await api.sendInitialSetupMessages();
+        // Parsed from the wire string, so a float or Infinity shows up as 64000.5 or null.
+        const { audio_bitrate_bps, video_bitrate_bps } = api.webSocket.sent[0].setup.avatar_config;
+        return [audio_bitrate_bps, video_bitrate_bps];
+    };
+    assert.deepEqual(await sentBitrates("64000.5", "1e5"), [64001, 100000]);
+    assert.deepEqual(await sentBitrates(" 32000 ", 500000), [32000, 500000]);
+    assert.deepEqual(await sentBitrates("-64000", "Infinity"), [undefined, undefined]);
+    assert.deepEqual(await sentBitrates("0.4", "abc"), [undefined, undefined]);
+    assert.deepEqual(await sentBitrates("", ""), [undefined, undefined]);
+});
+
 // A connected session whose server set --idle_timeout_s=idleS.
 async function idleApi(idleS = 120) {
     const api = connectedApi();
