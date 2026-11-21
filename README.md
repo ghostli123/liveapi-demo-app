@@ -132,11 +132,13 @@ The frontend files (except the `frontend/material.js` module) are classic script
 python scripts/smoke_test.py --environment=prod-us-rep --model=gemini-3.8-live --modality=VIDEO
 ```
 
-`scripts/browser_e2e.js` drives the app in headless Chrome against a running server and a real endpoint: an accessibility audit (axe-core's WCAG 2.1 A/AA and best-practice rules on the idle page, the open settings, the branded-voice dialog and a connected session), text turns over both transports, resumption, function calling, error reporting, and (with `--speech=file.wav`) a spoken turn through the fake microphone. Each scenario also fails on browser console errors or Content-Security-Policy violations, and an unknown flag stops the script rather than running with the defaults:
+`scripts/browser_e2e.js` drives the app in headless Chrome (or Firefox, with `--browser=firefox`) against a running server and a real endpoint: an accessibility audit (axe-core's WCAG 2.1 A/AA and best-practice rules on the idle page, the open settings, the branded-voice dialog and a connected session), text turns over both transports, resumption, function calling, error reporting, and (with `--speech=file.wav`, Chrome only) a spoken turn through the fake microphone. Each scenario also fails on browser console errors or Content-Security-Policy violations, and an unknown flag stops the script rather than running with the defaults:
 
 ```sh
 npm install
 npm run e2e -- --server=http://localhost:8080 --speech=sample.wav
+npx playwright-core install firefox  # once, for --browser=firefox
+npm run e2e -- --server=http://localhost:8080 --browser=firefox
 ```
 
 `scripts/mock_live_api.py` stands in for the Live API, so sessions run without credentials or quota. The backend reaches the `autopush-common` environment over plain `ws://127.0.0.1:--common_bag_ws_port`, so point that port at the mock and run the e2e checks with `--mock`, which selects that environment:
@@ -149,7 +151,7 @@ npm run e2e -- --server=http://localhost:8080 --mock
 
 The mock answers each text turn with a short tone, a transcript that repeats the conversation so far, and a resumption handle; calls a declared function when a turn names it; rejects models named `no-such-*` with close code 1008; and takes `/goaway [seconds]` and `/close <code> [reason]` as turns. It sends no avatar video and no WebRTC answer, so with `--mock` the e2e checks expect audio-only replies and the fallback to WebSocket media instead. They also answer the function-response simulator in the browser (in the app it's a Gemini call, which needs credentials), add GoAway scenarios (a resume, and the reconnect limit), and skip the spoken turn, since the mock ignores audio. A scenario that passes with checks left out prints `PASS*` and names them. `backend/tests/test_mock_live_api.py` runs sessions through the proxy to the mock.
 
-GitHub Actions runs lint, the unit tests, the browser e2e checks and `scripts/smoke_test.py` against the mock, and a container build on every push. The checks against a real endpoint run locally. The lint, type-check and test tools are pinned (`backend/requirements-dev.txt`, `package-lock.json`) so a new release can't turn CI red on its own; Dependabot proposes monthly bumps as pull requests (`.github/dependabot.yml`).
+GitHub Actions runs lint, the unit tests, the browser e2e checks (in Chrome and Firefox) and `scripts/smoke_test.py` against the mock, and a container build on every push. The checks against a real endpoint run locally. The lint, type-check and test tools are pinned (`backend/requirements-dev.txt`, `package-lock.json`) so a new release can't turn CI red on its own; Dependabot proposes monthly bumps as pull requests (`.github/dependabot.yml`).
 
 ### Files
 
