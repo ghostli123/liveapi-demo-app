@@ -56,6 +56,17 @@ const AppUI = {
         const el = this.getControl(id);
         if (el) el.disabled = disabled;
     },
+    /**
+     * Disables a Material select and says so in aria-disabled, which axe
+     * reads (it doesn't count a custom element's `disabled`), so the dimmed
+     * label of an inactive select isn't reported as low contrast.
+     */
+    setSelectDisabled(id, disabled) {
+        const el = this.getControl(id);
+        if (!el) return;
+        el.disabled = disabled;
+        el.setAttribute("aria-disabled", String(disabled));
+    },
     setText(id, text) {
         const el = this.getElement(id);
         if (el) el.textContent = text; // Secure against XSS
@@ -366,7 +377,7 @@ function initDOMEventListeners() {
         [
             "#enableS2ST",
             "change",
-            (event) => AppUI.setDisabled("s2stTargetLanguage", !event.target.checked),
+            (event) => AppUI.setSelectDisabled("s2stTargetLanguage", !event.target.checked),
         ],
     ];
     for (const [selector, type, handler] of listeners) {
@@ -1962,11 +1973,7 @@ function downloadBlob(blob, filename) {
 }
 
 function toggleSchedulingDisable() {
-    const toolBehaviorVal = AppUI.getValue("toolBehavior");
-    const fcScheduling = AppUI.getControl("fcScheduling");
-    if (fcScheduling) {
-        fcScheduling.disabled = (toolBehaviorVal === "BLOCKING");
-    }
+    AppUI.setSelectDisabled("fcScheduling", AppUI.getValue("toolBehavior") === "BLOCKING");
 }
 
 function toggleAvatarMode() {

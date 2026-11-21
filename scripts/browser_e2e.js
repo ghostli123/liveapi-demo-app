@@ -231,6 +231,13 @@ const scenarios = {
         };
         await page.waitForTimeout(1000); // Let the Material components render.
         await audit("idle");
+        // At phone width the page scrolls as a whole, so axe checks the
+        // settings below the fold too; the desktop sidebar scrolls on its own.
+        const desktop = page.viewportSize();
+        await page.setViewportSize({ width: 412, height: 915 });
+        await page.waitForTimeout(300);
+        await audit("idle at phone width");
+        await page.setViewportSize(desktop);
         await page.evaluate(() => document.querySelectorAll("details").forEach((d) => (d.open = true)));
         await audit("settings open");
         await page.click("#createVoiceBtn");

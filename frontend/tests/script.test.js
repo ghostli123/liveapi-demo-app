@@ -133,6 +133,8 @@ function loadApp(globals = {}, { radios = [] } = {}) {
         "connectBtnClick",
         "handleAudioFileInputChange",
         "handleAvatarFileInputChange",
+        "AppUI",
+        "toggleSchedulingDisable",
     ];
     const context = loadScript("script.js", exportNames, {
         window: { location: { protocol: "http:", host: "localhost:1234" }, addEventListener() {} },
@@ -318,6 +320,23 @@ test("the branded-voice dialog takes focus, makes the page inert, and gives focu
     element("text-message").focus();
     context.closeModal();
     assert.equal(document.activeElement, element("text-message"));
+});
+
+test("disabling a Material select also sets aria-disabled, so axe treats it as inactive", () => {
+    const { context, element } = loadApp();
+    const scheduling = element("fcScheduling");
+    element("toolBehavior").value = "BLOCKING";
+    context.toggleSchedulingDisable();
+    assert.equal(scheduling.disabled, true);
+    assert.equal(scheduling.attributes["aria-disabled"], "true");
+    element("toolBehavior").value = "NON_BLOCKING";
+    context.toggleSchedulingDisable();
+    assert.equal(scheduling.disabled, false);
+    assert.equal(scheduling.attributes["aria-disabled"], "false");
+
+    context.AppUI.setSelectDisabled("s2stTargetLanguage", false);
+    assert.equal(element("s2stTargetLanguage").attributes["aria-disabled"], "false");
+    context.AppUI.setSelectDisabled("missing", true); // No element: no throw.
 });
 
 test("the metrics icon toggles its panel from the keyboard and closes on Escape or focus leaving", () => {
