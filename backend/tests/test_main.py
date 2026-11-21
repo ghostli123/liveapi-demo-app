@@ -277,6 +277,25 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         resp = await self.client.get("/ws")
         self.assertEqual(resp.status, 400)
 
+    async def test_non_upgrade_request_keeps_pending_session(self):
+        # A plain GET (a link preview, a curl) used to fail in ws.prepare after
+        # the claim, and the cleanup deleted the browser's pending record.
+        async with FakeUpstream() as upstream:
+            with flagsaver.flagsaver(common_bag_ws_port=upstream.port):
+                await self.connect_session("s49")
+                resp = await self.client.get("/ws?session_id=s49")
+                self.assertEqual(resp.status, 400)
+                self.assertIn("WebSocket", await resp.text())
+                record = await main.SESSION_MANAGER.search_item("s49")
+                assert record is not None
+                self.assertIsNone(record.websocket_handler)
+
+                ws = await self.client.ws_connect("/ws?session_id=s49")
+                await ws.send_str("ping")
+                msg = await asyncio.wait_for(ws.receive(), 5)
+                self.assertEqual(json.loads(msg.data), {"echo": "ping"})
+                await ws.close()
+
     async def test_control_rejects_bad_requests(self):
         status, body = await self.connect_session(
             "s3", endpoint="evil.rep.attacker.com"

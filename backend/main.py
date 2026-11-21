@@ -265,6 +265,10 @@ async def aiohttp_websocket_handler(request: web.Request) -> web.StreamResponse:
     ws = web.WebSocketResponse(
         max_msg_size=MAX_CLIENT_MESSAGE_BYTES, heartbeat=heartbeat_s
     )
+    # Refused before the claim: a plain GET (a link preview, a curl) would fail
+    # in ws.prepare, and that cleanup ends the browser's pending session.
+    if not ws.can_prepare(request).ok:
+        return web.Response(text="Expected a WebSocket upgrade request", status=400)
     wb_handler = websocket_handler.WebsocketHandler(
         upstream_url(session_handler.ws_host),
         session_id,
