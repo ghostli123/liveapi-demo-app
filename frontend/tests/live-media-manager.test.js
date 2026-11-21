@@ -175,11 +175,12 @@ function audioInputWithPendingMic({ addModule = async () => {} } = {}) {
         disconnect() {}
     }
     const context = loadScript("live-media-manager.js", ["LiveAudioInputManager"], {
+        btoa,
         navigator: { mediaDevices: devices.mediaDevices },
         AudioContext: FakeAudioContext,
         AudioWorkletNode: FakeWorkletNode,
         setInterval: (callback, ms) => {
-            const id = { ms };
+            const id = { ms, callback };
             intervals.add(id);
             return id;
         },
@@ -307,6 +308,30 @@ test("a WebSocket microphone refused after it was superseded doesn't throw or to
     const third = manager.connectMicrophone();
     requests[2].deny();
     await assert.rejects(third, { name: "NotAllowedError" });
+});
+
+test("WebSocket microphone audio is still sent when the browser throttles the send timer", async () => {
+    const { manager, requests, intervals } = audioInputWithPendingMic();
+    const updating = manager.updateAudioInterval("200"); // 3,200 samples at 16 kHz.
+    requests[0].grant();
+    await updating;
+    const sentSamples = [];
+    manager.onNewAudioRecordingChunk = (b64) => sentSamples.push(Buffer.from(b64, "base64").length / 2);
+    const quantum = (n) => manager.processor.port.onmessage({ data: new Int16Array(128).fill(n) });
+
+    // On time: the timer sends each interval's audio; the worklet sends nothing.
+    const [timer] = intervals;
+    for (let i = 0; i < 25; i++) quantum(1);
+    timer.callback();
+    assert.deepEqual(sentSamples, [3200]);
+
+    // Throttled (a hidden tab): a minute without the timer. Audio leaves in
+    // two-interval chunks instead of piling up for the next timer run.
+    sentSamples.length = 0;
+    for (let i = 0; i < (60 * 16000) / 128; i++) quantum(i % 2);
+    assert.equal(sentSamples.length, 150);
+    assert.ok(sentSamples.every((n) => n === 6400), String(new Set(sentSamples)));
+    assert.equal(manager.pcmData.length, 0);
 });
 
 test("parseIntervalMs clamps typed intervals and falls back on unusable ones", () => {

@@ -172,6 +172,8 @@ function onTrackEnded(tracks, listener) {
 // model hears the user late.
 const AUDIO_INTERVAL_MS = { min: 20, max: 1000, fallback: 200 };
 const VIDEO_INTERVAL_MS = { min: 100, max: 60000, fallback: 400 };
+// The WebSocket microphone's capture rate, in samples per second.
+const MIC_SAMPLE_RATE = 16000;
 
 /**
  * Parses an interval typed in the settings. Blank, non-numeric, zero and
@@ -218,13 +220,13 @@ class LiveAudioInputManager {
         // disconnectMicrophone() bumps this, abandoning a connect still in flight.
         const generation = ++this.generation;
         const audioContext = new AudioContext({
-            sampleRate: 16000,
+            sampleRate: MIC_SAMPLE_RATE,
         });
 
         let constraints = {
             audio: {
                 channelCount: 1,
-                sampleRate: 16000,
+                sampleRate: MIC_SAMPLE_RATE,
             },
         };
 
@@ -272,9 +274,13 @@ class LiveAudioInputManager {
             "input-processor"
         );
 
-        // Listen for messages (the PCM data) from the worklet.
+        // Listen for messages (the PCM data) from the worklet. These keep
+        // arriving in a hidden tab, where the browser throttles the timer below
+        // (Chrome: to once a second, once a minute after 5 minutes hidden), so
+        // audio the timer hasn't sent within two intervals is sent from here.
         this.processor.port.onmessage = (event) => {
             this.pcmData.push(...event.data);
+            if (this.pcmData.length >= (2 * this.intervalMs * MIC_SAMPLE_RATE) / 1000) this.recordChunk();
         };
 
         // Connect the microphone source to the worklet.
