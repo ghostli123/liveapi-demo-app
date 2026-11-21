@@ -16,6 +16,17 @@ class FakeGeminiLiveAPI {
     sendImageMessage(data) {
         this.sent.push(["image", data]);
     }
+    // Like the real class, input is only sent once the server confirmed setup.
+    sendTextMessage(text) {
+        if (!this.isSetupComplete) return false;
+        this.sent.push(["text", text]);
+        return true;
+    }
+    sendVoiceActivityMessage(start) {
+        if (!this.isSetupComplete) return false;
+        this.sent.push(["activity", start]);
+        return true;
+    }
     noteActivity() {}
 }
 class FakeManager {}
@@ -83,6 +94,8 @@ function loadApp(globals = {}, { radios = [] } = {}) {
         "closeModal",
         "restoreSettings",
         "handleEnvironmentChange",
+        "newUserMessage",
+        "turnBtnClick",
     ];
     const context = loadScript("script.js", exportNames, {
         window: { location: { protocol: "http:", host: "localhost:1234" }, addEventListener() {} },
@@ -298,4 +311,87 @@ test("an unknown saved response type keeps the page's default selected", async (
         radios.map((radio) => radio.checked),
         [false, false, true]
     );
+});
+
+/** The "Start speaking" / text input path, with a microphone that starts when the test says. */
+function loadSession() {
+    const mic = { starts: [] };
+    const app = loadApp({
+        navigator: {},
+        performance,
+        requestAnimationFrame: () => 0, // Device lists refresh once the mic starts.
+        LiveAudioInputManager: class {
+            updateAudioInterval() {
+                return new Promise((resolve) => mic.starts.push(resolve));
+            }
+            disconnectMicrophone() {}
+        },
+        MicLevelMeter: class {
+            start() {}
+            stop() {}
+        },
+    });
+    const api = app.context.AppState.geminiLiveApi;
+    api.transportMode = "websocket";
+    app.element("disconnected").hidden = true; // A session is starting or running.
+    return { ...app, api, mic, dialogText: () => app.element("dialogMessage").textContent };
+}
+
+test("text typed before the server confirms setup stays in the box", () => {
+    const { context, element, api, dialogText } = loadSession();
+    const chat = [];
+    element("text-chat").appendChild = (line) => chat.push(line.textContent);
+    element("text-message").value = "hello";
+
+    context.newUserMessage();
+    assert.deepEqual(api.sent, []);
+    assert.equal(element("text-message").value, "hello");
+    assert.equal(dialogText(), "The session is still connecting. Try sending a message again once it's connected.");
+    assert.deepEqual(chat, []);
+
+    api.isSetupComplete = true;
+    context.newUserMessage();
+    assert.deepEqual(api.sent, [["text", "hello"]]);
+    assert.equal(element("text-message").value, "");
+    assert.deepEqual(chat, ["You: hello"]);
+});
+
+test("text with no session asks the user to connect", () => {
+    const { context, element, api, dialogText } = loadSession();
+    element("disconnected").hidden = false;
+    element("text-message").value = "hello";
+    context.newUserMessage();
+    assert.deepEqual(api.sent, []);
+    assert.equal(dialogText(), "Connect before sending a message.");
+});
+
+test("Start speaking while the session resumes doesn't start a turn", async () => {
+    const { context, element, api, mic, dialogText } = loadSession();
+    element("micBtn").hidden = false; // The mic is already on.
+    await context.turnBtnClick();
+    assert.deepEqual(api.sent, []);
+    assert.equal(context.AppState.userTurnActive, false);
+    assert.equal(element("turnBtn").textContent, undefined);
+    assert.equal(dialogText(), "The session is still connecting. Try speaking again once it's connected.");
+    assert.equal(mic.starts.length, 0);
+
+    api.isSetupComplete = true;
+    await context.turnBtnClick();
+    assert.deepEqual(api.sent, [["activity", true]]);
+    assert.equal(element("turnBtn").textContent, "Done speaking");
+});
+
+test("a resume during the microphone prompt doesn't start a turn", async () => {
+    const { context, element, api, mic, dialogText } = loadSession();
+    api.isSetupComplete = true;
+    element("micBtn").hidden = true; // The mic is off, so the click starts it.
+    const click = context.turnBtnClick();
+    assert.equal(mic.starts.length, 1);
+    api.isSetupComplete = false; // A GoAway: resume() replaces the connection.
+    mic.starts[0]();
+    await click;
+    assert.deepEqual(api.sent, []);
+    assert.equal(context.AppState.userTurnActive, false);
+    assert.equal(context.AppState.turnStarting, false);
+    assert.equal(dialogText(), "The session is still connecting. Try speaking again once it's connected.");
 });

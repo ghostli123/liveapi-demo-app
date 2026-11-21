@@ -724,13 +724,15 @@ class GeminiLiveAPI {
     /**
      * Sends a structured JSON message over the WebSocket connection.
      * @param {Object} message - Message object to serialize and send.
+     * @returns {boolean} Whether the message was sent.
      */
     sendMessage(message) {
         if (this.webSocket && this.webSocket.readyState === WebSocket.OPEN) {
             this.webSocket.send(JSON.stringify(message));
-        } else {
-            console.warn("sendMessage(): WebSocket is not open. Cannot send message:", message);
+            return true;
         }
+        console.warn("sendMessage(): WebSocket is not open. Cannot send message:", message);
+        return false;
     }
 
     /**
@@ -1222,8 +1224,10 @@ class GeminiLiveAPI {
     /**
      * Sends a text interaction message from the user.
      * @param {string} text - User message text.
+     * @returns {boolean} Whether it was sent; see sendVoiceActivityMessage().
      */
     sendTextMessage(text) {
+        if (!this.isSetupComplete) return false;
         const textMessage = {
             client_content: {
                 turns: [
@@ -1236,19 +1240,24 @@ class GeminiLiveAPI {
             },
         };
         this.noteActivity();
-        this.sendMessage(textMessage);
+        return this.sendMessage(textMessage);
     }
 
     /**
      * Sends a VAD activity signal (speech start or end).
      * @param {boolean} start - True for activity start, false for activity end.
+     * @returns {boolean} Whether it was sent. Like realtime input, it isn't
+     *     until the server confirms setup: before that (WebRTC still
+     *     connecting, or a session resuming on a new connection) there may be
+     *     no connection to send it on, and the server may not accept input.
      */
     sendVoiceActivityMessage(start) {
+        if (!this.isSetupComplete) return false;
         const activityMessage = {
             realtime_input: start ? { activity_start: {} } : { activity_end: {} },
         };
         this.noteActivity();
-        this.sendMessage(activityMessage);
+        return this.sendMessage(activityMessage);
     }
 
     /**
