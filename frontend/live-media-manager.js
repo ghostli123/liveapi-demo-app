@@ -389,23 +389,38 @@ class LiveVideoManager extends LiveFrameSource {
 }
 
 class LiveScreenManager extends LiveFrameSource {
+    constructor(previewVideoElement, previewCanvasElement) {
+        super(previewVideoElement, previewCanvasElement);
+        this.generation = 0;
+    }
+
     /**
      * Asks the user for a screen to share. Throws if they cancel.
      * @param {{sendFrames?: boolean}} [options] - See LiveVideoManager.startWebcam.
+     * @returns {Promise<boolean>} False if stopCapture() or a newer
+     *     startCapture() ran while the picker was open; the pick is dropped.
      */
     async startCapture({ sendFrames = true } = {}) {
+        const generation = ++this.generation;
         const stream = await navigator.mediaDevices.getDisplayMedia();
-        this.stopCapture();
+        if (generation !== this.generation) {
+            // The session ended (or the camera took over) during the picker.
+            stream.getTracks().forEach((track) => track.stop());
+            return false;
+        }
+        this._detach(); // A share already running is replaced.
         this._attach(stream, sendFrames);
         // The browser's own "Stop sharing" button ends the track.
         stream.getVideoTracks().forEach((track) =>
             track.addEventListener("ended", () => {
-                if (this.stream === stream) this.stopCapture();
+                if (this.stream === stream) this._detach();
             })
         );
+        return true;
     }
 
     stopCapture() {
+        this.generation++; // Abandons a startCapture() still in the picker.
         this._detach();
     }
 }

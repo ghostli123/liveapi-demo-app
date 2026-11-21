@@ -1152,7 +1152,9 @@ async function startScreenCapture() {
     const webRtcManager = webRtcManagerIfActive();
     screen.intervalMs = videoIntervalMs();
     try {
-        await screen.startCapture({ sendFrames: !webRtcManager });
+        // False: the session ended or the camera started while the picker
+        // was open, and the pick was dropped.
+        if (!(await screen.startCapture({ sendFrames: !webRtcManager }))) return;
     } catch (err) {
         // NotAllowedError means the user closed the picker.
         if (err.name !== "NotAllowedError") {
