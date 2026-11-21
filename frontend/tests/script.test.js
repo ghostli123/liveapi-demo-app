@@ -78,6 +78,7 @@ function fakeElement(id) {
         replaceChildren() {},
         appendChild() {},
         focus() {},
+        querySelector: () => null,
     };
 }
 
@@ -136,6 +137,7 @@ function loadApp(globals = {}, { radios = [] } = {}) {
         "handleAvatarFileInputChange",
         "AppUI",
         "toggleSchedulingDisable",
+        "endSession",
     ];
     const context = loadScript("script.js", exportNames, {
         window: { location: { protocol: "http:", host: "localhost:1234" }, addEventListener() {} },
@@ -488,6 +490,7 @@ function loadSession() {
         navigator: {},
         performance,
         requestAnimationFrame: () => 0, // Device lists refresh once the mic starts.
+        clearInterval, // Disconnect stops the connection timer.
         LiveAudioInputManager: class {
             updateAudioInterval() {
                 return new Promise((resolve) => mic.starts.push(resolve));
@@ -565,6 +568,72 @@ test("a resume during the microphone prompt doesn't start a turn", async () => {
     assert.equal(context.AppState.userTurnActive, false);
     assert.equal(context.AppState.turnStarting, false);
     assert.equal(dialogText(), "The session is still connecting. Try speaking again once it's connected.");
+});
+
+/** Disconnect, then Connect again, in a `loadSession()` app; the new session is set up. */
+function reconnect({ context, element, api }) {
+    api.disconnect = () => {};
+    const { AppState } = context;
+    AppState.micLevelMeter.stop = () => {};
+    AppState.liveVideoManager.stopWebcam = () => {};
+    AppState.liveScreenManager.stopCapture = () => {};
+    AppState.liveAudioOutputManager.clear = () => {};
+    Object.assign(AppState.liveVideoOutputManager, {
+        getRecordings: () => [],
+        clearRecordedChunks() {},
+        resetPlayer() {},
+    });
+    context.endSession();
+    element("disconnected").hidden = true;
+    api.isSetupComplete = true;
+}
+
+test("Start speaking works in the next session while the last one's microphone prompt is still open", async () => {
+    const app = loadSession();
+    const { context, element, api, mic, dialogText } = app;
+    api.isSetupComplete = true;
+    element("micBtn").hidden = true; // The mic is off, so the click starts it.
+    const stale = context.turnBtnClick();
+    assert.equal(mic.starts.length, 1);
+    reconnect(app);
+    assert.equal(element("micBtn").hidden, true);
+
+    const click = context.turnBtnClick();
+    assert.equal(mic.starts.length, 2, "the click in the new session starts the microphone");
+    mic.starts[1]();
+    await click;
+    assert.deepEqual(api.sent, [["activity", true]]);
+    assert.equal(context.AppState.userTurnActive, true);
+    assert.equal(element("turnBtn").textContent, "Done speaking");
+
+    // The old prompt settling changes nothing in the new session.
+    mic.starts[0]();
+    await stale;
+    assert.deepEqual(api.sent, [["activity", true]]);
+    assert.equal(context.AppState.userTurnActive, true);
+    assert.equal(context.AppState.turnStarting, false);
+    assert.equal(dialogText(), undefined);
+});
+
+test("a microphone prompt from the last session doesn't start a turn in the next one", async () => {
+    const app = loadSession();
+    const { context, element, api, mic, dialogText } = app;
+    api.isSetupComplete = true;
+    element("micBtn").hidden = true;
+    const stale = context.turnBtnClick();
+    reconnect(app);
+    element("micBtn").hidden = false; // The user turned the mic on in the new session.
+    element("micOffBtn").hidden = true;
+
+    mic.starts[0]();
+    await stale;
+    assert.deepEqual(api.sent, []);
+    assert.equal(context.AppState.userTurnActive, false);
+    assert.equal(context.AppState.turnStarting, false);
+    assert.equal(dialogText(), undefined);
+
+    await context.turnBtnClick(); // A click of its own still starts a turn.
+    assert.deepEqual(api.sent, [["activity", true]]);
 });
 
 test("a microphone that stops on its own ends the turn, turns the mic off and says why", async () => {

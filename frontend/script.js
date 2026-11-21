@@ -133,6 +133,7 @@ const AppState = {
     /** @type {HTMLElement | null} */
     modalOpener: null, // Had focus when the branded-voice dialog opened; gets it back on close
     turnStarting: false, // "Start speaking" is waiting for the microphone
+    turnAttempt: 0, // Advanced by each "Start speaking" wait and by the end of a session
     /** @type {string | null} */
     preferredTransport: null, // The transport the user last picked
     recordingStartTime: 0, // Date.now() when the voice recording started
@@ -1356,11 +1357,15 @@ async function turnBtnClick() {
         AppUI.showModal(notReadyMessage("speaking"));
         return;
     }
+    const attempt = ++AppState.turnAttempt;
     AppState.turnStarting = true;
     try {
         if (!isMicOn()) {
             showMicState(true);
             await startAudioInput();
+            // The session ended during the permission prompt; a click in the
+            // next session owns the turn now.
+            if (attempt !== AppState.turnAttempt) return;
             if (!isMicOn()) return; // The microphone failed to start.
         }
         // The session may have started resuming during the permission prompt.
@@ -1370,7 +1375,7 @@ async function turnBtnClick() {
         }
         setUserTurnActive(true);
     } finally {
-        AppState.turnStarting = false;
+        if (attempt === AppState.turnAttempt) AppState.turnStarting = false;
     }
 }
 
@@ -1658,6 +1663,9 @@ function endSession() {
     AppUI.setText("connection-age", "--");
     AppUI.setHidden("turnBtnWrap", true);
     setUserTurnActive(false);
+    // A "Start speaking" still waiting for the microphone belongs to this session.
+    AppState.turnAttempt++;
+    AppState.turnStarting = false;
     closeTranscriptLine("input");
     closeTranscriptLine("output");
     AppState.liveAudioOutputManager.clear();
