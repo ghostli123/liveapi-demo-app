@@ -1,5 +1,9 @@
+import logging
 import types
 import unittest
+from unittest import mock
+
+import websockets
 
 import websocket_handler
 
@@ -54,6 +58,32 @@ class DescribeConnectErrorTest(unittest.TestCase):
             websocket_handler.describe_connect_error(OSError("refused")),
             "OSError: refused",
         )
+
+
+class UpstreamLoggingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_debug_logging_leaves_out_the_access_token(self):
+        root = logging.getLogger()
+        self.addCleanup(root.setLevel, root.level)
+        root.setLevel(logging.DEBUG)  # What --debug does.
+        handler = websocket_handler.WebsocketHandler("wss://unused", "s", None)
+        with mock.patch.object(websockets, "connect") as connect:
+            handler._connect_upstream("secret-token")
+        options = dict(connect.call_args.kwargs)
+        del options["ssl"]  # The test server is plain ws://.
+
+        async def close(connection):
+            await connection.close()
+
+        # The server's own logger would log the header it received.
+        quiet = logging.getLogger("test.quiet_server")
+        quiet.setLevel(logging.INFO)
+        async with websockets.serve(close, "127.0.0.1", 0, logger=quiet) as server:
+            port = next(iter(server.sockets)).getsockname()[1]
+            with self.assertLogs(level=logging.DEBUG) as logs:
+                logging.getLogger().debug("captured")
+                async with websockets.connect(f"ws://127.0.0.1:{port}", **options):
+                    pass
+        self.assertNotIn("secret-token", "\n".join(logs.output))
 
 
 if __name__ == "__main__":
