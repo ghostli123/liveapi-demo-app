@@ -32,6 +32,9 @@ _RESERVED_CLOSE_CODES = frozenset({1005, 1006, 1015})
 # A close frame carries at most 123 bytes of reason after the 2-byte code.
 _MAX_CLOSE_REASON_BYTES = 123
 _DEBUG_PREVIEW_CHARS = 300
+# What send() raises once its connection has closed: websockets raises
+# ConnectionClosed, aiohttp ClientConnectionResetError (a ConnectionResetError).
+_TARGET_CLOSED_ERRORS = (websockets.ConnectionClosed, ConnectionError)
 # websockets logs every handshake header at debug level, the Authorization
 # header with the access token included, and --debug sets the root logger to
 # debug. The upstream connection logs here instead, a logger kept at INFO.
@@ -154,8 +157,9 @@ class WebsocketHandler:
             )
         try:
             await target_websocket.send(message)
-        # The target closed; aiohttp and websockets raise different types.
-        except Exception as e:
+        # The target closed. Anything else is a bug: it propagates, and
+        # create_proxy logs it and ends the session with 1011.
+        except _TARGET_CLOSED_ERRORS as e:
             if target_websocket is self.client_websocket:
                 self.client_closed = True
             logging.info(

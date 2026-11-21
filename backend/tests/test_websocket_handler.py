@@ -4,6 +4,7 @@ import types
 import unittest
 from unittest import mock
 
+import aiohttp
 import websockets
 
 import websocket_handler
@@ -127,18 +128,23 @@ class UpstreamRedirectTest(unittest.IsolatedAsyncioTestCase):
 
 
 class FakeConnection:
-    def __init__(self, recv_error=None):
+    def __init__(self, recv_error=None, messages=(), send_error=None):
         self.recv_error = recv_error
+        self.messages = list(messages)
+        self.send_error = send_error
         self.close_code = None
         self.close_reason = ""
 
     async def recv(self):
         if self.recv_error:
             raise self.recv_error
+        if self.messages:
+            return self.messages.pop(0)
         await asyncio.Event().wait()
 
     async def send(self, message):
-        pass
+        if self.send_error:
+            raise self.send_error
 
     async def close(self, code=1000, reason=""):
         self.close_code = code
@@ -162,6 +168,50 @@ class ProxyErrorTest(unittest.IsolatedAsyncioTestCase):
             handler.client_close_frame(), (1011, "Proxy error: RuntimeError")
         )
         self.assertIn("boom", "\n".join(logs.output))
+
+    async def run_proxy(self, client, upstream):
+        handler = websocket_handler.WebsocketHandler(
+            "ws://unused", "s", client, keepalive_s=None
+        )
+        with mock.patch.object(
+            handler, "_connect_upstream", return_value=asyncio.sleep(0, upstream)
+        ):
+            await asyncio.wait_for(handler.create_proxy(), 5)
+        return handler
+
+    async def test_send_error_other_than_closed_ends_session_with_1011(self):
+        # Every send() error counted as "target closed": a bug ended the
+        # session as a clean 1000 with one INFO line and no traceback.
+        upstream = FakeConnection(send_error=TypeError("bad frame"))
+        with self.assertLogs("absl", level="ERROR") as logs:
+            handler = await self.run_proxy(FakeConnection(messages=["hi"]), upstream)
+        self.assertEqual(upstream.close_code, 1011)
+        self.assertEqual(handler.client_close_frame(), (1011, "Proxy error: TypeError"))
+        self.assertIn("Traceback", "\n".join(logs.output))
+        self.assertIn("bad frame", "\n".join(logs.output))
+
+    async def test_send_to_closed_browser_ends_session_cleanly(self):
+        # What aiohttp raises when sending on a closed WebSocketResponse.
+        client = FakeConnection(
+            send_error=aiohttp.ClientConnectionResetError(
+                "Cannot write to closing transport"
+            )
+        )
+        upstream = FakeConnection(messages=["hi"])
+        with self.assertNoLogs("absl", level="ERROR"):
+            handler = await self.run_proxy(client, upstream)
+        self.assertTrue(handler.client_closed)
+        self.assertEqual(upstream.close_code, 1000)
+        self.assertEqual(handler.client_close_frame(), (1000, ""))
+
+    async def test_send_to_closed_upstream_ends_session_cleanly(self):
+        upstream = FakeConnection(
+            send_error=websockets.exceptions.ConnectionClosedOK(None, None)
+        )
+        with self.assertNoLogs("absl", level="ERROR"):
+            handler = await self.run_proxy(FakeConnection(messages=["hi"]), upstream)
+        self.assertFalse(handler.client_closed)
+        self.assertEqual(upstream.close_code, 1000)
 
 
 if __name__ == "__main__":
