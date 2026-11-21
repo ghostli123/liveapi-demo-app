@@ -1285,6 +1285,9 @@ async function startAudioInput() {
     } catch (err) {
         console.error("Failed to start microphone:", err);
         AppUI.showModal(`Could not start the microphone: ${err.message}`);
+        // E.g. switching to another mic mid-turn: like turning the mic off,
+        // this ends the turn, or it stays open with nothing being sent.
+        endUserTurn();
         stopAudioInput();
         showMicState(false);
     }

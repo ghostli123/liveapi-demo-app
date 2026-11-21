@@ -485,7 +485,7 @@ test("an unknown saved response type keeps the page's default selected", async (
 
 /** The "Start speaking" / text input path, with a microphone that starts when the test says. */
 function loadSession() {
-    const mic = { starts: [] };
+    const mic = { starts: [], fails: [] };
     const app = loadApp({
         navigator: {},
         performance,
@@ -493,7 +493,10 @@ function loadSession() {
         clearInterval, // Disconnect stops the connection timer.
         LiveAudioInputManager: class {
             updateAudioInterval() {
-                return new Promise((resolve) => mic.starts.push(resolve));
+                return new Promise((resolve, reject) => {
+                    mic.starts.push(resolve);
+                    mic.fails.push(reject);
+                });
             }
             disconnectMicrophone() {
                 mic.stops = (mic.stops || 0) + 1;
@@ -652,6 +655,24 @@ test("a microphone that stops on its own ends the turn, turns the mic off and sa
     assert.equal(element("micOffBtn").hidden, false);
     assert.equal(mic.stops, 1);
     assert.match(dialogText(), /^The microphone stopped: it was unplugged/);
+});
+
+test("switching to a microphone that fails mid-turn ends the turn and turns the mic off", async () => {
+    const { context, element, api, mic, dialogText } = loadSession();
+    api.isSetupComplete = true;
+    element("micBtn").hidden = false;
+    element("micOffBtn").hidden = true;
+    await context.turnBtnClick();
+    assert.deepEqual(api.sent, [["activity", true]]);
+
+    context.newMicSelected();
+    mic.fails[0](new Error("Constraints could not be satisfied."));
+    await flush();
+    assert.deepEqual(api.sent, [["activity", true], ["activity", false]]);
+    assert.equal(context.AppState.userTurnActive, false);
+    assert.equal(element("turnBtn").textContent, "Start speaking");
+    assert.equal(element("micBtn").hidden, true);
+    assert.equal(dialogText(), "Could not start the microphone: Constraints could not be satisfied.");
 });
 
 test("a mic level meter that fails to start leaves the microphone on without it", async () => {
