@@ -1037,6 +1037,10 @@ const ChatState = {
     // The chat line each transcript stream is appending to, if any.
     /** @type {{input: HTMLElement | null, output: HTMLElement | null}} */
     transcriptLines: { input: null, output: null },
+    // The last session's "Saved avatar video" links. Each blob URL keeps its
+    // MP4 in memory until revoked, so the next Connect releases them.
+    /** @type {HTMLAnchorElement[]} */
+    savedVideoLinks: [],
 };
 
 const TRANSCRIPT_LABELS = { input: "You: ", output: "Gemini: " };
@@ -1455,13 +1459,16 @@ function setAppStatus(status) {
                 } else if (recordings.length > 1) {
                     // Several automatic downloads trigger the browser's
                     // "download multiple files" prompt; offer links instead.
-                    const line = newSystemMessage("Saved avatar video:");
+                    // Not newSystemMessage: collapsing into an earlier such
+                    // line would replace its text, links included.
+                    const line = addMessageToChat("Saved avatar video:", "system");
                     recordings.forEach((blob, i) => {
                         const link = document.createElement("a");
                         link.href = URL.createObjectURL(blob);
                         link.download = `received_video_${stamp}_part${i + 1}.mp4`;
                         link.textContent = `part ${i + 1}`;
                         if (line) line.append(" ", link);
+                        ChatState.savedVideoLinks.push(link);
                     });
                 }
                 AppState.liveVideoOutputManager.clearRecordedChunks();
@@ -1484,6 +1491,17 @@ function setAppStatus(status) {
         default:
             break;
     }
+}
+
+/** Frees the last session's saved-video blobs; their links become plain text. */
+function releaseSavedVideoLinks() {
+    for (const link of ChatState.savedVideoLinks) {
+        URL.revokeObjectURL(link.href);
+        link.removeAttribute("href");
+        link.removeAttribute("download");
+        link.textContent += " (expired)";
+    }
+    ChatState.savedVideoLinks = [];
 }
 
 /** Switches between the "connected" and "model speaking" badges. */
@@ -1539,6 +1557,7 @@ function endSession() {
 function connectBtnClick() {
     setAppStatus("connecting");
     console.log("Connecting...");
+    releaseSavedVideoLinks();
     // Runs inside the click, so the browser's autoplay policy allows audio.
     // Safari also needs play() on the video element during the click, or it
     // refuses to start the avatar's sound when the stream arrives later.
