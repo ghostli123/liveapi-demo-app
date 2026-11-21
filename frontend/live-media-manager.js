@@ -242,6 +242,12 @@ class LiveAudioInputManager {
             this.recordChunk.bind(this),
             this.intervalMs
         );
+
+        // A track that ended while the worklet module loaded fired "ended"
+        // before the listener above existed; report it like a later unplug.
+        if (stream.getAudioTracks().some((track) => track.readyState === "ended")) {
+            this.onMicrophoneEnded();
+        }
     }
 
     newAudioRecording(b64AudioData) {

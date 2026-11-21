@@ -149,14 +149,17 @@ test("a microphone that ends on its own is reported; a replaced one isn't", asyn
     assert.equal(ended, 1);
 });
 
-/** A LiveAudioInputManager (WebSocket mic) on fake audio nodes. */
-function audioInputWithPendingMic() {
+/**
+ * A LiveAudioInputManager (WebSocket mic) on fake audio nodes.
+ * @param {{addModule?: () => Promise<void>}} [options] - The worklet loader.
+ */
+function audioInputWithPendingMic({ addModule = async () => {} } = {}) {
     const devices = pendingMediaDevices();
     const intervals = new Set();
     class FakeAudioContext {
         constructor() {
             this.state = "running";
-            this.audioWorklet = { addModule: async () => {} };
+            this.audioWorklet = { addModule };
         }
         createMediaStreamSource() {
             return { connect() {} };
@@ -202,6 +205,28 @@ test("a WebSocket microphone that ends on its own is reported; one turned off is
     await connecting;
     requests[1].track.end();
     assert.equal(ended, 1);
+});
+
+test("a WebSocket microphone that ends while the worklet loads is reported", async () => {
+    let finishLoad;
+    const { manager, requests, intervals } = audioInputWithPendingMic({
+        addModule: () => new Promise((resolve) => (finishLoad = resolve)),
+    });
+    let ended = 0;
+    // Like script.js, which turns the mic off and shows a dialog.
+    manager.onMicrophoneEnded = () => {
+        ended++;
+        manager.disconnectMicrophone();
+    };
+    const connecting = manager.connectMicrophone();
+    requests[0].grant();
+    await new Promise((resolve) => setImmediate(resolve)); // Now inside addModule().
+    requests[0].track.end(); // Unplugged before the "ended" listener exists.
+    finishLoad();
+    await connecting;
+    assert.equal(ended, 1);
+    assert.equal(manager.stream, null);
+    assert.equal(intervals.size, 0);
 });
 
 test("a WebSocket microphone refused after it was superseded doesn't throw or touch the newer one", async () => {
