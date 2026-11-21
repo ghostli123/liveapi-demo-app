@@ -1013,7 +1013,12 @@ class G3RtcWebRtcManager {
             console.log("[WebRTC] connectionState:", state);
             if (this.pc !== pc) return; // A newer session replaced this one.
             G3RtcWebRtcManager.showState(state);
-            if (state === "failed") {
+            if (state === "connected") {
+                // The connect timeout only covers getting connected. A later
+                // drop shows as "disconnected", which can recover, and then
+                // "failed" if it doesn't.
+                clearTimeout(this.connectTimer);
+            } else if (state === "failed") {
                 this.onConnectionFailed();
             }
         };
@@ -1130,7 +1135,8 @@ class G3RtcWebRtcManager {
         this.startStatsPolling();
 
         // If no candidate pair works, the connection can sit in "connecting"
-        // without ever reaching "failed", so give up after a timeout.
+        // without ever reaching "failed", so give up after a timeout. Cleared
+        // once connected (see onconnectionstatechange above).
         clearTimeout(this.connectTimer);
         this.connectTimer = setTimeout(() => {
             if (this.pc === pc && pc.connectionState !== "connected") {

@@ -453,6 +453,77 @@ test("completeSession after close() starts no stats polling or connect timer", a
     assert.equal(timers.size, 0);
 });
 
+// A WebRTC manager with a negotiated session whose timers the test fires.
+async function webRtcSessionWithManualTimers() {
+    const timeouts = new Map();
+    let pc;
+    class FakePeerConnection {
+        constructor() {
+            pc = this;
+            this.iceGatheringState = "complete";
+            this.connectionState = "new";
+            this.localDescription = { sdp: "v=0\r\n" };
+        }
+        createDataChannel() { return { close() {} }; }
+        addTransceiver() { return { sender: { replaceTrack: async () => {} }, receiver: { track: {} }, mid: null }; }
+        async setLocalDescription() {}
+        async setRemoteDescription() {}
+        close() {}
+    }
+    const context = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
+        document: { getElementById: () => null },
+        RTCPeerConnection: FakePeerConnection,
+        MediaStream: class { addTrack() {} },
+        crypto: { randomUUID: () => "id" },
+        setTimeout: (fn, ms) => {
+            const id = {};
+            timeouts.set(id, { fn, ms });
+            return id;
+        },
+        clearTimeout: (id) => timeouts.delete(id),
+        setInterval: () => ({}),
+        clearInterval: () => {},
+        performance: { now: () => 0 },
+    });
+    const manager = new context.G3RtcWebRtcManager(null);
+    const failures = [];
+    manager.onConnectionFailed = () => failures.push(pc.connectionState);
+    await manager.initiateSession();
+    await manager.completeSession("v=0\r\n");
+    const setState = (state) => {
+        pc.connectionState = state;
+        pc.onconnectionstatechange();
+    };
+    const fireConnectTimeout = () => {
+        for (const [id, { fn, ms }] of timeouts) {
+            if (ms === 15000) {
+                timeouts.delete(id);
+                fn();
+            }
+        }
+    };
+    return { failures, setState, fireConnectTimeout };
+}
+
+test("a WebRTC session that never connects is reported after the connect timeout", async () => {
+    const { failures, setState, fireConnectTimeout } = await webRtcSessionWithManualTimers();
+    setState("connecting");
+    fireConnectTimeout();
+    assert.deepEqual(failures, ["connecting"]);
+});
+
+test("a WebRTC session that connected isn't failed by the connect timeout while disconnected", async () => {
+    const { failures, setState, fireConnectTimeout } = await webRtcSessionWithManualTimers();
+    setState("connecting");
+    setState("connected");
+    // A network blip at the 15 s mark; ICE may still recover.
+    setState("disconnected");
+    fireConnectTimeout();
+    assert.deepEqual(failures, []);
+    setState("failed"); // It didn't recover.
+    assert.deepEqual(failures, ["failed"]);
+});
+
 // A LiveScreenManager whose getDisplayMedia() calls stay pending until the
 // test resolves them, like a screen picker the user hasn't answered yet.
 function screenManagerWithPendingPicker() {
