@@ -145,6 +145,15 @@ IDLE_TIMEOUT_S = flags.DEFINE_integer(
     "there. 0 disables.",
     lower_bound=0,
 )
+HOST = flags.DEFINE_string(
+    "host",
+    None,
+    "Address to listen on. Defaults to every interface on Cloud Run ($K_SERVICE "
+    "set) and to 127.0.0.1 elsewhere: the server has no login and starts "
+    "sessions on its own credentials, so other machines on the network "
+    "shouldn't reach it unless you say so. Use 0.0.0.0 (or :: for IPv6 too) "
+    "to accept them, e.g. inside a Docker container.",
+)
 DEBUG = flags.DEFINE_bool(
     "debug", False, "Log at debug level, including a preview of every proxied message."
 )
@@ -180,6 +189,35 @@ def _validate_allowed_host_suffixes(entries: list[str]) -> bool:
 
 # Checked when flags are parsed, so a typo stops the server at startup.
 flags.register_validator(ALLOWED_HOST_SUFFIXES, _validate_allowed_host_suffixes)
+
+
+def _validate_host(value: str | None) -> bool:
+    if value is None:
+        return True
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        pass
+    # A single label ("localhost", this machine's name) is fine here.
+    if re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?", value) or (
+        _HOSTNAME_RE.fullmatch(value.lower())
+    ):
+        return True
+    raise flags.ValidationError(
+        f"invalid address {value!r}; expected an IP address or host name "
+        "without a port, e.g. 0.0.0.0 (set the port with $PORT)"
+    )
+
+
+flags.register_validator(HOST, _validate_host)
+
+
+def listen_host() -> str | None:
+    """The address to bind; None means every interface (IPv4 and IPv6)."""
+    if HOST.value is not None:
+        return HOST.value
+    return None if os.environ.get("K_SERVICE") else "127.0.0.1"
 
 
 def resolve_ws_host(endpoint: Any, location: Any) -> str:
@@ -754,11 +792,13 @@ async def main_async():
 
         runner = web.AppRunner(app, shutdown_timeout=SHUTDOWN_TIMEOUT_S)
         await runner.setup()
-        site = web.TCPSite(runner, None, port)
+        host = listen_host()
+        site = web.TCPSite(runner, host, port)
         await site.start()
 
         logging.info(
-            "Serving on port %d; project %s; allowed upstream hosts: %s",
+            "Serving on %s port %d; project %s; allowed upstream hosts: %s",
+            host or "all interfaces,",
             port,
             project_id(),
             ", ".join(ALLOWED_HOST_SUFFIXES.value),
