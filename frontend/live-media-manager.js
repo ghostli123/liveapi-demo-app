@@ -864,6 +864,19 @@ class LiveVideoOutputManager {
         const video = getAvatarVideoElement();
         if (video) {
             video.style.display = "block";
+            // Ending the stream doesn't stop playback: without this, the
+            // buffered tail keeps playing, sound included, after Disconnect.
+            // A WebRTC stream is on srcObject, which the WebRTC manager clears.
+            if (this.objectUrl && video.getAttribute("src") === this.objectUrl) {
+                video.pause();
+                // Not `src = ""`, which makes Firefox try to load the page as media.
+                video.removeAttribute("src");
+                video.load();
+            }
+        }
+        if (this.objectUrl) {
+            URL.revokeObjectURL(this.objectUrl);
+            this.objectUrl = null;
         }
         this.chunkQueue = [];
         this.clearRecordedChunks();

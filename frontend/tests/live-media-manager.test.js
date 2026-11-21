@@ -536,11 +536,29 @@ function videoOutputWithFakeMediaSource({ codecSupported = true, addSourceBuffer
         }
         endOfStream() { this.readyState = "ended"; }
     }
-    const video = { style: {}, currentTime: 0, addEventListener() {}, play: () => Promise.resolve() };
+    // `src` stands in for the attribute; `paused` follows play() and pause().
+    const video = {
+        style: {},
+        currentTime: 0,
+        src: null,
+        paused: true,
+        loads: 0,
+        addEventListener() {},
+        play() {
+            this.paused = false;
+            return Promise.resolve();
+        },
+        pause() { this.paused = true; },
+        load() { this.loads++; },
+        getAttribute(name) { return name === "src" ? this.src : null; },
+        removeAttribute(name) { if (name === "src") this.src = null; },
+    };
+    fake.revoked = [];
+    let urls = 0;
     const context = loadScript("live-media-manager.js", ["LiveVideoOutputManager"], {
         window: { MediaSource: FakeMediaSource, atob },
         document: { getElementById: (id) => (id === "video_player" ? video : null) },
-        URL: { createObjectURL: () => "blob:x", revokeObjectURL() {} },
+        URL: { createObjectURL: () => `blob:${++urls}`, revokeObjectURL: (url) => fake.revoked.push(url) },
     });
     const manager = new context.LiveVideoOutputManager();
     const errors = [];
@@ -594,6 +612,41 @@ test("a failed addSourceBuffer() is reported at the first MP4 chunk, not at sour
     manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
     assert.equal(manager.chunkQueue.length, 1);
     assert.equal(errors.length, 1);
+});
+
+test("resetPlayer() stops the stream's playback and revokes its URL; a new stream plays", () => {
+    const { manager, fake, video } = videoOutputWithFakeMediaSource();
+    manager.initMediaSource();
+    fake.mediaSources[0].open();
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(video.src, "blob:1");
+    assert.equal(video.paused, false);
+
+    manager.resetPlayer(); // Disconnect.
+    assert.equal(video.paused, true); // The buffered tail would keep playing.
+    assert.equal(video.src, null);
+    assert.equal(video.loads, 1);
+    assert.deepEqual(fake.revoked, ["blob:1"]);
+    assert.equal(manager.objectUrl, null);
+
+    manager.initMediaSource(); // Connect again.
+    fake.mediaSources[1].open();
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(video.src, "blob:2");
+    assert.equal(video.paused, false);
+    assert.equal(fake.mediaSources[1].sourceBuffer.appended.length, 1);
+    assert.deepEqual(fake.revoked, ["blob:1"]);
+});
+
+test("resetPlayer() leaves a video that isn't playing its stream alone", () => {
+    const { manager, video } = videoOutputWithFakeMediaSource();
+    manager.initMediaSource();
+    video.removeAttribute("src"); // WebRTC took over the element (srcObject).
+    video.paused = false;
+    manager.resetPlayer();
+    assert.equal(video.paused, false);
+    assert.equal(video.loads, 0);
+    assert.equal(manager.objectUrl, null);
 });
 
 test("a failed addSourceBuffer() is reported once and chunks aren't queued", () => {
