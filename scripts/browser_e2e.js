@@ -225,19 +225,24 @@ class Run {
 const scenarios = {
     async "no accessibility violations (axe-core)"(browser, run) {
         const page = await run.newPage(browser);
-        const audit = async (state) => {
+        const desktop = page.viewportSize();
+        const auditAt = async (state) => {
             const violations = await accessibilityViolations(page);
             check(violations.length === 0, `${state}: ${violations.join("; ")}`);
         };
+        // axe skips what it can't scroll into view, and the desktop sidebar
+        // scrolls on its own, so its lower settings go unchecked there. At
+        // phone width the page scrolls as a whole, so axe sees all of them.
+        const audit = async (state) => {
+            await auditAt(state);
+            await page.setViewportSize({ width: 412, height: 915 });
+            await page.waitForTimeout(300);
+            await auditAt(`${state} at phone width`);
+            await page.setViewportSize(desktop);
+            await page.waitForTimeout(300);
+        };
         await page.waitForTimeout(1000); // Let the Material components render.
         await audit("idle");
-        // At phone width the page scrolls as a whole, so axe checks the
-        // settings below the fold too; the desktop sidebar scrolls on its own.
-        const desktop = page.viewportSize();
-        await page.setViewportSize({ width: 412, height: 915 });
-        await page.waitForTimeout(300);
-        await audit("idle at phone width");
-        await page.setViewportSize(desktop);
         await page.evaluate(() => document.querySelectorAll("details").forEach((d) => (d.open = true)));
         await audit("settings open");
         await page.click("#createVoiceBtn");
