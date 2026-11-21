@@ -1217,8 +1217,6 @@ test("a voice sample too long for the setup message is refused; one within the l
 
 test("an avatar image too large or of an unsupported type is refused and the previous avatar kept", async () => {
     const { context, element } = loadApp({ FileReader: FakeFileReader });
-    const avatars = [];
-    context.AppState.geminiLiveApi.setCustomizedAvatar = (data, type) => avatars.push([data, type]);
     const choose = async (file) => {
         await context.handleAvatarFileInputChange({ target: { value: file.name, files: [file] } });
         return element("dialogMessage").textContent;
@@ -1231,9 +1229,9 @@ test("an avatar image too large or of an unsupported type is refused and the pre
         await choose({ name: "face.gif", type: "image/gif", size: 1000, bytes: "" }),
         'Could not use "face.gif" as the avatar: use a PNG, JPEG or WebP image.'
     );
-    assert.equal(avatars.length, 0);
+    assert.deepEqual(plainJson(context.AppState.customAvatar), { image: "", mimeType: "image/png" });
     await choose({ name: "face.jpg", type: "image/jpeg", size: 3, bytes: "abc" });
-    assert.deepEqual(JSON.parse(JSON.stringify(avatars)), [["YWJj", "image/jpeg"]]);
+    assert.deepEqual(plainJson(context.AppState.customAvatar), { image: "YWJj", mimeType: "image/jpeg" });
     assert.equal(element("avatarName").textContent, "Avatar: face.jpg");
 });
 
@@ -1315,8 +1313,6 @@ function recordDialogs(context) {
 test("the last avatar choice wins over a slower earlier one, which shows no dialog", async () => {
     let download = Promise.withResolvers();
     const { context, element } = loadApp({ FileReader: FakeFileReader, fetch: () => download.promise });
-    const avatars = [];
-    context.AppState.geminiLiveApi.setCustomizedAvatar = (data, type) => avatars.push([data, type]);
     const dialogs = recordDialogs(context);
 
     // "Use the sample image", then a file picked while the sample downloads.
@@ -1325,7 +1321,7 @@ test("the last avatar choice wins over a slower earlier one, which shows no dial
     await context.handleAvatarFileInputChange({ target: { value: file.name, files: [file] } });
     download.resolve({ ok: true, blob: async () => ({ type: "image/png", size: 3, bytes: "png" }) });
     await sample;
-    assert.deepEqual(plainJson(avatars), [["YWJj", "image/jpeg"]]);
+    assert.deepEqual(plainJson(context.AppState.customAvatar), { image: "YWJj", mimeType: "image/jpeg" });
     assert.equal(element("avatarName").textContent, "Avatar: face.jpg");
 
     // A sample that fails after "Use the stock avatar" says nothing.
@@ -1334,9 +1330,45 @@ test("the last avatar choice wins over a slower earlier one, which shows no dial
     context.useStockAvatar();
     download.resolve({ ok: false, status: 500 });
     await failing;
-    assert.deepEqual(plainJson(avatars.slice(1)), [["", "image/png"]]);
+    assert.deepEqual(plainJson(context.AppState.customAvatar), { image: "", mimeType: "image/png" });
     assert.equal(element("avatarName").textContent, "Avatar: Piper (stock)");
     assert.deepEqual(dialogs, []);
+});
+
+test("an avatar chosen while connected applies from the next Connect, not the current session's resumes", async () => {
+    const avatars = [];
+    const { context, element } = loadApp({
+        FileReader: FakeFileReader,
+        getAvatarVideoElement: () => null, // From live-media-manager.js.
+        // connectBtnClick configures the session through many setters.
+        GeminiLiveAPI: class extends FakeGeminiLiveAPI {
+            constructor(...args) {
+                super(...args);
+                return new Proxy(this, { get: (target, name) => (name in target ? target[name] : () => {}) });
+            }
+            setCustomizedAvatar(image, mimeType) {
+                avatars.push([image, mimeType]);
+            }
+        },
+    });
+    context.AppState.liveAudioOutputManager.resume = () => {};
+    element("location").value = "us-central1";
+
+    context.connectBtnClick();
+    assert.deepEqual(plainJson(avatars), [["", "image/png"]]);
+    // resume() rebuilds the setup from the API object, so a choice made now
+    // must not reach it until the user connects again.
+    const file = { name: "face.jpg", type: "image/jpeg", size: 3, bytes: "abc" };
+    await context.handleAvatarFileInputChange({ target: { value: file.name, files: [file] } });
+    assert.equal(element("avatarName").textContent, "Avatar: face.jpg");
+    assert.equal(avatars.length, 1);
+
+    context.connectBtnClick();
+    assert.deepEqual(plainJson(avatars.slice(1)), [["YWJj", "image/jpeg"]]);
+    context.useStockAvatar();
+    assert.equal(avatars.length, 2);
+    context.connectBtnClick();
+    assert.deepEqual(plainJson(avatars.slice(2)), [["", "image/png"]]);
 });
 
 test("a voice file superseded by another file or a dropdown choice while it is read is dropped", async () => {

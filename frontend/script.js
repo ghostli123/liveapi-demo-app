@@ -119,6 +119,10 @@ const AppState = {
     liveVideoManager: new LiveVideoManager(AppUI.getElement("video"), AppUI.getElement("canvas")),
     liveScreenManager: new LiveScreenManager(AppUI.getElement("video"), AppUI.getElement("canvas")),
     customVoiceBase64: "",
+    // The avatar for the next Connect; an empty image means the stock avatar.
+    // Applied in connectBtnClick, so a choice made while connected doesn't
+    // reach the current session's resumes.
+    customAvatar: { image: "", mimeType: "image/png" },
     /** @type {object[] | null} */
     functionCallDefinition: null,
     /** @type {MediaRecorder | null} */
@@ -708,7 +712,7 @@ async function setAvatarImage(blob, name, attempt) {
     }
     const base64 = await blobToBase64(blob);
     if (attempt !== AppState.avatarAttempt) return;
-    AppState.geminiLiveApi.setCustomizedAvatar(base64, blob.type);
+    AppState.customAvatar = { image: base64, mimeType: blob.type };
     AppUI.setText("avatarName", `Avatar: ${name}`);
     AppUI.setHidden("avatarStockLink", false);
 }
@@ -740,7 +744,7 @@ async function useSampleAvatar() {
 
 function useStockAvatar() {
     AppState.avatarAttempt++;
-    AppState.geminiLiveApi.setCustomizedAvatar("", "image/png");
+    AppState.customAvatar = { image: "", mimeType: "image/png" };
     AppUI.setText("avatarName", "Avatar: Piper (stock)");
     AppUI.setHidden("avatarStockLink", true);
 }
@@ -1804,6 +1808,7 @@ function connectBtnClick() {
         AppUI.getValue("endSensitivity")
     );
     AppState.geminiLiveApi.setCustomVoice(AppState.customVoiceBase64);
+    AppState.geminiLiveApi.setCustomizedAvatar(AppState.customAvatar.image, AppState.customAvatar.mimeType);
     AppState.geminiLiveApi.setFunctionCall(AppState.functionCallDefinition);
     AppState.geminiLiveApi.toolBehavior = AppUI.getValue("toolBehavior", "BLOCKING");
     AppState.geminiLiveApi.setProactiveVideo(AppUI.getChecked("proactiveVideo"));
