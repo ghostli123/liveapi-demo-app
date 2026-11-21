@@ -19,6 +19,13 @@ class PCMProcessor extends AudioWorkletProcessor {
                 this.offset = 0;
                 return;
             }
+            // Anything else would throw in process() on every render
+            // quantum, or never be shifted off the queue, so playback
+            // would stop for good.
+            if (!(e.data instanceof Float32Array) || e.data.length === 0) {
+                console.warn("pcm-processor: ignoring a message that isn't Float32 PCM:", e.data);
+                return;
+            }
             this.queue.push(e.data);
         };
     }

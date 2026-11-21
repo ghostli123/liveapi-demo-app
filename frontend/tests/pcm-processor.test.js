@@ -4,6 +4,9 @@ const { loadScript } = require("./load-script");
 
 let registered = null;
 loadScript("pcm-processor.js", [], {
+    // The processor checks `instanceof Float32Array`; use this realm's
+    // class so the arrays the tests post pass it, as cloned ones do.
+    Float32Array,
     AudioWorkletProcessor: class {
         constructor() {
             this.port = {};
@@ -38,4 +41,17 @@ test("clear drops audio that hasn't played", () => {
     assert.deepEqual(render(processor), [0, 0, 0, 0]);
     processor.port.onmessage({ data: new Float32Array([7]) });
     assert.deepEqual(render(processor), [7, 0, 0, 0]);
+});
+
+test("ignores messages that aren't non-empty Float32Arrays", () => {
+    const processor = new registered.cls();
+    processor.port.onmessage({ data: new Float32Array([1, 2]) });
+    for (const data of [{ length: 3 }, "noise", null, undefined, 42, new Int16Array([5, 6]), new Float32Array(0)]) {
+        processor.port.onmessage({ data });
+    }
+    processor.port.onmessage({ data: new Float32Array([3, 4, 5]) });
+    // Neither wedged (silence forever) nor threw: the PCM around them plays.
+    assert.deepEqual(render(processor), [1, 2, 3, 4]);
+    assert.deepEqual(render(processor), [5, 0, 0, 0]);
+    assert.equal(processor.queue.length, 0);
 });

@@ -29,6 +29,13 @@ declare function registerProcessor(
     processorCtor: new (options?: unknown) => AudioWorkletProcessor,
 ): void;
 
+// The Console namespace is exposed in every global scope, worklets included.
+declare const console: {
+    log(...data: unknown[]): void;
+    warn(...data: unknown[]): void;
+    error(...data: unknown[]): void;
+};
+
 declare const currentFrame: number;
 declare const currentTime: number;
 declare const sampleRate: number;
