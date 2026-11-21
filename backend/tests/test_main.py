@@ -237,12 +237,12 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                     await ws.send_str("close-please")
                     await asyncio.wait_for(ws.receive(), 5)
                     await ws.close()
-                    await asyncio.sleep(0.1)
+                    await self.wait_for_session_end("s15")
         summary = [line for line in logs.output if "Session s15 ended after" in line]
         self.assertEqual(len(summary), 1, logs.output)
         self.assertIn("upstream close 1008 Quota exceeded", summary[0])
         self.assertIn("1 messages / 0.0 MB to the browser, 2 messages", summary[0])
-        self.assertIsNone(await main.SESSION_MANAGER.search_item("s1"))
+        self.assertIsNone(await main.SESSION_MANAGER.search_item("s15"))
 
     async def test_upstream_unreachable_closes_with_reason(self):
         async with FakeUpstream() as upstream:
