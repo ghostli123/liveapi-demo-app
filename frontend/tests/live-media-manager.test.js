@@ -563,6 +563,39 @@ test("an unsupported codec is reported once and chunks aren't queued", () => {
     assert.equal(manager.recordedChunks.length, 100);
 });
 
+test("an unsupported codec isn't reported for streams without MP4 chunks", () => {
+    const { manager, video, errors } = videoOutputWithFakeMediaSource({ codecSupported: false });
+    manager.initMediaSource(); // Every WebSocket session, avatar or not.
+    assert.deepEqual(errors, []);
+    // JPEG frames are drawn in an <img>, without MSE.
+    for (const mimeType of ["image/jpeg", "video/jpeg"]) manager.playVideoChunk(VIDEO_CHUNK, mimeType);
+    assert.deepEqual(errors, []);
+    assert.equal(video.style.display, "none");
+    assert.equal(manager.chunkQueue.length, 0);
+
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /can't play the avatar video/);
+});
+
+test("a failed addSourceBuffer() is reported at the first MP4 chunk, not at sourceopen", () => {
+    const error = Object.assign(new Error("unsupported"), { name: "NotSupportedError" });
+    const { manager, fake, errors } = videoOutputWithFakeMediaSource({ addSourceBufferError: error });
+    manager.initMediaSource();
+    fake.mediaSources[0].open();
+    manager.playVideoChunk(VIDEO_CHUNK, "image/jpeg");
+    assert.deepEqual(errors, []);
+    for (let i = 0; i < 100; i++) manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(manager.chunkQueue.length, 0);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /can't play the avatar video/);
+
+    manager.resetPlayer(); // Disconnect; the next stream starts unreported.
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(manager.chunkQueue.length, 1);
+    assert.equal(errors.length, 1);
+});
+
 test("a failed addSourceBuffer() is reported once and chunks aren't queued", () => {
     const error = Object.assign(new Error("unsupported"), { name: "NotSupportedError" });
     const { manager, fake, errors } = videoOutputWithFakeMediaSource({ addSourceBufferError: error });

@@ -568,6 +568,10 @@ class LiveVideoOutputManager {
         // Set once the current stream can't be played; its chunks are then
         // dropped instead of queued (they arrive at about 1 MB per second).
         this.playbackFailed = false;
+        // Why MSE can't play this stream, when it can't. The user is told at the
+        // first MP4 chunk: audio-only and JPEG-frame streams never need MSE.
+        /** @type {?string} */
+        this.unplayableDetail = null;
         // Called once per stream with a message for the user when it can't be
         // played. Audio and transcripts keep working.
         /** @type {(message: string) => void} */
@@ -584,6 +588,7 @@ class LiveVideoOutputManager {
         this.sourceBuffer = null;
         this.initialized = false;
         this.playbackFailed = false;
+        this.unplayableDetail = null;
 
         const video = getAvatarVideoElement();
         if (!video) {
@@ -593,7 +598,7 @@ class LiveVideoOutputManager {
 
         const MediaSourceClass = window.ManagedMediaSource || window.MediaSource;
         if (!MediaSourceClass || !MediaSourceClass.isTypeSupported(this.codec)) {
-            this.failPlayback(`Media Source Extensions can't play ${this.codec}`, VIDEO_UNSUPPORTED_MESSAGE);
+            this.markUnplayable(`Media Source Extensions can't play ${this.codec}`);
             return;
         }
 
@@ -611,7 +616,7 @@ class LiveVideoOutputManager {
                 this.initialized = true;
                 this.processQueue();
             } catch (e) {
-                this.failPlayback(`Error adding source buffer: ${e}`, VIDEO_UNSUPPORTED_MESSAGE);
+                this.markUnplayable(`Error adding source buffer: ${e}`);
             }
         });
         mediaSource.addEventListener('error', e => console.error('MediaSource error', e));
@@ -690,8 +695,22 @@ class LiveVideoOutputManager {
             this.recordedChunks.push(arrayBuffer);
         }
         if (this.playbackFailed) return;
+        if (this.unplayableDetail) {
+            this.failPlayback(this.unplayableDetail, VIDEO_UNSUPPORTED_MESSAGE);
+            return;
+        }
         this.chunkQueue.push(arrayBuffer);
         this.processQueue();
+    }
+
+    /**
+     * Records that MSE can't play the current stream. Reported at once if MP4
+     * chunks are already waiting, else at the first one (see playVideoChunk).
+     * @param {string} detail - Logged to the console when reported.
+     */
+    markUnplayable(detail) {
+        this.unplayableDetail = detail;
+        if (this.chunkQueue.length > 0) this.failPlayback(detail, VIDEO_UNSUPPORTED_MESSAGE);
     }
 
     /**
@@ -852,6 +871,7 @@ class LiveVideoOutputManager {
         this.mediaSource = null;
         this.initialized = false;
         this.playbackFailed = false;
+        this.unplayableDetail = null;
     }
 
     static base64ToArrayBuffer(base64) {
