@@ -242,6 +242,8 @@ function saveSettings() {
         if (element) settings[id] = element.checked;
     }
     settings.responseModality = getSelectedResponseModality();
+    // Kept apart from transportMode, which a WebSocket-only environment overrides.
+    if (AppState.preferredTransport) settings.preferredTransport = AppState.preferredTransport;
     try {
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
     } catch (error) {
@@ -262,10 +264,11 @@ async function restoreSettings() {
         if (typeof saved[id] === "boolean") element.checked = saved[id];
         element.addEventListener("change", saveSettings);
     }
-    for (const radio of getResponseModalityRadios()) {
-        if (typeof saved.responseModality === "string") {
-            radio.checked = radio.value === saved.responseModality;
-        }
+    const radios = [...getResponseModalityRadios()];
+    // An unknown saved value would leave every radio unchecked.
+    const restoreModality = radios.some((radio) => radio.value === saved.responseModality);
+    for (const radio of radios) {
+        if (restoreModality) radio.checked = radio.value === saved.responseModality;
         radio.addEventListener("change", saveSettings);
     }
     toggleAvatarMode(); // Apply the restored avatar-mode layout.
@@ -275,15 +278,32 @@ async function restoreSettings() {
         await element.updateComplete;
         const value = saved[id];
         // Skip choices the page no longer offers, e.g. a retired model.
-        const offered =
-            !element.options || [...element.options].some((option) => option.value === value);
-        if (typeof value === "string" && offered) {
+        if (typeof value === "string" && offersValue(element, value)) {
             element.value = value;
         }
         element.addEventListener("input", saveSettings);
         element.addEventListener("change", saveSettings);
     }
+    // The default or restored transport counts as the user's choice, so leaving
+    // a WebSocket-only environment returns to it without a change event.
+    const transportSelect = AppUI.getControl("transportMode");
+    if (transportSelect) {
+        const preferred = saved.preferredTransport;
+        AppState.preferredTransport =
+            typeof preferred === "string" && offersValue(transportSelect, preferred)
+                ? preferred
+                : transportSelect.value;
+    }
     saveSettings();
+}
+
+/**
+ * True if `element` accepts `value`: any value for a text field, a listed one for a select.
+ * @param {FormControl} element
+ * @param {string} value
+ */
+function offersValue(element, value) {
+    return !element.options || [...element.options].some((option) => option.value === value);
 }
 
 // --- Page Load Event Initialization ---
@@ -462,6 +482,7 @@ function handleEnvironmentChange() {
     const transportSelect = AppUI.getControl("transportMode");
     if (transportSelect) {
         if (isWebSocketOnlyEnvironment(envVal)) {
+            if (!AppState.preferredTransport) AppState.preferredTransport = transportSelect.value;
             if (transportSelect.value === "webrtc") transportSelect.value = "websocket";
         } else if (AppState.preferredTransport) {
             // Back from a WebSocket-only environment: restore the user's choice.

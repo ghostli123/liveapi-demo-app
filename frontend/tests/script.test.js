@@ -36,6 +36,18 @@ function fakeElement(id) {
         id,
         hidden: false,
         style: {},
+        classList: {
+            names: new Set(),
+            add(name) {
+                this.names.add(name);
+            },
+            remove(name) {
+                this.names.delete(name);
+            },
+            contains(name) {
+                return this.names.has(name);
+            },
+        },
         listeners: {},
         addEventListener(type, listener) {
             (this.listeners[type] ||= []).push(listener);
@@ -46,22 +58,44 @@ function fakeElement(id) {
     };
 }
 
-function loadApp(globals = {}) {
+/** A localStorage stand-in; `items` survives a reload of the app. */
+function fakeStorage(items = new Map()) {
+    return {
+        items,
+        getItem: (key) => items.get(key) ?? null,
+        setItem: (key, value) => items.set(key, String(value)),
+    };
+}
+
+/** `radios` are what the page's responseModality radio query returns. */
+function loadApp(globals = {}, { radios = [] } = {}) {
     const elements = new Map();
     const getElementById = (id) => {
         if (!elements.has(id)) elements.set(id, fakeElement(id));
         return elements.get(id);
     };
-    const exportNames = ["AppState", "handleReceiveResponse", "bufferToWave", "handleRecordClick", "openModal", "closeModal"];
+    const exportNames = [
+        "AppState",
+        "handleReceiveResponse",
+        "bufferToWave",
+        "handleRecordClick",
+        "openModal",
+        "closeModal",
+        "restoreSettings",
+        "handleEnvironmentChange",
+    ];
     const context = loadScript("script.js", exportNames, {
         window: { location: { protocol: "http:", host: "localhost:1234" }, addEventListener() {} },
         document: {
             getElementById,
             addEventListener() {},
-            querySelectorAll: () => [],
+            querySelectorAll: () => radios,
             createElement: () => fakeElement(""),
             createTextNode: () => ({}),
+            cookie: "",
         },
+        localStorage: fakeStorage(),
+        customElements: { whenDefined: () => Promise.resolve() },
         GeminiLiveAPI: FakeGeminiLiveAPI,
         LiveAudioOutputManager: FakeManager,
         LiveVideoOutputManager: FakeManager,
@@ -201,4 +235,67 @@ test("a mic granted after the recording dialog closed is released, not recorded"
     assert.equal(devices.prompts[0].track.stopped, true);
     assert.equal(devices.recorders.length, 0);
     assert.equal(context.AppState.isRecording, false);
+});
+
+const SETTINGS_KEY = "liveapi-demo-settings";
+
+/** Loads the app with the page's transport and environment selects and restores `storage`. */
+async function loadWithSettings(storage) {
+    const app = loadApp({ localStorage: storage });
+    const select = (id, value, values) =>
+        Object.assign(app.element(id), { value, options: values.map((v) => ({ value: v })) });
+    select("transportMode", "webrtc", ["webrtc", "websocket"]);
+    select("envApiHost", "autopush", ["autopush", "prod", "prod-us-rep"]);
+    app.element("liveApiModel").value = "gemini-3.1-flash-live-preview-04-2026";
+    await app.context.restoreSettings();
+    return app;
+}
+
+test("leaving a WebSocket-only environment returns to the default or restored transport", async () => {
+    const storage = fakeStorage();
+    const { context, element } = await loadWithSettings(storage);
+    const switchTo = (env) => {
+        element("envApiHost").value = env;
+        context.handleEnvironmentChange();
+        return element("transportMode").value;
+    };
+    // WebRTC is the default; the user never picked it, so no change event fired.
+    assert.equal(switchTo("prod"), "websocket");
+    assert.equal(switchTo("autopush"), "webrtc");
+
+    // The choice also survives a reload while a WebSocket-only environment is selected.
+    switchTo("prod");
+    const saved = JSON.parse(storage.getItem(SETTINGS_KEY));
+    assert.equal(saved.transportMode, "websocket");
+    assert.equal(saved.preferredTransport, "webrtc");
+    const reloaded = await loadWithSettings(fakeStorage(storage.items));
+    assert.equal(reloaded.element("envApiHost").value, "prod");
+    assert.equal(reloaded.element("transportMode").value, "websocket");
+    reloaded.element("envApiHost").value = "prod-us-rep";
+    reloaded.context.handleEnvironmentChange();
+    assert.equal(reloaded.element("transportMode").value, "webrtc");
+});
+
+test("an unknown saved response type keeps the page's default selected", async () => {
+    const radios = ["VIDEO", "AUDIO", "TEXT"].map((value) => ({
+        ...fakeElement(`${value}-radio`),
+        value,
+        checked: value === "VIDEO",
+    }));
+    const storage = fakeStorage(new Map([[SETTINGS_KEY, JSON.stringify({ responseModality: "IMAGE" })]]));
+    const { context } = loadApp({ localStorage: storage }, { radios });
+    await context.restoreSettings();
+    assert.deepEqual(
+        radios.map((radio) => radio.checked),
+        [true, false, false]
+    );
+    assert.equal(JSON.parse(storage.getItem(SETTINGS_KEY)).responseModality, "VIDEO");
+
+    // A response type the page offers is still restored.
+    storage.setItem(SETTINGS_KEY, JSON.stringify({ responseModality: "TEXT" }));
+    await loadApp({ localStorage: storage }, { radios }).context.restoreSettings();
+    assert.deepEqual(
+        radios.map((radio) => radio.checked),
+        [false, false, true]
+    );
 });
