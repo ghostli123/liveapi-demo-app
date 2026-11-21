@@ -324,7 +324,10 @@ function loadSession() {
             updateAudioInterval() {
                 return new Promise((resolve) => mic.starts.push(resolve));
             }
-            disconnectMicrophone() {}
+            disconnectMicrophone() {
+                mic.stops = (mic.stops || 0) + 1;
+            }
+            recordChunk() {}
         },
         MicLevelMeter: class {
             start() {}
@@ -394,4 +397,92 @@ test("a resume during the microphone prompt doesn't start a turn", async () => {
     assert.equal(context.AppState.userTurnActive, false);
     assert.equal(context.AppState.turnStarting, false);
     assert.equal(dialogText(), "The session is still connecting. Try speaking again once it's connected.");
+});
+
+test("a microphone that stops on its own ends the turn, turns the mic off and says why", async () => {
+    const { context, element, api, mic, dialogText } = loadSession();
+    api.isSetupComplete = true;
+    element("micBtn").hidden = false;
+    element("micOffBtn").hidden = true;
+    await context.turnBtnClick();
+    assert.deepEqual(api.sent, [["activity", true]]);
+    mic.stops = 0;
+
+    context.AppState.liveAudioInputManager.onMicrophoneEnded(); // Unplugged.
+    assert.deepEqual(api.sent, [["activity", true], ["activity", false]]);
+    assert.equal(context.AppState.userTurnActive, false);
+    assert.equal(element("micBtn").hidden, true);
+    assert.equal(element("micOffBtn").hidden, false);
+    assert.equal(mic.stops, 1);
+    assert.match(dialogText(), /^The microphone stopped: it was unplugged/);
+});
+
+/** loadApp with a WebRTC manager stand-in that records what it was told. */
+function loadWithWebRtcManager() {
+    const webRtc = {
+        videoTrack: null,
+        detached: [],
+        micStops: 0,
+        detachVideoStream() {
+            this.detached.push(this.videoTrack);
+            this.videoTrack = null;
+        },
+        stopMicrophone() {
+            this.micStops++;
+        },
+    };
+    const app = loadApp({
+        GeminiLiveAPI: class extends FakeGeminiLiveAPI {
+            constructor(...args) {
+                super(...args);
+                this.webRtcManager = webRtc;
+            }
+        },
+        MicLevelMeter: class {
+            start() {}
+            stop() {}
+        },
+        LiveAudioInputManager: class {
+            disconnectMicrophone() {}
+        },
+    });
+    return { ...app, webRtc, dialogText: () => app.element("dialogMessage").textContent };
+}
+
+test("a WebRTC microphone that stops on its own is turned off; a mic already off is left alone", () => {
+    const { element, webRtc, dialogText } = loadWithWebRtcManager();
+    element("micBtn").hidden = true; // Off: a late "ended" changes nothing.
+    webRtc.onMicrophoneEnded();
+    assert.equal(webRtc.micStops, 0);
+    assert.equal(dialogText(), undefined);
+
+    element("micBtn").hidden = false;
+    element("micOffBtn").hidden = true;
+    webRtc.onMicrophoneEnded();
+    assert.equal(webRtc.micStops, 1);
+    assert.equal(element("micBtn").hidden, true);
+    assert.equal(element("micOffBtn").hidden, false);
+    assert.match(dialogText(), /^The microphone stopped/);
+});
+
+test("a camera that stops on its own stops the WebRTC video and says why; Stop sharing doesn't ask", () => {
+    const { context, element, webRtc, dialogText } = loadWithWebRtcManager();
+    const camera = { kind: "video" };
+    webRtc.videoTrack = camera;
+    element("cameraBtn").hidden = false;
+    element("cameraOffBtn").hidden = true;
+    context.AppState.liveVideoManager.onEnded(camera);
+    assert.deepEqual(webRtc.detached, [camera]);
+    assert.equal(element("cameraBtn").hidden, true);
+    assert.equal(element("cameraOffBtn").hidden, false);
+    assert.match(dialogText(), /^The camera stopped/);
+
+    element("dialogMessage").textContent = undefined;
+    const screen = { kind: "video" };
+    webRtc.videoTrack = screen;
+    context.AppState.liveScreenManager.onEnded({ kind: "video" }); // Not the one being sent.
+    assert.deepEqual(webRtc.detached, [camera]);
+    context.AppState.liveScreenManager.onEnded(screen);
+    assert.deepEqual(webRtc.detached, [camera, screen]);
+    assert.equal(dialogText(), undefined); // The user ended the share themselves.
 });
