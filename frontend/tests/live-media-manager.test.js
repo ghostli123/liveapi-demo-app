@@ -103,6 +103,38 @@ test("only the newest of two overlapping startMicrophone() calls keeps its strea
     assert.equal(sent.at(-1), requests[1].track);
 });
 
+test("completeSession after close() starts no stats polling or connect timer", async () => {
+    let finishSetRemote;
+    const timers = new Set();
+    const context = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
+        document: { getElementById: () => null },
+        setInterval: () => {
+            const id = {};
+            timers.add(id);
+            return id;
+        },
+        clearInterval: (id) => timers.delete(id),
+        setTimeout: () => {
+            const id = {};
+            timers.add(id);
+            return id;
+        },
+        clearTimeout: (id) => timers.delete(id),
+        performance: { now: () => 0 },
+    });
+    const manager = new context.G3RtcWebRtcManager(null);
+    manager.pc = {
+        connectionState: "new",
+        setRemoteDescription: () => new Promise((resolve) => (finishSetRemote = resolve)),
+        close() {},
+    };
+    const completing = manager.completeSession("v=0\r\n");
+    manager.close(); // Disconnect while the answer is being applied.
+    finishSetRemote();
+    await completing;
+    assert.equal(timers.size, 0);
+});
+
 // A LiveScreenManager whose getDisplayMedia() calls stay pending until the
 // test resolves them, like a screen picker the user hasn't answered yet.
 function screenManagerWithPendingPicker() {
@@ -329,4 +361,87 @@ test("a full buffer while playing trims behind the playhead and leaves it alone"
     assert.deepEqual(sourceBuffer.removed, [[0, 11]]);
     assert.equal(video.currentTime, 12);
     assert.equal(manager.chunkQueue.length, 1);
+});
+
+// A LiveAudioOutputManager on fake AudioContexts. `fake.failNextLoad` makes the
+// next addModule() reject; like Chrome and Firefox, a context whose load
+// failed keeps rejecting.
+function audioOutputWithFakeContexts() {
+    const fake = { contexts: [], failNextLoad: false };
+    class FakeAudioContext {
+        constructor() {
+            this.state = "suspended";
+            this.destination = {};
+            let failed = false;
+            this.audioWorklet = {
+                addModule: async () => {
+                    if (fake.failNextLoad) {
+                        fake.failNextLoad = false;
+                        failed = true;
+                    }
+                    if (failed) throw new Error("503");
+                },
+            };
+            fake.contexts.push(this);
+        }
+        resume() {
+            this.state = "running";
+            return Promise.resolve();
+        }
+        close() {
+            this.state = "closed";
+            return Promise.resolve();
+        }
+    }
+    class FakeWorkletNode {
+        constructor(context) {
+            this.context = context;
+            this.posted = [];
+            this.port = { postMessage: (message) => this.posted.push(message) };
+        }
+        connect() {}
+    }
+    const context = loadScript("live-media-manager.js", ["LiveAudioOutputManager"], {
+        window: { AudioContext: FakeAudioContext, atob },
+        AudioWorkletNode: FakeWorkletNode,
+    });
+    return { manager: new context.LiveAudioOutputManager(), fake };
+}
+
+const AUDIO_CHUNK = Buffer.alloc(8).toString("base64");
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+test("a failed audio worklet load is retried on a new context", async () => {
+    const { manager, fake } = audioOutputWithFakeContexts();
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+        fake.failNextLoad = true;
+        manager.resume(); // The Connect click.
+        await settle();
+        assert.equal(fake.contexts[0].state, "closed");
+
+        manager.playAudioChunk(AUDIO_CHUNK);
+        await settle();
+        assert.equal(fake.contexts.length, 2);
+        assert.equal(manager.workletNode.context, fake.contexts[1]);
+        assert.equal(manager.workletNode.posted.length, 1);
+        assert.equal(fake.contexts[1].state, "running");
+        assert.deepEqual(unhandled, []);
+    } finally {
+        process.off("unhandledRejection", onUnhandled);
+    }
+});
+
+test("audio chunks share one context and worklet", async () => {
+    const { manager, fake } = audioOutputWithFakeContexts();
+    manager.playAudioChunk(AUDIO_CHUNK);
+    manager.playAudioChunk(AUDIO_CHUNK);
+    await settle();
+    manager.clear();
+    await settle();
+    assert.equal(fake.contexts.length, 1);
+    assert.equal(manager.workletNode.posted.length, 3);
+    assert.equal(manager.workletNode.posted[2], "clear");
 });
