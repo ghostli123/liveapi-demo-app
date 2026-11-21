@@ -40,18 +40,28 @@ function fakeElement(id) {
         addEventListener(type, listener) {
             (this.listeners[type] ||= []).push(listener);
         },
+        replaceChildren() {},
+        appendChild() {},
+        focus() {},
     };
 }
 
-function loadApp() {
+function loadApp(globals = {}) {
     const elements = new Map();
     const getElementById = (id) => {
         if (!elements.has(id)) elements.set(id, fakeElement(id));
         return elements.get(id);
     };
-    const context = loadScript("script.js", ["AppState", "handleReceiveResponse", "bufferToWave"], {
+    const exportNames = ["AppState", "handleReceiveResponse", "bufferToWave", "handleRecordClick", "openModal", "closeModal"];
+    const context = loadScript("script.js", exportNames, {
         window: { location: { protocol: "http:", host: "localhost:1234" }, addEventListener() {} },
-        document: { getElementById, addEventListener() {}, querySelectorAll: () => [] },
+        document: {
+            getElementById,
+            addEventListener() {},
+            querySelectorAll: () => [],
+            createElement: () => fakeElement(""),
+            createTextNode: () => ({}),
+        },
         GeminiLiveAPI: FakeGeminiLiveAPI,
         LiveAudioOutputManager: FakeManager,
         LiveVideoOutputManager: FakeManager,
@@ -59,6 +69,7 @@ function loadApp() {
         MicLevelMeter: FakeMicLevelMeter,
         LiveVideoManager: class extends FakeFrameSource {},
         LiveScreenManager: class extends FakeFrameSource {},
+        ...globals,
     });
     return { context, element: getElementById };
 }
@@ -119,4 +130,75 @@ test("bufferToWave writes a 16-bit PCM WAV, clamping samples", async () => {
     assert.equal(view.getUint32(40, true), 2 * samples.length);
     const pcm = [0, 1, 2, 3].map((i) => view.getInt16(44 + 2 * i, true));
     assert.deepEqual(pcm, [0, 32767, -32768, 32767]);
+});
+
+/**
+ * A getUserMedia that answers when the test says, and a MediaRecorder that
+ * records what happens to it; for the branded-voice recording dialog.
+ */
+function fakeRecordingDevices() {
+    const prompts = [];
+    const recorders = [];
+    const getUserMedia = () =>
+        new Promise((resolve) => {
+            const track = { stopped: false, stop() { this.stopped = true; } };
+            const stream = { track, getTracks: () => [track] };
+            prompts.push({ track, grant: () => resolve(stream) });
+        });
+    class FakeMediaRecorder {
+        constructor(stream) {
+            this.stream = stream;
+            this.state = "inactive";
+            recorders.push(this);
+        }
+        start() {
+            this.state = "recording";
+        }
+        stop() {
+            this.state = "inactive";
+            queueMicrotask(() => this.onstop());
+        }
+    }
+    return {
+        prompts,
+        recorders,
+        globals: { navigator: { mediaDevices: { getUserMedia } }, MediaRecorder: FakeMediaRecorder },
+    };
+}
+
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+test("a double-click on Record leaves one recording, and closing the dialog frees the mic", async () => {
+    const devices = fakeRecordingDevices();
+    const { context, element } = loadApp(devices.globals);
+    context.openModal();
+    element("newVoiceName").value = "Kai";
+
+    const clicks = [context.handleRecordClick(), context.handleRecordClick()];
+    for (const prompt of devices.prompts) prompt.grant();
+    await Promise.all(clicks);
+    const recording = devices.recorders.filter((r) => r.state === "recording");
+    assert.equal(recording.length, 1);
+    assert.equal(context.AppState.mediaRecorder, recording[0]);
+
+    context.closeModal();
+    await flush();
+    assert.ok(devices.prompts.length > 0);
+    for (const prompt of devices.prompts) assert.equal(prompt.track.stopped, true);
+    assert.equal(context.AppState.isRecording, false);
+});
+
+test("a mic granted after the recording dialog closed is released, not recorded", async () => {
+    const devices = fakeRecordingDevices();
+    const { context, element } = loadApp(devices.globals);
+    context.openModal();
+    element("newVoiceName").value = "Kai";
+
+    const click = context.handleRecordClick();
+    context.closeModal(); // While the permission prompt is open.
+    devices.prompts[0].grant();
+    await click;
+    assert.equal(devices.prompts[0].track.stopped, true);
+    assert.equal(devices.recorders.length, 0);
+    assert.equal(context.AppState.isRecording, false);
 });
