@@ -648,7 +648,7 @@ class GeminiLiveAPI {
             location: this.location,
         };
         try {
-            return (await this.postWithRetry(this.controlUrl, postRequestBody)) || {};
+            return await this.postWithRetry(this.controlUrl, postRequestBody);
         } catch (error) {
             console.error("Error in initBackendService:", error);
             throw new Error(`Could not start the session: ${error.message}`);
@@ -1323,7 +1323,8 @@ class GeminiLiveAPI {
      * @param {string} url - Target HTTP URL.
      * @param {Object} data - JSON payload to post.
      * @param {{signal?: AbortSignal}} [options] - `signal` aborts the request.
-     * @returns {Promise<Object>} Parsed JSON response.
+     * @returns {Promise<Object>} Parsed JSON response; rejects on an HTTP error
+     *     or a reply that isn't a JSON object.
      */
     async sendPostRequest(url, data, { signal } = {}) {
         const response = await fetch(url, {
@@ -1347,6 +1348,16 @@ class GeminiLiveAPI {
             throw Object.assign(
                 new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`),
                 { status: response.status }
+            );
+        }
+        // The backend answers every POST with a JSON object. Anything else
+        // (e.g. a captive portal's HTML page) means the request never reached
+        // it, so a "connect" must not be taken as a session the server created.
+        if (typeof receivedData !== "object" || receivedData === null || Array.isArray(receivedData)) {
+            const type = response.headers.get("Content-Type") || "no content type";
+            throw new Error(
+                `the server's reply wasn't JSON (HTTP ${response.status}, ${type}); ` +
+                    "a proxy or captive portal may be in the way"
             );
         }
         console.log("Received data:", receivedData);

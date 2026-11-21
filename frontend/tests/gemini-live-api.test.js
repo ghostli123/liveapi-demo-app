@@ -397,6 +397,76 @@ test("a control request that fails releases nothing", async () => {
     assert.deepEqual(commands, ["connect"]);
 });
 
+// GeminiLiveAPI whose fetch() answers every POST with `reply(body)`:
+// {status, type, text}. `posts` records the parsed request bodies.
+function apiWithFetch(reply) {
+    const posts = [];
+    const fetch = async (url, init) => {
+        const body = JSON.parse(init.body);
+        posts.push(body);
+        const { status = 200, type = null, text = "" } = reply(body);
+        return {
+            ok: status >= 200 && status < 300,
+            status,
+            statusText: "",
+            headers: { get: (name) => (name.toLowerCase() === "content-type" ? type : null) },
+            json: async () => JSON.parse(text),
+        };
+    };
+    const context = loadScript("gemini-live-api.js", ["GeminiLiveAPI"], {
+        WebSocket: FakeWebSocket,
+        fetch,
+        setInterval: () => 1,
+        clearInterval: () => {},
+        setTimeout: () => 1,
+        clearTimeout: () => {},
+    });
+    const api = new context.GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    return { api, posts };
+}
+
+test("a 200 control reply that isn't JSON fails the connect instead of opening a WebSocket", async () => {
+    // E.g. a captive portal or a misconfigured proxy answering for the server.
+    const { api, posts } = apiWithFetch(() => ({ type: "text/html", text: "<html>Sign in</html>" }));
+    const errors = [];
+    api.onErrorMessage = (message) => errors.push(message);
+    let opened = 0;
+    api.setupWebSocketToService = () => opened++;
+    await api.connect();
+    assert.equal(opened, 0);
+    assert.deepEqual(errors, [
+        "Could not start the session: the server's reply wasn't JSON (HTTP 200, text/html); " +
+            "a proxy or captive portal may be in the way",
+    ]);
+    // Not retried: the same page would come back.
+    assert.deepEqual(plain(posts.map((b) => b.command)), ["connect"]);
+});
+
+test("sendPostRequest() returns a JSON object and rejects any other 2xx reply", async () => {
+    const replies = {
+        object: { type: "application/json", text: '{"removed": true}' },
+        string: { type: "application/json", text: '"ok"' },
+        null: { type: "application/json", text: "null" },
+        array: { type: "application/json", text: "[]" },
+        empty: { status: 204 },
+    };
+    const { api } = apiWithFetch((body) => replies[body.reply]);
+    assert.deepEqual(plain(await api.sendPostRequest("/api/control", { reply: "object" })), { removed: true });
+    for (const reply of ["string", "null", "array"]) {
+        await assert.rejects(api.sendPostRequest("/api/control", { reply }), {
+            message: /^the server's reply wasn't JSON \(HTTP 200, application\/json\)/,
+        });
+    }
+    await assert.rejects(api.sendPostRequest("/api/control", { reply: "empty" }), {
+        message: /^the server's reply wasn't JSON \(HTTP 204, no content type\)/,
+    });
+});
+
+test("an HTTP error still reports the server's error text", async () => {
+    const { api } = apiWithFetch(() => ({ status: 503, type: "application/json", text: '{"error": "Too many sessions"}' }));
+    await assert.rejects(api.sendPostRequest("/api/control", {}), { message: "HTTP 503: Too many sessions", status: 503 });
+});
+
 test("disconnect() while a resume waits for the old WebSocket releases the new session", async () => {
     const api = connectedApi();
     const oldWebSocket = api.webSocket;
