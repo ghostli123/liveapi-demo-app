@@ -229,6 +229,68 @@ test("a WebSocket microphone that ends while the worklet loads is reported", asy
     assert.equal(intervals.size, 0);
 });
 
+test("a WebSocket microphone turned off while the worklet loads is released at once", async () => {
+    const loads = [];
+    const { manager, requests, intervals } = audioInputWithPendingMic({
+        addModule: () => new Promise((resolve, reject) => loads.push({ resolve, reject })),
+    });
+    const connecting = manager.connectMicrophone();
+    requests[0].grant();
+    await new Promise((resolve) => setImmediate(resolve)); // Now inside addModule().
+    const context = manager.audioContext;
+    manager.disconnectMicrophone();
+    // The browser's mic indicator stayed on until the module load settled.
+    assert.equal(requests[0].track.readyState, "ended");
+    assert.equal(context.state, "closed");
+    loads[0].resolve();
+    await connecting;
+    assert.equal(manager.stream, null);
+    assert.equal(manager.processor, null);
+    assert.equal(intervals.size, 0);
+});
+
+test("a superseded worklet load that ends late doesn't touch the newer WebSocket microphone", async () => {
+    for (const outcome of ["resolve", "reject"]) {
+        const loads = [];
+        const { manager, requests, intervals } = audioInputWithPendingMic({
+            addModule: () => new Promise((resolve, reject) => loads.push({ resolve, reject })),
+        });
+        const first = manager.connectMicrophone();
+        requests[0].grant();
+        await new Promise((resolve) => setImmediate(resolve));
+        const second = manager.updateMicrophoneDevice("b"); // Disconnects, then connects.
+        assert.equal(requests[0].track.readyState, "ended");
+        requests[1].grant();
+        await new Promise((resolve) => setImmediate(resolve));
+        loads[1].resolve();
+        await second;
+        loads[0][outcome](new Error("load failed"));
+        await first; // Settles quietly either way.
+        assert.equal(manager.stream, requests[1].stream, outcome);
+        assert.equal(manager.audioContext.state, "running", outcome);
+        assert.equal(requests[1].track.readyState, "live", outcome);
+        assert.equal(intervals.size, 1, outcome);
+    }
+});
+
+test("a WebSocket microphone whose worklet fails to load is released and the error thrown", async () => {
+    const loads = [];
+    const { manager, requests, intervals } = audioInputWithPendingMic({
+        addModule: () => new Promise((resolve, reject) => loads.push({ resolve, reject })),
+    });
+    const connecting = manager.connectMicrophone();
+    requests[0].grant();
+    await new Promise((resolve) => setImmediate(resolve));
+    const context = manager.audioContext;
+    loads[0].reject(new Error("module fetch failed"));
+    await assert.rejects(connecting, /module fetch failed/);
+    assert.equal(requests[0].track.readyState, "ended");
+    assert.equal(context.state, "closed");
+    assert.equal(manager.stream, null);
+    assert.equal(manager.audioContext, null);
+    assert.equal(intervals.size, 0);
+});
+
 test("a WebSocket microphone refused after it was superseded doesn't throw or touch the newer one", async () => {
     const { manager, requests, intervals } = audioInputWithPendingMic();
     const first = manager.connectMicrophone();

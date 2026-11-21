@@ -235,9 +235,7 @@ class LiveAudioInputManager {
         let stream;
         try {
             stream = await navigator.mediaDevices.getUserMedia(constraints);
-            await audioContext.audioWorklet.addModule("/frontend/input-processor.js");
         } catch (error) {
-            if (stream) stream.getTracks().forEach((track) => track.stop());
             audioContext.close();
             // A refusal for a connect that was superseded while the prompt was
             // open isn't reported: the caller would turn off the newer mic.
@@ -249,8 +247,20 @@ class LiveAudioInputManager {
             audioContext.close();
             return;
         }
+        // Held before the worklet module loads, so a disconnectMicrophone()
+        // during the load releases the mic at once, not when the load ends.
         this.audioContext = audioContext;
         this.stream = stream;
+        try {
+            await audioContext.audioWorklet.addModule("/frontend/input-processor.js");
+        } catch (error) {
+            // Superseded: disconnectMicrophone() already released both, and
+            // the fields may hold a newer connect's stream.
+            if (generation !== this.generation) return;
+            this.disconnectMicrophone();
+            throw error;
+        }
+        if (generation !== this.generation) return;
         onTrackEnded(stream.getAudioTracks(), () => {
             if (this.stream === stream) this.onMicrophoneEnded();
         });
