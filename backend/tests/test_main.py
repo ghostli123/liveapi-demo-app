@@ -1096,7 +1096,7 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--allowed_hosts", result.stderr)
         self.assertIn("invalid entry '['", result.stderr)
-        self.assertNotIn("Serving on port", result.stderr)
+        self.assertNotIn("Serving on", result.stderr)
 
     def test_is_allowed_host(self):
         for host in ["localhost", "127.0.0.1", "::1", "10.1.2.3", "app.localhost"]:
@@ -1217,6 +1217,99 @@ class MainAsyncTest(unittest.IsolatedAsyncioTestCase):
             os.kill(os.getpid(), signal.SIGTERM)
             await asyncio.wait_for(server, timeout=10)
         self.gateway.terminate.assert_called_once()
+
+    async def _bound_addresses(self, k_service=None):
+        """Starts main_async, returns what it listens on, and stops it."""
+        runners = []
+
+        class RecordingRunner(web.AppRunner):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                runners.append(self)
+
+        with socket.socket() as probe:
+            probe.bind(("", 0))
+            port = probe.getsockname()[1]
+        env = {"PORT": str(port)}
+        if k_service:
+            env["K_SERVICE"] = k_service
+        with (
+            mock.patch.dict("os.environ", env),
+            mock.patch.object(main.web, "AppRunner", RecordingRunner),
+        ):
+            if not k_service:
+                os.environ.pop("K_SERVICE", None)
+            server = asyncio.create_task(main.main_async())
+            try:
+                for _ in range(100):
+                    if runners and runners[0].addresses:
+                        break
+                    self.assertFalse(server.done())
+                    await asyncio.sleep(0.05)
+                else:
+                    self.fail("server didn't start")
+                addresses = [address[:2] for address in runners[0].addresses]
+                reachable = await asyncio.to_thread(
+                    _accepts_connections, _non_loopback_ipv4(), port
+                )
+            finally:
+                os.kill(os.getpid(), signal.SIGTERM)
+                await asyncio.wait_for(server, timeout=10)
+        return addresses, port, reachable
+
+    async def test_binds_loopback_by_default(self):
+        # With no login on the server, another machine on the LAN that reached
+        # it could start sessions billed to the owner's project.
+        addresses, port, reachable = await self._bound_addresses()
+        self.assertEqual(addresses, [("127.0.0.1", port)])
+        self.assertIn(reachable, (False, None))
+
+    async def test_binds_every_interface_on_cloud_run(self):
+        addresses, _, reachable = await self._bound_addresses(k_service="demo")
+        self.assertIn("0.0.0.0", {host for host, _ in addresses})
+        self.assertIn(reachable, (True, None))
+
+    async def test_host_flag_sets_the_address(self):
+        with flagsaver.flagsaver(host="0.0.0.0"):
+            addresses, port, reachable = await self._bound_addresses()
+        self.assertEqual(addresses, [("0.0.0.0", port)])
+        self.assertIn(reachable, (True, None))
+
+    async def test_host_flag_overrides_cloud_run(self):
+        with flagsaver.flagsaver(host="127.0.0.1"):
+            addresses, port, _ = await self._bound_addresses(k_service="demo")
+        self.assertEqual(addresses, [("127.0.0.1", port)])
+
+    def test_host_flag_validator(self):
+        for value in ["0.0.0.0", "::", "::1", "localhost", "my-box", "box.example.com"]:
+            with flagsaver.flagsaver(host=value):
+                self.assertEqual(main.HOST.value, value)
+        for value in ["0.0.0.0:8080", "http://0.0.0.0", "", " ", "[::]", "a b"]:
+            with self.assertRaises(flags.IllegalFlagValueError, msg=value):
+                with flagsaver.flagsaver(host=value):
+                    pass
+
+
+def _non_loopback_ipv4():
+    """An IPv4 address of this machine other than loopback, or None."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            s.connect(("192.0.2.1", 9))  # UDP: picks a route, sends nothing.
+        except OSError:
+            return None
+        address = s.getsockname()[0]
+    return None if address.startswith("127.") or address == "0.0.0.0" else address
+
+
+def _accepts_connections(address, port):
+    """Whether address:port accepts a TCP connection; None without an address."""
+    if address is None:
+        return None
+    try:
+        socket.create_connection((address, port), timeout=2).close()
+        return True
+    except OSError:
+        return False
 
 
 class ShutdownTest(unittest.TestCase):

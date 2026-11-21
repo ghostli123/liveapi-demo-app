@@ -22,5 +22,7 @@ WORKDIR /app/backend
 EXPOSE 8080
 
 # `exec` makes python PID 1, so it receives Cloud Run's SIGTERM and shuts down
-# cleanly instead of being killed when the grace period ends.
-CMD exec python main.py --project_id="$PROJECT_ID"
+# cleanly instead of being killed when the grace period ends. Outside Cloud Run
+# the server binds 127.0.0.1, which `docker run -p` can't reach; publish the
+# port as `-p 127.0.0.1:8080:8080` to keep it off the network.
+CMD exec python main.py --project_id="$PROJECT_ID" --host=0.0.0.0
