@@ -485,9 +485,11 @@ test("ending a share from the browser doesn't drop a pick in progress", async ()
 });
 
 // A LiveVideoOutputManager on a fake MediaSource. `buffered` is one range the
-// test sets; appendBuffer() throws `appendError` when it's set.
+// test sets; appendBuffer() throws `appendError` when it's set. With `removed`
+// set, both throw, as Chrome does once the SourceBuffer leaves its MediaSource.
 function videoOutputWithFakeMediaSource({ codecSupported = true, addSourceBufferError = null } = {}) {
-    const fake = { mediaSources: [], appendError: null, buffered: null };
+    const fake = { mediaSources: [], appendError: null, buffered: null, removed: false };
+    const removedError = () => Object.assign(new Error("removed"), { name: "InvalidStateError" });
     class FakeMediaSource {
         static isTypeSupported() { return codecSupported; }
         constructor() {
@@ -508,6 +510,7 @@ function videoOutputWithFakeMediaSource({ codecSupported = true, addSourceBuffer
                 appended: [],
                 removed: [],
                 get buffered() {
+                    if (fake.removed) throw removedError();
                     const range = fake.buffered;
                     return range
                         ? { length: 1, start: () => range[0], end: () => range[1] }
@@ -515,6 +518,7 @@ function videoOutputWithFakeMediaSource({ codecSupported = true, addSourceBuffer
                 },
                 addEventListener: (type, listener) => listeners.push(listener),
                 appendBuffer(chunk) {
+                    if (fake.removed) throw removedError();
                     if (fake.appendError) throw fake.appendError;
                     this.appended.push(chunk);
                 },
@@ -587,6 +591,44 @@ test("a MediaSource that ends mid-stream is reported and stops queuing; a new st
     manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
     assert.equal(fake.mediaSources[1].sourceBuffer.appended.length, 1);
     assert.equal(errors.length, 1);
+});
+
+test("a non-quota append error is reported once and stops queuing; a new stream plays", () => {
+    const { manager, fake, errors } = videoOutputWithFakeMediaSource();
+    manager.initMediaSource();
+    fake.mediaSources[0].open();
+    const sourceBuffer = fake.mediaSources[0].sourceBuffer;
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    fake.appendError = Object.assign(new Error("bad state"), { name: "InvalidStateError" });
+    for (let i = 0; i < 100; i++) manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(sourceBuffer.appended.length, 1);
+    assert.equal(manager.chunkQueue.length, 0);
+    assert.equal(manager.playbackFailed, true);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /stopped after a playback error/);
+
+    fake.appendError = null;
+    manager.initMediaSource();
+    fake.mediaSources[1].open();
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(fake.mediaSources[1].sourceBuffer.appended.length, 1);
+    assert.equal(errors.length, 1);
+});
+
+test("a SourceBuffer removed from an open MediaSource is reported once without throwing", () => {
+    const { manager, fake, video, errors } = videoOutputWithFakeMediaSource();
+    manager.initMediaSource();
+    fake.mediaSources[0].open();
+    fake.buffered = [0, 5];
+    video.currentTime = 4;
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    fake.removed = true; // readyState stays "open"; buffered and appendBuffer throw.
+    for (let i = 0; i < 100; i++) {
+        assert.doesNotThrow(() => manager.playVideoChunk(VIDEO_CHUNK, "video/mp4"));
+    }
+    assert.equal(manager.chunkQueue.length, 0);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /stopped after a playback error/);
 });
 
 test("a full buffer with the playhead stopped drops stale video and keeps the live chunk", () => {

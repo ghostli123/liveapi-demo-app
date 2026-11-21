@@ -642,7 +642,7 @@ class LiveVideoOutputManager {
         // After a pause (or blocked autoplay) the playhead is behind the
         // stream; jump to the live edge instead of playing stale video.
         video.addEventListener('play', () => {
-            if (!this.sourceBuffer || video.srcObject) return;
+            if (!this.sourceBuffer || this.playbackFailed || video.srcObject) return;
             const buffered = this.sourceBuffer.buffered;
             if (buffered.length === 0) return;
             const liveEdge = buffered.end(buffered.length - 1);
@@ -732,24 +732,33 @@ class LiveVideoOutputManager {
             return;
         }
 
-        // Trim in batches of VIDEO_BACK_BUFFER_S rather than on every append.
-        if (this.trimBufferIfLarge()) return;
+        try {
+            // Trim in batches of VIDEO_BACK_BUFFER_S rather than on every append.
+            if (this.trimBufferIfLarge()) return;
+            if (this.chunkQueue.length > 0) this.appendNextChunk(this.sourceBuffer);
+        } catch (e) {
+            // Besides a full buffer, the SourceBuffer only throws when it can't
+            // take data any more (removed from its MediaSource, or the video
+            // element has an error), so later chunks would fail the same way.
+            this.failPlayback(`Error appending video: ${e}`, VIDEO_STOPPED_MESSAGE);
+        }
+    }
 
-        if (this.chunkQueue.length > 0) {
-            const chunk = this.chunkQueue.shift();
-            try {
-                this.sourceBuffer.appendBuffer(chunk);
-            } catch (e) {
-                if (e.name === "QuotaExceededError") {
-                    // Make room and retry the same chunk on updateend.
-                    this.chunkQueue.unshift(chunk);
-                    if (!this.trimBuffer(1) && !this.dropStaleBuffer()) {
-                        console.error("Video buffer full and nothing to trim; dropping chunk.");
-                        this.chunkQueue.shift();
-                    }
-                } else {
-                    console.error("Error appending buffer:", e);
-                }
+    /**
+     * Appends the oldest queued chunk; a full buffer is trimmed and the chunk retried.
+     * @param {SourceBuffer} sourceBuffer - this.sourceBuffer.
+     */
+    appendNextChunk(sourceBuffer) {
+        const chunk = this.chunkQueue.shift();
+        try {
+            sourceBuffer.appendBuffer(chunk);
+        } catch (e) {
+            if (e.name !== "QuotaExceededError") throw e;
+            // Make room and retry the same chunk on updateend.
+            this.chunkQueue.unshift(chunk);
+            if (!this.trimBuffer(1) && !this.dropStaleBuffer()) {
+                console.error("Video buffer full and nothing to trim; dropping chunk.");
+                this.chunkQueue.shift();
             }
         }
     }
