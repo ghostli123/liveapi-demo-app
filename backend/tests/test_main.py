@@ -1054,6 +1054,68 @@ class MainAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.gateway.terminate.assert_called_once()
 
 
+class ShutdownTest(unittest.TestCase):
+    def test_sigterm_exits_while_a_token_fetch_hangs(self):
+        # Threads can't be cancelled, so asyncio.run used to wait for the
+        # startup token prefetch: ~23 s with this gcloud, and Cloud Run sends
+        # SIGKILL 10 s after SIGTERM.
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = os.path.join(tmp, "bin")
+            os.mkdir(bin_dir)
+            started = os.path.join(tmp, "gcloud.pid")
+            gcloud = os.path.join(bin_dir, "gcloud")
+            with open(gcloud, "w") as f:
+                f.write(f"#!/bin/sh\necho $$ > {started}\nexec sleep 25\n")
+            os.chmod(gcloud, 0o755)
+            env = {
+                "HOME": tmp,
+                "PATH": f"{bin_dir}:/usr/bin:/bin",
+                "NO_GCE_CHECK": "true",
+                "PORT": "0",
+            }
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    os.path.join(os.path.dirname(main.__file__), "main.py"),
+                    "--common_bag_ws_port=1",
+                ],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                for _ in range(300):
+                    if os.path.exists(started) and os.path.getsize(started):
+                        break
+                    self.assertIsNone(proc.poll(), "server exited early")
+                    threading.Event().wait(0.1)
+                else:
+                    self.fail("the token fetch never ran gcloud")
+                with open(started) as f:
+                    self.addCleanup(_kill_if_running, int(f.read()))
+                proc.send_signal(signal.SIGTERM)
+                try:
+                    _, stderr = proc.communicate(timeout=8)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.communicate()
+                    self.fail("server still running 8 s after SIGTERM")
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.communicate()
+            self.assertEqual(proc.returncode, 0, stderr)
+            self.assertIn("Shutting down", stderr)
+
+
+def _kill_if_running(pid):
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
     async def test_delete_only_removes_the_expected_record(self):
         manager = session_management.SessionManager()

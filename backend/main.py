@@ -9,6 +9,7 @@ import re
 import signal
 import socket
 import subprocess
+import sys
 from typing import Any, TypeGuard
 import urllib.parse
 
@@ -766,5 +767,21 @@ async def main_async():
                 proxy_proc.terminate()
 
 
+def serve(argv) -> None:
+    """Runs the server until SIGINT or SIGTERM, then exits the process."""
+    del argv  # Unused.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(main_async())
+    # The server and the gateway are closed by now. A token fetch can still
+    # be running in a worker thread (gcloud times out after 30 s), and threads
+    # can't be cancelled: asyncio.run and interpreter exit would both wait for
+    # it, past Cloud Run's 10 s between SIGTERM and SIGKILL.
+    logging.flush()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
+
+
 if __name__ == "__main__":
-    app.run(lambda argv: asyncio.run(main_async()))
+    app.run(serve)
