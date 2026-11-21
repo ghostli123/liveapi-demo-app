@@ -5,7 +5,7 @@
   "scripts": {
     "test": "node --test frontend/tests/*.test.js",
     "lint": "eslint .",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.worklet.json",
     "e2e": "node scripts/browser_e2e.js"
   },
   "devDependencies": {

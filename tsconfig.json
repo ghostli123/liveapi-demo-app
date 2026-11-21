@@ -3,6 +3,7 @@
     // build step. Only files that start with `// @ts-check` report errors,
     // so the remaining files can opt in one at a time. The scripts share
     // one global scope, as in index.html, so cross-file classes resolve.
+    // The AudioWorklet processors have their own scope: tsconfig.worklet.json.
     "compilerOptions": {
         "allowJs": true,
         "noEmit": true,
@@ -15,5 +16,5 @@
         "useUnknownInCatchVariables": false,
         "skipLibCheck": true
     },
-    "include": ["frontend/gemini-live-api.js", "frontend/live-media-manager.js", "types/*.d.ts"]
+    "include": ["frontend/gemini-live-api.js", "frontend/live-media-manager.js", "types/globals.d.ts"]
 }

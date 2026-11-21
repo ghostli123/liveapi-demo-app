@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * @class PCMProcessor
  * @extends AudioWorkletProcessor
@@ -8,6 +9,7 @@
 class PCMProcessor extends AudioWorkletProcessor {
     constructor() {
         super();
+        /** @type {Float32Array[]} */
         this.queue = [];
         this.offset = 0; // Read position in this.queue[0].
 
@@ -21,6 +23,10 @@ class PCMProcessor extends AudioWorkletProcessor {
         };
     }
 
+    /**
+     * @param {Float32Array[][]} inputs
+     * @param {Float32Array[][]} outputs
+     */
     process(inputs, outputs) {
         const channelData = outputs[0][0];
         let written = 0;
