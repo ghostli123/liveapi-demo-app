@@ -119,6 +119,8 @@ class GeminiLiveResponseMessage {
 
 // How long to wait for setupComplete after the WebSocket opens.
 const SETUP_TIMEOUT_MS = 30000;
+// The longest delay setTimeout supports (a signed 32-bit millisecond count).
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 // Most automatic resumes (after close code 1001) allowed per minute.
 const AUTO_RESUME_LIMIT = 3;
 // Server events that mean a conversation is going on, for the idle timeout.
@@ -709,10 +711,13 @@ class GeminiLiveAPI {
         this.idleTimer = null;
         if (!this.idleTimeoutMs) return;
         this.noteActivity();
+        // Browsers run a timeout longer than 2^31-1 ms (~24.8 days) at once,
+        // so a longer --idle_timeout_s would make check() spin; it re-arms.
+        const wait = (ms) => setTimeout(check, Math.min(ms, MAX_TIMEOUT_MS));
         const check = () => {
             const left = this.lastActivityAt + this.idleTimeoutMs - Date.now();
             if (left > 0) {
-                this.idleTimer = setTimeout(check, left);
+                this.idleTimer = wait(left);
                 return;
             }
             this.idleTimer = null;
@@ -720,7 +725,7 @@ class GeminiLiveAPI {
                 `Disconnected after ${describeDuration(this.idleTimeoutMs)} without activity.`
             );
         };
-        this.idleTimer = setTimeout(check, this.idleTimeoutMs);
+        this.idleTimer = wait(this.idleTimeoutMs);
     }
 
     /**

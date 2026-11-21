@@ -689,6 +689,19 @@ test("audio, avatar video and usage reports don't postpone the idle timeout", as
     assert.equal(api.idleMessages.length, 1);
 });
 
+test("an idle timeout beyond setTimeout's limit waits in steps instead of spinning", async () => {
+    // Browsers run a delay above 2^31-1 ms at once, so check() would re-arm
+    // itself in a tight loop for the whole session.
+    const api = await idleApi(30 * 86400); // 30 days.
+    const limit = 2 ** 31 - 1;
+    assert.equal(timers[api.idleTimer - 1].ms, limit);
+    fireIdleTimer(api, 1000); // Recent activity: the re-armed wait is capped too.
+    assert.deepEqual(plain(api.idleMessages), []);
+    assert.equal(timers[api.idleTimer - 1].ms, limit);
+    fireIdleTimer(api, 30 * 86400 * 1000);
+    assert.deepEqual(plain(api.idleMessages), ["Disconnected after 43200 minutes without activity."]);
+});
+
 test("disconnect() stops the idle timer, and idle_timeout_s 0 disables it", async () => {
     const api = await idleApi(120);
     const timer = timers[api.idleTimer - 1];
