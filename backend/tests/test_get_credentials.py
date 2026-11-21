@@ -1,4 +1,6 @@
 import datetime
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -53,6 +55,46 @@ class GetAccessTokenTest(unittest.TestCase):
         self.use_sources(failing_a, failing_b)
         with self.assertRaisesRegex(RuntimeError, "no ADC.*no gcloud"):
             get_credentials.get_access_token()
+
+    def test_waiting_callers_share_a_failed_fetch(self):
+        release = threading.Event()
+
+        def slow_failure():
+            release.wait()
+            raise RuntimeError("gcloud down")
+
+        fetch = mock.Mock(side_effect=slow_failure)
+        self.use_sources(fetch)
+        errors = []
+
+        def call():
+            try:
+                get_credentials.get_access_token()
+            except RuntimeError as e:
+                errors.append(str(e))
+
+        threads = [threading.Thread(target=call) for _ in range(4)]
+        threads[0].start()
+        while not fetch.called:
+            time.sleep(0.01)
+        for thread in threads[1:]:
+            thread.start()
+        time.sleep(0.3)  # Lets the others queue on the lock.
+        release.set()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(len(errors), 4)
+        self.assertEqual(len(set(errors)), 1)
+        self.assertIn("gcloud down", errors[0])
+
+    def test_retries_after_a_failed_fetch(self):
+        fetch = mock.Mock(side_effect=[RuntimeError("down"), _token(60, "later")])
+        self.use_sources(fetch)
+        with self.assertRaises(RuntimeError):
+            get_credentials.get_access_token()
+        self.assertEqual(get_credentials.get_access_token().source, "later")
 
     def test_adc_without_token_falls_through(self):
         adc = mock.Mock(token=None, expiry=None)
