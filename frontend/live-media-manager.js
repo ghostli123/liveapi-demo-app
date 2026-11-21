@@ -176,6 +176,9 @@ class LiveAudioInputManager {
         } catch (error) {
             if (stream) stream.getTracks().forEach((track) => track.stop());
             audioContext.close();
+            // A refusal for a connect that was superseded while the prompt was
+            // open isn't reported: the caller would turn off the newer mic.
+            if (generation !== this.generation) return;
             throw error;
         }
         if (generation !== this.generation) {
@@ -407,7 +410,8 @@ class LiveVideoManager extends LiveFrameSource {
     }
 
     /**
-     * Opens the camera. Throws if the camera can't be opened.
+     * Opens the camera. Throws if the camera can't be opened, unless
+     * stopWebcam() ran while waiting for it.
      * @param {{sendFrames?: boolean}} [options] - sendFrames: send JPEG frames
      *     every intervalMs (WebSocket mode).
      */
@@ -416,9 +420,16 @@ class LiveVideoManager extends LiveFrameSource {
             return; // Already started
         }
         const generation = ++this.generation;
-        const stream = await navigator.mediaDevices.getUserMedia({
-            video: this.deviceId ? { deviceId: { exact: this.deviceId } } : true,
-        });
+        let stream;
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({
+                video: this.deviceId ? { deviceId: { exact: this.deviceId } } : true,
+            });
+        } catch (error) {
+            // Abandoned (e.g. by a device change); the caller would stop the newer camera.
+            if (generation !== this.generation) return;
+            throw error;
+        }
         if (generation !== this.generation) {
             // stopWebcam() was called while waiting for the camera.
             stream.getTracks().forEach((track) => track.stop());
@@ -443,11 +454,18 @@ class LiveScreenManager extends LiveFrameSource {
      * Asks the user for a screen to share. Throws if they cancel.
      * @param {{sendFrames?: boolean}} [options] - See LiveVideoManager.startWebcam.
      * @returns {Promise<boolean>} False if stopCapture() or a newer
-     *     startCapture() ran while the picker was open; the pick is dropped.
+     *     startCapture() ran while the picker was open; the pick, or the
+     *     picker's failure, is dropped.
      */
     async startCapture({ sendFrames = true } = {}) {
         const generation = ++this.generation;
-        const stream = await navigator.mediaDevices.getDisplayMedia();
+        let stream;
+        try {
+            stream = await navigator.mediaDevices.getDisplayMedia();
+        } catch (error) {
+            if (generation !== this.generation) return false;
+            throw error;
+        }
         if (generation !== this.generation) {
             // The session ended (or the camera took over) during the picker.
             stream.getTracks().forEach((track) => track.stop());
@@ -1001,9 +1019,17 @@ class G3RtcWebRtcManager {
         if (deviceId) {
             audioConstraints.deviceId = { exact: deviceId };
         }
-        const stream = await navigator.mediaDevices.getUserMedia({
-            audio: audioConstraints,
-        });
+        let stream;
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({
+                audio: audioConstraints,
+            });
+        } catch (error) {
+            // Superseded while the prompt was open (see below); reporting the
+            // refusal would make the caller turn off the newer mic.
+            if (generation !== this.micGeneration) return;
+            throw error;
+        }
         if (generation !== this.micGeneration) {
             // stopMicrophone() (mic off, Disconnect) or a newer start ran
             // while the permission prompt was open; don't send this one.

@@ -48,10 +48,11 @@ function fakeTrack() {
 function pendingMediaDevices() {
     const requests = [];
     const getUserMedia = () =>
-        new Promise((resolve) => {
+        new Promise((resolve, reject) => {
             const track = fakeTrack();
             const stream = { getTracks: () => [track], getAudioTracks: () => [track], getVideoTracks: () => [track] };
-            requests.push({ track, stream, grant: () => resolve(stream) });
+            const deny = (name = "NotAllowedError") => reject(Object.assign(new Error(name), { name }));
+            requests.push({ track, stream, grant: () => resolve(stream), deny });
         });
     return { requests, mediaDevices: { getUserMedia } };
 }
@@ -113,6 +114,23 @@ test("only the newest of two overlapping startMicrophone() calls keeps its strea
     assert.equal(requests[0].track.readyState, "ended");
     assert.equal(requests[1].track.readyState, "live");
     assert.equal(sent.at(-1), requests[1].track);
+});
+
+test("a microphone refused after a newer start doesn't throw or touch the newer one", async () => {
+    const { manager, requests, sent } = webRtcManagerWithPendingMic();
+    const first = manager.startMicrophone("a");
+    const second = manager.startMicrophone("b");
+    requests[1].grant();
+    await second;
+    requests[0].deny("NotFoundError"); // e.g. the first device was unplugged.
+    await first; // A rejection here made script.js turn the working mic off.
+    assert.equal(manager.micStream.getAudioTracks()[0], requests[1].track);
+    assert.equal(requests[1].track.readyState, "live");
+    assert.equal(sent.at(-1), requests[1].track);
+
+    const third = manager.startMicrophone();
+    requests[2].deny();
+    await assert.rejects(third, { name: "NotAllowedError" }); // Still reported when current.
 });
 
 test("a microphone that ends on its own is reported; a replaced one isn't", async () => {
@@ -186,6 +204,24 @@ test("a WebSocket microphone that ends on its own is reported; one turned off is
     assert.equal(ended, 1);
 });
 
+test("a WebSocket microphone refused after it was superseded doesn't throw or touch the newer one", async () => {
+    const { manager, requests, intervals } = audioInputWithPendingMic();
+    const first = manager.connectMicrophone();
+    const second = manager.updateMicrophoneDevice("b"); // Disconnects, then connects.
+    requests[1].grant();
+    await second;
+    requests[0].deny("NotFoundError");
+    await first; // A rejection here made script.js turn the working mic off.
+    assert.equal(manager.stream, requests[1].stream);
+    assert.equal(requests[1].track.readyState, "live");
+    assert.equal(intervals.size, 1);
+
+    manager.disconnectMicrophone();
+    const third = manager.connectMicrophone();
+    requests[2].deny();
+    await assert.rejects(third, { name: "NotAllowedError" });
+});
+
 /** A LiveVideoManager whose getUserMedia() calls wait for the test. */
 function cameraManagerWithPendingCamera() {
     const devices = pendingMediaDevices();
@@ -234,6 +270,25 @@ test("a camera stopped by the app isn't reported when its track ends later", asy
     requests[0].track.end();
     assert.deepEqual(ended, []);
     assert.equal(manager.stream.getVideoTracks()[0], requests[1].track);
+});
+
+test("a camera refused after stopWebcam() doesn't throw or touch the newer one", async () => {
+    const { manager, requests, intervals } = cameraManagerWithPendingCamera();
+    const first = manager.startWebcam();
+    manager.stopWebcam(); // A device change: startCameraCapture() stops, then starts.
+    const second = manager.startWebcam();
+    requests[1].grant();
+    await second;
+    requests[0].deny("NotFoundError");
+    await first; // A rejection here made script.js stop the working camera.
+    assert.equal(manager.stream.getVideoTracks()[0], requests[1].track);
+    assert.equal(requests[1].track.readyState, "live");
+    assert.equal(intervals.size, 1);
+
+    manager.stopWebcam();
+    const third = manager.startWebcam();
+    requests[2].deny();
+    await assert.rejects(third, { name: "NotAllowedError" });
 });
 
 test("completeSession after close() starts no stats polling or connect timer", async () => {
@@ -334,6 +389,15 @@ test("a new pick replaces a running share; cancelling keeps it", async () => {
     assert.equal(manager.stream, requests[2].stream);
     assert.equal(requests[0].track.readyState, "ended");
     assert.equal(intervals.size, 1);
+});
+
+test("a picker that fails after stopCapture() reports false, not an error", async () => {
+    const { manager, requests } = screenManagerWithPendingPicker();
+    const starting = manager.startCapture();
+    manager.stopCapture(); // Disconnect while the picker is open.
+    requests[0].cancel();
+    assert.equal(await starting, false);
+    assert.equal(manager.stream, null);
 });
 
 test("ending a share from the browser doesn't drop a pick in progress", async () => {
