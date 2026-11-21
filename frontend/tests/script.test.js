@@ -215,10 +215,12 @@ test("bufferToWave writes a 16-bit PCM WAV, clamping samples", async () => {
 /**
  * A getUserMedia that answers when the test says, and a MediaRecorder that
  * records what happens to it; for the branded-voice recording dialog.
+ * `timers` holds the callbacks script.js scheduled.
  */
 function fakeRecordingDevices() {
     const prompts = [];
     const recorders = [];
+    const timers = [];
     const getUserMedia = () =>
         new Promise((resolve) => {
             const track = { stopped: false, stop() { this.stopped = true; } };
@@ -242,7 +244,15 @@ function fakeRecordingDevices() {
     return {
         prompts,
         recorders,
-        globals: { navigator: { mediaDevices: { getUserMedia } }, MediaRecorder: FakeMediaRecorder },
+        timers,
+        globals: {
+            navigator: { mediaDevices: { getUserMedia } },
+            MediaRecorder: FakeMediaRecorder,
+            setTimeout: (callback, ms) => timers.push({ callback, ms }) - 1,
+            clearTimeout: (id) => {
+                if (timers[id]) timers[id].cleared = true;
+            },
+        },
     };
 }
 
@@ -952,4 +962,74 @@ test("an avatar image too large or of an unsupported type is refused and the pre
     await choose({ name: "face.jpg", type: "image/jpeg", size: 3, bytes: "abc" });
     assert.deepEqual(JSON.parse(JSON.stringify(avatars)), [["YWJj", "image/jpeg"]]);
     assert.equal(element("avatarName").textContent, "Avatar: face.jpg");
+});
+
+test("a voice file over the size limit is refused before it is read", async () => {
+    const { context, element } = loadApp({ OfflineAudioContext: fakeOfflineAudioContext(12), FileReader: FakeFileReader });
+    let read = false;
+    const file = {
+        name: "huge.wav",
+        size: 200 * 1024 * 1024 + 1,
+        arrayBuffer: async () => {
+            read = true;
+            return new ArrayBuffer(8);
+        },
+    };
+    await context.handleAudioFileInputChange({ target: { value: file.name, files: [file] } });
+    assert.equal(read, false);
+    assert.equal(
+        element("dialogMessage").textContent,
+        'Could not use "huge.wav" as a voice sample: it is 200.1 MB; files are limited to 200 MB.'
+    );
+    assert.equal(context.AppState.customVoiceBase64, "");
+});
+
+test("a recording stops itself at the sample limit and is kept, cut to the limit", async () => {
+    const devices = fakeRecordingDevices();
+    const { timers } = devices;
+    const renders = [];
+    const OfflineAudioContext = class extends fakeOfflineAudioContext(300.02) {
+        async startRendering() {
+            renders.push(this.length);
+            const samples = new Float32Array(1); // Rendering all 7.2 M samples only slows the test.
+            return { numberOfChannels: 1, length: 1, sampleRate: this.sampleRate, getChannelData: () => samples };
+        }
+    };
+    const { context, element } = loadApp({ ...devices.globals, OfflineAudioContext, FileReader: FakeFileReader, Blob });
+    context.openModal();
+    element("newVoiceName").value = "Kai";
+    const click = context.handleRecordClick();
+    devices.prompts[0].grant();
+    await click;
+    assert.match(element("recordStatus").textContent, /it stops at 5 min/);
+    assert.deepEqual(plainJson(timers.map((t) => t.ms)), [300000]);
+
+    timers[0].callback();
+    assert.equal(devices.recorders[0].state, "inactive");
+    assert.equal(context.AppState.isRecording, false);
+    await flush();
+    assert.equal(devices.prompts[0].track.stopped, true);
+    assert.deepEqual(renders, [300 * 24000]);
+    assert.ok(context.AppState.customVoiceBase64.length > 0);
+    assert.equal(
+        element("dialogMessage").textContent,
+        'Recording stopped at the 5 min limit. New branded voice "Kai" has been created and selected. ' +
+            "It applies from the next connection."
+    );
+});
+
+test("closing the dialog cancels the recording's limit timer", async () => {
+    const devices = fakeRecordingDevices();
+    const { timers } = devices;
+    const { context, element } = loadApp(devices.globals);
+    context.openModal();
+    element("newVoiceName").value = "Kai";
+    const click = context.handleRecordClick();
+    devices.prompts[0].grant();
+    await click;
+    context.closeModal();
+    await flush();
+    assert.equal(timers[0].cleared, true);
+    timers[0].callback(); // Even if it had fired, it must not touch the closed dialog.
+    assert.notEqual(element("recordStatus").textContent, "Processing recorded sample...");
 });

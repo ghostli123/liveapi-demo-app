@@ -602,6 +602,10 @@ const MIN_VOICE_SAMPLE_S = 10;
 // limits keep both together well under it: 5 min of 24 kHz 16-bit WAV is
 // 19 MB as base64, a 20 MB image 27 MB.
 const MAX_VOICE_SAMPLE_S = 300;
+// Checked before a voice file is read, so a huge file is refused without
+// decoding it all into memory first. 5 min of uncompressed 96 kHz 24-bit
+// stereo WAV is 173 MB.
+const MAX_VOICE_FILE_BYTES = 200 * 1024 * 1024;
 const MAX_AVATAR_IMAGE_BYTES = 20 * 1024 * 1024;
 const AVATAR_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 const BrandedVoices = new Map(); // voice-dropdown value -> base64 WAV
@@ -617,24 +621,27 @@ function blobToBase64(blob) {
 
 /**
  * Converts any audio the browser can decode to a 24 kHz mono WAV sample.
+ * Audio longer than MAX_VOICE_SAMPLE_S is refused, or with `clip` cut to it.
  * @param {ArrayBuffer} audioData
+ * @param {{clip?: boolean}} [options]
  * @returns {Promise<{base64: string, durationS: number}>}
  */
-async function toVoiceSample(audioData) {
+async function toVoiceSample(audioData, { clip = false } = {}) {
     // Offline contexts can decode too, and need no closing; Chrome limits how
     // many realtime AudioContexts a page may hold.
     const decoded = await new OfflineAudioContext(1, 1, VOICE_SAMPLE_RATE).decodeAudioData(
         audioData
     );
-    if (decoded.duration > MAX_VOICE_SAMPLE_S) {
+    if (decoded.duration > MAX_VOICE_SAMPLE_S && !clip) {
         throw new Error(
             `it is ${formatMinutes(decoded.duration)} long; samples are limited to ` +
             `${formatMinutes(MAX_VOICE_SAMPLE_S)}.`
         );
     }
+    const durationS = Math.min(decoded.duration, MAX_VOICE_SAMPLE_S);
     const offline = new OfflineAudioContext(
         1, // Mixing to a mono destination downmixes stereo input.
-        Math.ceil(decoded.duration * VOICE_SAMPLE_RATE),
+        Math.ceil(durationS * VOICE_SAMPLE_RATE), // Rendering stops here, cutting longer audio.
         VOICE_SAMPLE_RATE
     );
     const source = offline.createBufferSource();
@@ -642,12 +649,17 @@ async function toVoiceSample(audioData) {
     source.connect(offline.destination);
     source.start();
     const rendered = await offline.startRendering();
-    return { base64: await blobToBase64(bufferToWave(rendered)), durationS: decoded.duration };
+    return { base64: await blobToBase64(bufferToWave(rendered)), durationS };
 }
 
 /** Rounds up, so a duration over a limit never reads as equal to it. */
 function formatMinutes(seconds) {
     return `${Math.ceil(seconds / 6) / 10} min`;
+}
+
+/** Rounds up, as above. */
+function formatMegabytes(bytes) {
+    return `${Math.ceil(bytes / 104857.6) / 10} MB`;
 }
 
 /** Adds a voice to the Branded Voice dropdown and selects it. */
@@ -675,8 +687,9 @@ async function setAvatarImage(blob, name) {
         throw new Error("use a PNG, JPEG or WebP image.");
     }
     if (blob.size > MAX_AVATAR_IMAGE_BYTES) {
-        const mb = (bytes) => `${Math.ceil(bytes / 104857.6) / 10} MB`; // Rounded up, as above.
-        throw new Error(`it is ${mb(blob.size)}; images are limited to ${mb(MAX_AVATAR_IMAGE_BYTES)}.`);
+        throw new Error(
+            `it is ${formatMegabytes(blob.size)}; images are limited to ${formatMegabytes(MAX_AVATAR_IMAGE_BYTES)}.`
+        );
     }
     AppState.geminiLiveApi.setCustomizedAvatar(await blobToBase64(blob), blob.type);
     AppUI.setText("avatarName", `Avatar: ${name}`);
@@ -716,6 +729,11 @@ async function handleAudioFileInputChange(event) {
     event.target.value = ""; // So choosing the same file again fires change.
 
     try {
+        if (file.size > MAX_VOICE_FILE_BYTES) {
+            throw new Error(
+                `it is ${formatMegabytes(file.size)}; files are limited to ${formatMegabytes(MAX_VOICE_FILE_BYTES)}.`
+            );
+        }
         const { base64, durationS } = await toVoiceSample(await file.arrayBuffer());
         addBrandedVoice(file.name, base64);
         AppUI.setText("fileName", `File: ${file.name} (${durationS.toFixed(1)} s)`);
@@ -1822,16 +1840,7 @@ async function handleRecordClick() {
             return;
         }
 
-        if (AppState.mediaRecorder) {
-            AppState.mediaRecorder.stop();
-        }
-
-        AppUI.setDisabled("recordButton", true);
-        AppUI.setText("recordStatus", "Processing recorded sample...");
-        AppUI.setHidden("processingSpinner", false);
-        AppUI.setButtonWithIcon("recordButton", "hourglass_empty", "Processing...");
-
-        AppState.isRecording = false;
+        stopRecording();
     } else {
         /** @type {MediaStream | null} */
         let stream = null;
@@ -1850,6 +1859,14 @@ async function handleRecordClick() {
             AppState.mediaRecorder = recorder;
             AppState.audioChunks = [];
             let cancelled = false;
+            let reachedLimit = false;
+            // Stop at the sample limit rather than refuse the whole recording
+            // once the user stops it.
+            const limitTimer = setTimeout(() => {
+                if (attempt !== AppState.recordingAttempt || !AppState.isRecording) return;
+                reachedLimit = true;
+                stopRecording();
+            }, MAX_VOICE_SAMPLE_S * 1000);
             AppState.cancelRecording = () => {
                 cancelled = true;
                 recorder.stop();
@@ -1863,6 +1880,7 @@ async function handleRecordClick() {
                 // Release the microphone; otherwise the browser keeps showing
                 // it as in use.
                 recorder.stream.getTracks().forEach((track) => track.stop());
+                clearTimeout(limitTimer);
                 AppState.cancelRecording = null;
                 if (cancelled) {
                     AppState.audioChunks = [];
@@ -1871,11 +1889,13 @@ async function handleRecordClick() {
                 const audioBlob = new Blob(AppState.audioChunks, { type: recorder.mimeType });
                 AppState.audioChunks = [];
                 try {
-                    const { base64 } = await toVoiceSample(await audioBlob.arrayBuffer());
+                    // The encoder can add a few milliseconds past the limit.
+                    const { base64 } = await toVoiceSample(await audioBlob.arrayBuffer(), { clip: true });
                     addBrandedVoice(voiceName, base64);
                     // Close first, so the message dialog returns focus to the page.
                     closeModal();
                     AppUI.showModal(
+                        (reachedLimit ? `Recording stopped at the ${formatMinutes(MAX_VOICE_SAMPLE_S)} limit. ` : "") +
                         `New branded voice "${voiceName}" has been created and selected. ` +
                         "It applies from the next connection."
                     );
@@ -1891,7 +1911,10 @@ async function handleRecordClick() {
             AppState.isRecording = true;
 
             AppUI.setButtonWithIcon("recordButton", "stop", "Stop Recording");
-            AppUI.setText("recordStatus", "Recording... (Please speak for at least 10 seconds)");
+            AppUI.setText(
+                "recordStatus",
+                `Recording... (Please speak for at least 10 seconds; it stops at ${formatMinutes(MAX_VOICE_SAMPLE_S)})`
+            );
         } catch (error) {
             console.error("Could not start the reference voice recording:", error);
             if (stream) stream.getTracks().forEach((track) => track.stop());
@@ -1902,6 +1925,20 @@ async function handleRecordClick() {
             );
         }
     }
+}
+
+/** Stops the voice recording in progress; its onstop handler processes it. */
+function stopRecording() {
+    if (AppState.mediaRecorder) {
+        AppState.mediaRecorder.stop();
+    }
+
+    AppUI.setDisabled("recordButton", true);
+    AppUI.setText("recordStatus", "Processing recorded sample...");
+    AppUI.setHidden("processingSpinner", false);
+    AppUI.setButtonWithIcon("recordButton", "hourglass_empty", "Processing...");
+
+    AppState.isRecording = false;
 }
 
 function bufferToWave(abuffer) {
