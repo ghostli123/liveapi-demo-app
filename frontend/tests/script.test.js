@@ -131,6 +131,8 @@ function loadApp(globals = {}, { radios = [] } = {}) {
         "startScreenCapture",
         "setAppStatus",
         "connectBtnClick",
+        "handleAudioFileInputChange",
+        "handleAvatarFileInputChange",
     ];
     const context = loadScript("script.js", exportNames, {
         window: { location: { protocol: "http:", host: "localhost:1234" }, addEventListener() {} },
@@ -792,4 +794,75 @@ test("multi-part avatar recordings become links, released by the next Connect", 
     assert.deepEqual(lines[1].children.map((link) => link.href), ["blob:3", "blob:4"]);
     context.connectBtnClick();
     assert.deepEqual(urls.revoked, ["blob:1", "blob:2", "blob:3", "blob:4"]);
+});
+
+/** A FileReader that reads a Blob-like `{ type, size, bytes }` as a data URL. */
+class FakeFileReader {
+    async readAsDataURL(blob) {
+        const bytes = blob instanceof Blob ? Buffer.from(await blob.arrayBuffer()) : Buffer.from(blob.bytes);
+        this.result = `data:${blob.type};base64,${bytes.toString("base64")}`;
+        this.onloadend();
+    }
+}
+
+/** An OfflineAudioContext whose decoded audio lasts `durationS`. */
+function fakeOfflineAudioContext(durationS) {
+    return class {
+        constructor(channels, length, sampleRate) {
+            this.length = length;
+            this.sampleRate = sampleRate;
+        }
+        async decodeAudioData() {
+            return { duration: durationS };
+        }
+        createBufferSource() {
+            return { connect() {}, start() {} };
+        }
+        async startRendering() {
+            const samples = new Float32Array(this.length);
+            return { numberOfChannels: 1, length: this.length, sampleRate: this.sampleRate, getChannelData: () => samples };
+        }
+    };
+}
+
+test("a voice sample too long for the setup message is refused; one within the limit is selected", async () => {
+    for (const [durationS, selected] of [
+        [301, false],
+        [12, true],
+    ]) {
+        const { context, element } = loadApp({ OfflineAudioContext: fakeOfflineAudioContext(durationS), FileReader: FakeFileReader });
+        const input = { value: "long.wav", files: [{ name: "long.wav", arrayBuffer: async () => new ArrayBuffer(8) }] };
+        await context.handleAudioFileInputChange({ target: input });
+        assert.equal(input.value, "");
+        const text = element("dialogMessage").textContent;
+        if (selected) {
+            assert.match(text, /Branded voice "long.wav" is selected/);
+            assert.ok(context.AppState.customVoiceBase64.length > 0);
+        } else {
+            assert.equal(text, 'Could not use "long.wav" as a voice sample: it is 5.1 min long; samples are limited to 5 min.');
+            assert.equal(context.AppState.customVoiceBase64, "");
+        }
+    }
+});
+
+test("an avatar image too large or of an unsupported type is refused and the previous avatar kept", async () => {
+    const { context, element } = loadApp({ FileReader: FakeFileReader });
+    const avatars = [];
+    context.AppState.geminiLiveApi.setCustomizedAvatar = (data, type) => avatars.push([data, type]);
+    const choose = async (file) => {
+        await context.handleAvatarFileInputChange({ target: { value: file.name, files: [file] } });
+        return element("dialogMessage").textContent;
+    };
+    assert.equal(
+        await choose({ name: "big.png", type: "image/png", size: 20 * 1024 * 1024 + 1, bytes: "" }),
+        'Could not use "big.png" as the avatar: it is 20.1 MB; images are limited to 20 MB.'
+    );
+    assert.equal(
+        await choose({ name: "face.gif", type: "image/gif", size: 1000, bytes: "" }),
+        'Could not use "face.gif" as the avatar: use a PNG, JPEG or WebP image.'
+    );
+    assert.equal(avatars.length, 0);
+    await choose({ name: "face.jpg", type: "image/jpeg", size: 3, bytes: "abc" });
+    assert.deepEqual(JSON.parse(JSON.stringify(avatars)), [["YWJj", "image/jpeg"]]);
+    assert.equal(element("avatarName").textContent, "Avatar: face.jpg");
 });

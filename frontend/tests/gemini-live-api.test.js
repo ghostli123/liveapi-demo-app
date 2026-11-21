@@ -568,6 +568,10 @@ test("describeClose explains how the server ended the session", () => {
         GeminiLiveAPI.describeClose({ code: 1006, reason: "" }),
         "Lost the connection to the server."
     );
+    assert.equal(
+        GeminiLiveAPI.describeClose({ code: 1009, reason: "" }),
+        "Connection closed (code 1009): a message was larger than the server accepts (64 MB)."
+    );
 });
 
 test("setApiHost maps environments to hosts", () => {
