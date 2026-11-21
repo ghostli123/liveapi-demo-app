@@ -398,13 +398,24 @@ test("a control request that fails releases nothing", async () => {
 });
 
 // GeminiLiveAPI whose fetch() answers every POST with `reply(body)`:
-// {status, type, text}. `posts` records the parsed request bodies.
+// {status, type, text}, or never if it returns "hang" (until the request is
+// aborted, like a real fetch). `posts` records the parsed request bodies;
+// `timers` records timeouts, which run only when a test fires them.
 function apiWithFetch(reply) {
     const posts = [];
+    const timers = [];
     const fetch = async (url, init) => {
         const body = JSON.parse(init.body);
         posts.push(body);
-        const { status = 200, type = null, text = "" } = reply(body);
+        const answer = reply(body);
+        if (answer === "hang") {
+            return new Promise((_, reject) => {
+                const abort = () => reject(init.signal.reason);
+                if (init.signal?.aborted) abort();
+                init.signal?.addEventListener("abort", abort);
+            });
+        }
+        const { status = 200, type = null, text = "" } = answer;
         return {
             ok: status >= 200 && status < 300,
             status,
@@ -416,14 +427,97 @@ function apiWithFetch(reply) {
     const context = loadScript("gemini-live-api.js", ["GeminiLiveAPI"], {
         WebSocket: FakeWebSocket,
         fetch,
+        AbortController,
         setInterval: () => 1,
         clearInterval: () => {},
-        setTimeout: () => 1,
-        clearTimeout: () => {},
+        setTimeout: (fn, ms) => timers.push({ fn, ms, cleared: false, fired: false }),
+        clearTimeout: (id) => {
+            if (timers[id - 1]) timers[id - 1].cleared = true;
+        },
     });
     const api = new context.GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
-    return { api, posts };
+    return { api, posts, timers };
 }
+
+// Lets pending promise callbacks run, then fires the oldest live timer.
+async function fireNextTimer(timers) {
+    await new Promise((resolve) => setImmediate(resolve));
+    const timer = timers.find((t) => !t.cleared && !t.fired);
+    assert.ok(timer, "no pending timer");
+    timer.fired = true;
+    timer.fn();
+    return timer.ms;
+}
+
+test("a connect the server never answers times out, is retried once, and is reported", async () => {
+    // E.g. a wedged backend, or a dead pooled connection: before, "Connecting"
+    // stayed until the user clicked Disconnect.
+    const { api, posts, timers } = apiWithFetch((body) => (body.command === "connect" ? "hang" : { text: "{}" }));
+    const errors = [];
+    api.onErrorMessage = (message) => errors.push(message);
+    let opened = 0;
+    api.setupWebSocketToService = () => opened++;
+    const connecting = api.connect();
+    const fired = [];
+    for (let i = 0; i < 3; i++) fired.push(await fireNextTimer(timers));
+    await connecting;
+    // 15 s attempt, 1 s backoff, 15 s attempt.
+    assert.deepEqual(fired, [15000, 1000, 15000]);
+    assert.equal(opened, 0);
+    assert.deepEqual(errors, ["Could not start the session: the server didn't answer within 15 s"]);
+    // The server may have created the record after all; release it.
+    assert.deepEqual(plain(posts.map((b) => b.command)), ["connect", "connect", "disconnect"]);
+    await new Promise((resolve) => setImmediate(resolve)); // The release's reply.
+    assert.ok(timers.every((t) => t.cleared || t.fired));
+});
+
+test("a connect that times out once succeeds on the retry", async () => {
+    let connects = 0;
+    const { api, posts, timers } = apiWithFetch(() =>
+        ++connects === 1 ? "hang" : { type: "application/json", text: '{"project_id": "p"}' }
+    );
+    const errors = [];
+    api.onErrorMessage = (message) => errors.push(message);
+    let opened = 0;
+    api.setupWebSocketToService = () => opened++;
+    const connecting = api.connect();
+    await fireNextTimer(timers); // The first attempt's timeout.
+    await fireNextTimer(timers); // The backoff.
+    await connecting;
+    assert.equal(opened, 1);
+    assert.deepEqual(errors, []);
+    assert.deepEqual(plain(posts.map((b) => b.command)), ["connect", "connect"]);
+    // The answered attempt's timeout was cleared.
+    assert.ok(timers.every((t) => t.cleared || t.fired));
+});
+
+test("function declarations the server never takes fail the connect after the timeout", async () => {
+    const { api, posts, timers } = apiWithFetch((body) =>
+        body.objective === "fc_definition" ? "hang" : { type: "application/json", text: "{}" }
+    );
+    api.functionCallDefinition = [{ name: "f" }];
+    const errors = [];
+    api.onErrorMessage = (message) => errors.push(message);
+    const connecting = api.connect();
+    assert.equal(await fireNextTimer(timers), 15000);
+    await connecting;
+    assert.deepEqual(errors, ["Could not set up function declarations: the server didn't answer within 15 s"]);
+    // The connect succeeded, so its record is released.
+    assert.deepEqual(plain(posts.map((b) => b.command ?? b.objective)), ["connect", "fc_definition", "disconnect"]);
+});
+
+test("sendPostRequest() with a timeout still honors the caller's signal", async () => {
+    const { api, timers } = apiWithFetch(() => "hang");
+    const controller = new AbortController();
+    const request = api.sendPostRequest("/api/post_endpoint", {}, { signal: controller.signal, timeoutMs: 15000 });
+    controller.abort("cancelled");
+    await assert.rejects(request, (reason) => reason === "cancelled");
+    assert.ok(timers[0].cleared);
+    // Without a timeout, no timer is set (the simulator has its own).
+    const plainRequest = api.sendPostRequest("/api/post_endpoint", {}, { signal: AbortSignal.abort("timeout") });
+    await assert.rejects(plainRequest, (reason) => reason === "timeout");
+    assert.equal(timers.length, 1);
+});
 
 test("a 200 control reply that isn't JSON fails the connect instead of opening a WebSocket", async () => {
     // E.g. a captive portal or a misconfigured proxy answering for the server.

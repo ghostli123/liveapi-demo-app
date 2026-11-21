@@ -119,6 +119,10 @@ class GeminiLiveResponseMessage {
 
 // How long to wait for setupComplete after the WebSocket opens.
 const SETUP_TIMEOUT_MS = 30000;
+// How long to wait for the backend to answer a session POST (connect, function
+// declarations), so a server that accepts the connection and never answers
+// (a wedged process, a dead pooled connection) can't leave "Connecting" forever.
+const CONTROL_TIMEOUT_MS = 15000;
 // The longest delay setTimeout supports (a signed 32-bit millisecond count).
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 // Most automatic resumes (after close code 1001) allowed per minute.
@@ -515,7 +519,11 @@ class GeminiLiveAPI {
      * @param {string} sessionId
      */
     abandonSession(sessionId) {
-        this.sendPostRequest(this.controlUrl, { command: "disconnect", session_id: sessionId })
+        this.sendPostRequest(
+            this.controlUrl,
+            { command: "disconnect", session_id: sessionId },
+            { timeoutMs: CONTROL_TIMEOUT_MS }
+        )
             .catch((error) => console.warn(`Could not release session ${sessionId}:`, error));
     }
 
@@ -651,6 +659,10 @@ class GeminiLiveAPI {
             return await this.postWithRetry(this.controlUrl, postRequestBody);
         } catch (error) {
             console.error("Error in initBackendService:", error);
+            if (error.timeout) {
+                // The server may still create the record after we gave up.
+                this.abandonSession(sessionId);
+            }
             throw new Error(`Could not start the session: ${error.message}`);
         }
     }
@@ -669,7 +681,7 @@ class GeminiLiveAPI {
             functionDefinition: this.functionCallDefinition,
         };
         try {
-            await this.sendPostRequest(this.frUrl, funcDeclarationMessage);
+            await this.sendPostRequest(this.frUrl, funcDeclarationMessage, { timeoutMs: CONTROL_TIMEOUT_MS });
         } catch (error) {
             console.error("Error in setupFuncDeclarationToService:", error);
             throw new Error(`Could not set up function declarations: ${error.message}`);
@@ -1322,11 +1334,53 @@ class GeminiLiveAPI {
      * Executes an HTTP POST request and parses the JSON response.
      * @param {string} url - Target HTTP URL.
      * @param {Object} data - JSON payload to post.
-     * @param {{signal?: AbortSignal}} [options] - `signal` aborts the request.
+     * @param {{signal?: AbortSignal, timeoutMs?: number}} [options] - `signal`
+     *     aborts the request; `timeoutMs` (if > 0) fails it with an Error whose
+     *     `timeout` is true when the reply hasn't fully arrived by then.
      * @returns {Promise<Object>} Parsed JSON response; rejects on an HTTP error
      *     or a reply that isn't a JSON object.
      */
-    async sendPostRequest(url, data, { signal } = {}) {
+    async sendPostRequest(url, data, { signal, timeoutMs = 0 } = {}) {
+        if (!(timeoutMs > 0)) {
+            return this.fetchJson(url, data, signal);
+        }
+        // AbortSignal.any() and AbortSignal.timeout() would do this, but
+        // any() needs Safari 17.4 and Firefox 124.
+        const controller = new AbortController();
+        const forwardAbort = () => controller.abort(signal?.reason);
+        if (signal?.aborted) {
+            forwardAbort();
+        } else {
+            signal?.addEventListener("abort", forwardAbort, { once: true });
+        }
+        let timedOut = false;
+        const timer = setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+        }, timeoutMs);
+        try {
+            return await this.fetchJson(url, data, controller.signal);
+        } catch (error) {
+            if (timedOut) {
+                throw Object.assign(new Error(`the server didn't answer within ${timeoutMs / 1000} s`), {
+                    timeout: true,
+                });
+            }
+            throw error;
+        } finally {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", forwardAbort);
+        }
+    }
+
+    /**
+     * POSTs `data` as JSON and parses the reply (see sendPostRequest()).
+     * @param {string} url
+     * @param {Object} data
+     * @param {AbortSignal} [signal]
+     * @returns {Promise<Object>}
+     */
+    async fetchJson(url, data, signal) {
         const response = await fetch(url, {
             method: "POST",
             headers: {
@@ -1365,22 +1419,30 @@ class GeminiLiveAPI {
     }
 
     /**
-     * Like sendPostRequest(), but retries network failures (not HTTP errors),
-     * e.g. while the backend restarts.
+     * Like sendPostRequest() with CONTROL_TIMEOUT_MS, but retries network
+     * failures (not HTTP errors), e.g. while the backend restarts. The
+     * request must be safe to repeat.
      * @param {string} url
      * @param {Object} data
      * @param {number} [attempts=4]
      * @returns {Promise<Object>}
      */
     async postWithRetry(url, data, attempts = 4) {
+        let timeouts = 0;
         for (let attempt = 1; ; attempt++) {
             try {
-                return await this.sendPostRequest(url, data);
+                return await this.sendPostRequest(url, data, { timeoutMs: CONTROL_TIMEOUT_MS });
             } catch (error) {
                 // fetch() rejects with a TypeError when the server is
-                // unreachable; a proxy in front of it answers 502-504.
+                // unreachable; a proxy in front of it answers 502-504. A
+                // timeout is retried once, since a new connection can get past
+                // a dead one, but a server that is up and stuck would only
+                // make the user wait longer.
+                if (error.timeout) timeouts++;
                 const transient =
-                    error instanceof TypeError || [502, 503, 504].includes(error.status);
+                    error instanceof TypeError ||
+                    [502, 503, 504].includes(error.status) ||
+                    (error.timeout && timeouts < 2);
                 if (!transient || attempt >= attempts) {
                     throw error;
                 }

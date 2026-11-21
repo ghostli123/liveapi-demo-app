@@ -92,7 +92,7 @@ The backend tries, in order: Application Default Credentials through google-auth
 
 A session with no conversation and no typing or clicking on the page for 15 minutes (`--idle_timeout_s`) ends with "Disconnected after 15 minutes without activity."; the chat log shows its resumption handle as after Disconnect.
 
-If the server ends a session, the app shows the close code and the reason the Live API gave, such as a missing model or a permission error.
+If the server ends a session, the app shows the close code and the reason the Live API gave, such as a missing model or a permission error. If the backend doesn't answer Connect within 15 seconds, the app tries once more and then shows "the server didn't answer within 15 s"; when the server is unreachable or answers 502-504, Connect is tried up to four times.
 
 ## Deploy to Cloud Run
 
