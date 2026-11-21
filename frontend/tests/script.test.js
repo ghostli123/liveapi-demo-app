@@ -125,6 +125,7 @@ function loadApp(globals = {}, { radios = [] } = {}) {
         "handleEnvironmentChange",
         "newUserMessage",
         "turnBtnClick",
+        "micOffBtnClick",
         "handleFunctionCallRequest",
         "initDOMEventListeners",
         "startCameraCapture",
@@ -582,6 +583,42 @@ test("a microphone that stops on its own ends the turn, turns the mic off and sa
     assert.equal(element("micOffBtn").hidden, false);
     assert.equal(mic.stops, 1);
     assert.match(dialogText(), /^The microphone stopped: it was unplugged/);
+});
+
+test("a mic level meter that fails to start leaves the microphone on without it", async () => {
+    const errors = [];
+    let micStops = 0;
+    const stream = { id: "mic" };
+    const { context, element } = loadApp({
+        navigator: {},
+        requestAnimationFrame: () => 0,
+        console: { error: (...args) => errors.push(args.map(String).join(" ")), log() {}, warn() {} },
+        LiveAudioInputManager: class {
+            stream = stream;
+            async updateAudioInterval() {}
+            disconnectMicrophone() {
+                micStops++;
+            }
+        },
+        MicLevelMeter: class {
+            start(started) {
+                assert.equal(started, stream);
+                throw new Error("no audio device");
+            }
+            stop() {}
+        },
+    });
+    context.AppState.geminiLiveApi.transportMode = "websocket";
+    element("micLevel").hidden = true;
+
+    context.micOffBtnClick();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(element("micBtn").hidden, false);
+    assert.equal(element("micOffBtn").hidden, true);
+    assert.equal(element("micLevel").hidden, true);
+    assert.equal(micStops, 0);
+    assert.equal(element("dialogMessage").textContent, undefined);
+    assert.deepEqual(errors, ["Could not start the microphone level meter: Error: no audio device"]);
 });
 
 /** loadApp with a WebRTC manager stand-in that records what it was told. */

@@ -779,6 +779,49 @@ test("audio chunks share one context and worklet", async () => {
     assert.equal(manager.workletNode.posted[2], "clear");
 });
 
+test("a mic level meter the browser refuses throws and leaves nothing running", () => {
+    const contexts = [];
+    let refuseContext = false;
+    class FakeAudioContext {
+        constructor() {
+            if (refuseContext) throw new Error("no audio device");
+            this.state = "running";
+            this.closed = 0;
+            contexts.push(this);
+        }
+        createAnalyser() {
+            return { fftSize: 0 };
+        }
+        createMediaStreamSource() {
+            throw new Error("stream has no audio track");
+        }
+        close() {
+            this.closed++;
+            return Promise.resolve();
+        }
+    }
+    const frames = [];
+    const { MicLevelMeter } = loadScript("live-media-manager.js", ["MicLevelMeter"], {
+        window: { AudioContext: FakeAudioContext },
+        requestAnimationFrame: (callback) => frames.push(callback),
+        cancelAnimationFrame() {},
+    });
+    const levels = [];
+    const meter = new MicLevelMeter((level) => levels.push(level));
+
+    assert.throws(() => meter.start({}), /stream has no audio track/);
+    assert.equal(contexts.length, 1);
+    assert.equal(contexts[0].closed, 1);
+    assert.equal(meter.context, null);
+    assert.equal(frames.length, 0);
+    assert.deepEqual(levels, [0, 0]);
+
+    refuseContext = true;
+    assert.throws(() => meter.start({}), /no audio device/);
+    assert.equal(meter.context, null);
+    meter.stop(); // Turning the mic off afterwards is still fine.
+});
+
 test("recordChunk sends the buffered samples as base64 16-bit little-endian PCM", () => {
     const context = loadScript("live-media-manager.js", ["LiveAudioInputManager"], { btoa });
     const manager = new context.LiveAudioInputManager();

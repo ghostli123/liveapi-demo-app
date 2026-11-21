@@ -316,18 +316,25 @@ class MicLevelMeter {
         this.frame = null;
     }
 
+    /** Throws if the browser refuses the audio context or the stream; nothing is left running then. */
     start(stream) {
         this.stop();
         if (!stream) return;
-        this.context = new (window.AudioContext || window.webkitAudioContext)();
-        // Created after awaiting getUserMedia, i.e. possibly without a user
-        // gesture, so it can start suspended (always in Safari).
-        if (this.context.state === "suspended") {
-            this.context.resume().catch(() => {});
+        let analyser;
+        try {
+            this.context = new (window.AudioContext || window.webkitAudioContext)();
+            // Created after awaiting getUserMedia, i.e. possibly without a user
+            // gesture, so it can start suspended (always in Safari).
+            if (this.context.state === "suspended") {
+                this.context.resume().catch(() => {});
+            }
+            analyser = this.context.createAnalyser();
+            analyser.fftSize = 512;
+            this.context.createMediaStreamSource(stream).connect(analyser);
+        } catch (error) {
+            this.stop();
+            throw error;
         }
-        const analyser = this.context.createAnalyser();
-        analyser.fftSize = 512;
-        this.context.createMediaStreamSource(stream).connect(analyser);
         const samples = new Float32Array(analyser.fftSize);
         const tick = () => {
             analyser.getFloatTimeDomainData(samples);
@@ -346,7 +353,7 @@ class MicLevelMeter {
         cancelAnimationFrame(this.frame);
         this.frame = null;
         if (this.context) {
-            this.context.close();
+            this.context.close().catch(() => {});
             this.context = null;
         }
         this.onLevel(0);

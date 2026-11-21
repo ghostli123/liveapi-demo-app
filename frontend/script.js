@@ -1277,10 +1277,7 @@ async function startAudioInput() {
             await AppState.liveAudioInputManager.updateAudioInterval(AppUI.getValue("audioInterval"));
         }
         if (isMicOn()) {
-            AppState.micLevelMeter.start(
-                webRtcManager ? webRtcManager.micStream : AppState.liveAudioInputManager.stream
-            );
-            AppUI.setHidden("micLevel", false);
+            startMicLevelMeter(webRtcManager ? webRtcManager.micStream : AppState.liveAudioInputManager.stream);
         }
         // Device names are only visible once the user has granted access.
         refreshDeviceLists();
@@ -1290,6 +1287,17 @@ async function startAudioInput() {
         stopAudioInput();
         showMicState(false);
     }
+}
+
+/** The level meter is decorative: if the browser refuses it, the mic stays on without it. */
+function startMicLevelMeter(stream) {
+    try {
+        AppState.micLevelMeter.start(stream);
+    } catch (err) {
+        console.error("Could not start the microphone level meter:", err);
+        return;
+    }
+    AppUI.setHidden("micLevel", false);
 }
 
 function stopAudioInput() {
