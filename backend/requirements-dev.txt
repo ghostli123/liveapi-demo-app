@@ -1,5 +1,6 @@
 -r requirements.txt
-pytest
-# Pinned: new pyright releases add checks, which would turn CI red unannounced.
+# Pinned: new releases of these add checks or change formatting, which would
+# turn CI red unannounced. Dependabot (.github/dependabot.yml) proposes bumps.
 pyright==1.1.414
-ruff
+pytest==9.2.0
+ruff==0.17.5
