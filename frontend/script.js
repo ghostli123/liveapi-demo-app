@@ -1267,6 +1267,16 @@ function showCameraState(on) {
     AppUI.setHidden("cameraOffBtn", on);
 }
 
+/**
+ * Why a getUserMedia/getDisplayMedia call failed, for an error dialog. Chrome's
+ * OverconstrainedError has an empty message; the only exact constraint the app
+ * sets is the picked deviceId, so it means that device is gone (e.g. unplugged).
+ */
+function deviceErrorReason(err) {
+    if (err && err.name === "OverconstrainedError") return "the selected device isn't available";
+    return (err && (err.message || err.name)) || String(err);
+}
+
 async function startAudioInput() {
     const deviceId = AppUI.getValue("audioSource") || null;
     try {
@@ -1284,7 +1294,7 @@ async function startAudioInput() {
         refreshDeviceLists();
     } catch (err) {
         console.error("Failed to start microphone:", err);
-        AppUI.showModal(`Could not start the microphone: ${err.message}`);
+        AppUI.showModal(`Could not start the microphone: ${deviceErrorReason(err)}`);
         // E.g. switching to another mic mid-turn: like turning the mic off,
         // this ends the turn, or it stays open with nothing being sent.
         endUserTurn();
@@ -1419,7 +1429,7 @@ async function startCameraCapture() {
         refreshDeviceLists();
     } catch (err) {
         console.error("Failed to start camera:", err);
-        AppUI.showModal(`Could not start the camera: ${err.message}`);
+        AppUI.showModal(`Could not start the camera: ${deviceErrorReason(err)}`);
         camera.stopWebcam();
         showCameraState(false);
         // The screen share or previous camera was stopped above; the WebRTC
@@ -1442,7 +1452,7 @@ async function startScreenCapture() {
     } catch (err) {
         // NotAllowedError means the user closed the picker.
         if (err.name !== "NotAllowedError") {
-            AppUI.showModal(`Could not share the screen: ${err.message}`);
+            AppUI.showModal(`Could not share the screen: ${deviceErrorReason(err)}`);
         }
         return;
     }
@@ -1952,7 +1962,7 @@ async function handleRecordClick() {
             AppUI.showModal(
                 error.name === "NotAllowedError"
                     ? "Could not access the microphone. Please check your browser permissions."
-                    : `Could not start recording: ${error.message}`
+                    : `Could not start recording: ${deviceErrorReason(error)}`
             );
         }
     }

@@ -675,6 +675,70 @@ test("switching to a microphone that fails mid-turn ends the turn and turns the 
     assert.equal(dialogText(), "Could not start the microphone: Constraints could not be satisfied.");
 });
 
+/** A media error as Chrome throws it: a name and an empty message. */
+function namedError(name, message = "") {
+    return Object.assign(new Error(message), { name });
+}
+
+test("a microphone that isn't available says so, though Chrome's error has no message", async () => {
+    const { context, element, mic, dialogText } = loadSession();
+    element("micBtn").hidden = false;
+    element("micOffBtn").hidden = true;
+
+    context.newMicSelected();
+    mic.fails[0](namedError("OverconstrainedError")); // The picked device was unplugged.
+    await flush();
+    assert.equal(dialogText(), "Could not start the microphone: the selected device isn't available");
+    assert.equal(element("micBtn").hidden, true);
+
+    element("micBtn").hidden = false;
+    element("micOffBtn").hidden = true;
+    context.newMicSelected();
+    mic.fails[1](namedError("NotReadableError"));
+    await flush();
+    assert.equal(dialogText(), "Could not start the microphone: NotReadableError");
+});
+
+test("camera and screen errors without a message name the error", async () => {
+    let cameraError = null;
+    let screenError = null;
+    const { context, element } = loadApp({
+        console: { error() {} },
+        navigator: {},
+        requestAnimationFrame: () => 0,
+        LiveVideoManager: class extends FakeFrameSource {
+            stopWebcam() {}
+            async startWebcam() {
+                throw cameraError;
+            }
+        },
+        LiveScreenManager: class extends FakeFrameSource {
+            stopCapture() {}
+            async startCapture() {
+                throw screenError;
+            }
+        },
+    });
+    const dialogText = () => element("dialogMessage").textContent;
+
+    cameraError = namedError("OverconstrainedError");
+    await context.startCameraCapture();
+    assert.equal(dialogText(), "Could not start the camera: the selected device isn't available");
+    cameraError = namedError("NotReadableError");
+    await context.startCameraCapture();
+    assert.equal(dialogText(), "Could not start the camera: NotReadableError");
+    cameraError = "no camera"; // Not an Error at all.
+    await context.startCameraCapture();
+    assert.equal(dialogText(), "Could not start the camera: no camera");
+
+    screenError = namedError("NotReadableError");
+    await context.startScreenCapture();
+    assert.equal(dialogText(), "Could not share the screen: NotReadableError");
+    screenError = namedError("AbortError", "Starting videoinput failed");
+    await context.startScreenCapture();
+    assert.equal(dialogText(), "Could not share the screen: Starting videoinput failed");
+});
+
 test("a mic level meter that fails to start leaves the microphone on without it", async () => {
     const errors = [];
     let micStops = 0;
