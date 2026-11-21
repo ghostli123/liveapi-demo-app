@@ -1,0 +1,19 @@
+{
+    // Type check for the frontend's classic scripts (npm run typecheck); no
+    // build step. Only files that start with `// @ts-check` report errors,
+    // so the remaining files can opt in one at a time. The scripts share
+    // one global scope, as in index.html, so cross-file classes resolve.
+    "compilerOptions": {
+        "allowJs": true,
+        "noEmit": true,
+        "target": "es2022",
+        "lib": ["es2022", "dom", "dom.iterable"],
+        "strict": true,
+        // Untyped parameters stay `any` until they get JSDoc, and caught
+        // errors are `any`, as in plain JavaScript.
+        "noImplicitAny": false,
+        "useUnknownInCatchVariables": false,
+        "skipLibCheck": true
+    },
+    "include": ["frontend/gemini-live-api.js", "frontend/live-media-manager.js", "types/*.d.ts"]
+}
