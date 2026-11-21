@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const { loadScript } = require("./load-script");
 
 class FakeWebSocket {
+    static CONNECTING = 0;
     static OPEN = 1;
     static CLOSED = 3;
     constructor() {
@@ -278,16 +279,35 @@ test("a failing onConnectionStarted is reported, not left 'connecting'", () => {
     assert.deepEqual(plain(handled), ["SETUP COMPLETE"]); // Nothing after the session ended.
 });
 
-function connectedApi() {
+// A session whose WebSocket is still in its handshake. `api.posts` records
+// control requests as [command, session_id].
+function connectingApi() {
     const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
     api.transportMode = "websocket";
     api.webRtcManager = null;
     api.onReceiveResponse = () => {};
     api.errors = [];
     api.reconnects = 0;
+    api.posts = [];
     api.onErrorMessage = (message) => api.errors.push(message);
     api.onReconnectNeeded = () => api.reconnects++;
+    api.sendPostRequest = async (url, body) => {
+        api.posts.push([body.command, body.session_id]);
+        return {};
+    };
+    api.sessionId = "s-1";
     api.setupWebSocketToService();
+    api.webSocket.readyState = FakeWebSocket.CONNECTING;
+    return api;
+}
+
+// A session whose WebSocket has opened (setup not yet sent or confirmed).
+function connectedApi() {
+    const api = connectingApi();
+    api.webSocket.readyState = FakeWebSocket.OPEN;
+    api.sendInitialSetupMessages = async () => {};
+    api.webSocket.onopen();
+    delete api.sendInitialSetupMessages;
     return api;
 }
 
@@ -320,6 +340,49 @@ test("disconnect() closes quietly and stops realtime input", () => {
     assert.equal(api.isSetupComplete, false);
     assert.equal(webSocket.onclose, null);
     assert.equal(api.errors.length, 0);
+});
+
+test("a WebSocket that closes before it opens releases its session", () => {
+    // E.g. a proxy that drops upgrades: the server never saw the /ws, so its
+    // record would hold a --max_sessions slot until it expires.
+    const api = connectingApi();
+    api.webSocket.onclose({ code: 1006, reason: "" });
+    assert.deepEqual(plain(api.posts), [["disconnect", "s-1"]]);
+    assert.deepEqual(plain(api.errors), ["Lost the connection to the server."]);
+});
+
+test("disconnect() while the WebSocket is connecting releases its session", () => {
+    const api = connectingApi();
+    let closed = 0;
+    api.webSocket.close = () => closed++;
+    api.disconnect();
+    assert.equal(closed, 1);
+    assert.deepEqual(plain(api.posts), [["disconnect", "s-1"]]);
+    assert.equal(api.errors.length, 0);
+});
+
+test("a setup timeout before the WebSocket opens releases its session", () => {
+    const api = connectingApi();
+    api.webSocket.close = () => {};
+    // As the app does: an error ends the session.
+    api.onErrorMessage = (message) => {
+        api.errors.push(message);
+        api.disconnect();
+    };
+    timers[timers.length - 1].fn();
+    assert.deepEqual(plain(api.errors), ["Timed out waiting for the server to set up the session."]);
+    assert.deepEqual(plain(api.posts), [["disconnect", "s-1"]]);
+});
+
+test("an opened WebSocket releases nothing when it closes or is disconnected", () => {
+    // The server ends the session itself when an attached WebSocket closes.
+    const closedByServer = connectedApi();
+    closedByServer.webSocket.onclose({ code: 1011, reason: "boom" });
+    assert.deepEqual(plain(closedByServer.posts), []);
+    const disconnected = connectedApi();
+    disconnected.webSocket.close = () => {};
+    disconnected.disconnect();
+    assert.deepEqual(plain(disconnected.posts), []);
 });
 
 test("setup times out if the server never confirms it", () => {

@@ -710,6 +710,13 @@ class GeminiLiveAPI {
             webSocket.onclose = null;
             webSocket.onerror = null;
             webSocket.onmessage = null;
+            // Also reached from the setup timeout. A handshake that never
+            // finished may never have reached the server, whose record would
+            // then hold a --max_sessions slot until it expires. (this.webSocket
+            // always belongs to this.sessionId; resume() clears it first.)
+            if (webSocket.readyState === WebSocket.CONNECTING) {
+                this.abandonSession(this.sessionId);
+            }
             webSocket.close(1000);
         }
     }
@@ -880,10 +887,12 @@ class GeminiLiveAPI {
     setupWebSocketToService() {
         console.log("connecting: ", this.proxyUrl);
 
+        const sessionId = this.sessionId;
         const wsUrl = new URL(this.proxyUrl);
-        wsUrl.searchParams.append("session_id", this.sessionId);
+        wsUrl.searchParams.append("session_id", sessionId);
         const webSocket = new WebSocket(wsUrl);
         this.webSocket = webSocket;
+        let opened = false;
         this.isSetupComplete = false;
         clearTimeout(this.setupTimer);
         this.setupTimer = setTimeout(() => {
@@ -901,6 +910,11 @@ class GeminiLiveAPI {
             this.webSocket = null;
             this.isSetupComplete = false;
             this.stopUpdateBandwidthUsage();
+            if (!opened) {
+                // The handshake failed (e.g. a proxy that drops upgrades), so
+                // the server may still hold the record waiting for it.
+                this.abandonSession(sessionId);
+            }
             // 1001 means the server is going away (e.g. the backend restarts
             // for a deploy); resume the session on a new connection if this
             // one worked and we aren't already resuming in a loop.
@@ -922,6 +936,7 @@ class GeminiLiveAPI {
         };
 
         webSocket.onopen = async () => {
+            opened = true;
             console.log("websocket open");
             try {
                 // onConnectionStarted() runs when the server confirms setup.
