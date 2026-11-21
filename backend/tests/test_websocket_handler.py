@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import types
 import unittest
@@ -60,6 +61,67 @@ class DescribeConnectErrorTest(unittest.TestCase):
             websocket_handler.describe_connect_error(OSError("refused")),
             "OSError: refused",
         )
+
+    def test_long_html_body_becomes_one_short_line(self):
+        page = "<html>\n<body>\n" + "<p>Not found.</p>\n" * 12000 + "</body></html>"
+        self.assertGreater(len(page), 200_000)
+        reason = websocket_handler.describe_connect_error(
+            RejectedHandshake(404, page.encode())
+        )
+        self.assertTrue(reason.startswith("Upstream HTTP 404: <html> <body> <p>"))
+        self.assertTrue(reason.endswith("..."))
+        self.assertLessEqual(
+            len(reason),
+            len("Upstream HTTP 404: ") + websocket_handler._MAX_CONNECT_ERROR_CHARS,
+        )
+        self.assertNotIn("\n", reason)
+
+    def test_long_api_message_and_exception_are_capped(self):
+        message = "Quota exceeded.\n" + "x" * 1000
+        body = json.dumps({"error": {"message": message}}).encode()
+        reason = websocket_handler.describe_connect_error(RejectedHandshake(429, body))
+        self.assertTrue(reason.startswith("Upstream HTTP 429: Quota exceeded. xxx"))
+        self.assertTrue(reason.endswith("..."))
+        reason = websocket_handler.describe_connect_error(OSError("a\nb " + "c" * 500))
+        self.assertTrue(reason.startswith("OSError: a b ccc"))
+        self.assertEqual(len(reason), websocket_handler._MAX_CONNECT_ERROR_CHARS)
+
+
+class UpstreamRejectionLogTest(unittest.IsolatedAsyncioTestCase):
+    async def test_html_error_page_is_logged_as_one_short_line(self):
+        page = "<html>\n" + "<p>The requested URL was not found.</p>\n" * 5000
+
+        def reject(connection, request):
+            response = connection.respond(404, page)
+            response.headers["Content-Type"] = "text/html"
+            return response
+
+        quiet = logging.getLogger("test.quiet_server")
+        quiet.setLevel(logging.INFO)
+
+        async def unused(connection):
+            pass
+
+        async with websockets.serve(
+            unused,
+            "127.0.0.1",
+            0,
+            logger=quiet,
+            process_request=reject,
+        ) as server:
+            port = next(iter(server.sockets)).getsockname()[1]
+            handler = websocket_handler.WebsocketHandler(
+                f"ws://127.0.0.1:{port}/ws", "s", None
+            )
+            with self.assertLogs(level=logging.WARNING) as logs:
+                self.assertIsNone(await handler._open_upstream())
+        self.assertEqual(handler.close_code, 1011)
+        self.assertTrue(
+            handler.close_reason.startswith("Upstream HTTP 404: <html> <p>")
+        )
+        [line] = [o for o in logs.output if "Upstream connection failed" in o]
+        self.assertNotIn("\n", line)
+        self.assertLess(len(line), 500)
 
 
 class UpstreamLoggingTest(unittest.IsolatedAsyncioTestCase):

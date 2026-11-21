@@ -32,6 +32,10 @@ _RESERVED_CLOSE_CODES = frozenset({1005, 1006, 1015})
 # A close frame carries at most 123 bytes of reason after the 2-byte code.
 _MAX_CLOSE_REASON_BYTES = 123
 _DEBUG_PREVIEW_CHARS = 300
+# Most characters of an upstream handshake error kept for the log line. The
+# body can be a whole HTML error page (up to websockets' 1 MiB limit); the
+# browser sees only the first 123 bytes anyway.
+_MAX_CONNECT_ERROR_CHARS = 300
 # What send() raises once its connection has closed: websockets raises
 # ConnectionClosed, aiohttp ClientConnectionResetError (a ConnectionResetError).
 _TARGET_CLOSED_ERRORS = (websockets.ConnectionClosed, ConnectionError)
@@ -63,19 +67,28 @@ def truncate_close_reason(reason: str) -> str:
     return encoded[:_MAX_CLOSE_REASON_BYTES].decode("utf-8", errors="ignore")
 
 
+def _one_line(text: str) -> str:
+    """Collapses whitespace and cuts text to _MAX_CONNECT_ERROR_CHARS."""
+    text = " ".join(text.split())
+    if len(text) <= _MAX_CONNECT_ERROR_CHARS:
+        return text
+    return text[: _MAX_CONNECT_ERROR_CHARS - 3].rstrip() + "..."
+
+
 def describe_connect_error(error: Exception) -> str:
     """Turns an upstream handshake failure into a one-line, user-facing reason."""
     response = getattr(error, "response", None)
     status = getattr(response, "status_code", None)
     if status is None:
-        return f"{type(error).__name__}: {error}"
+        return _one_line(f"{type(error).__name__}: {error}")
     body = getattr(response, "body", b"") or b""
-    detail = body.decode("utf-8", errors="replace").strip()
+    detail = body.decode("utf-8", errors="replace")
     try:
         # Google APIs return {"error": {"message": ...}} on handshake errors.
-        detail = json.loads(detail)["error"]["message"]
+        detail = str(json.loads(detail)["error"]["message"])
     except (ValueError, KeyError, TypeError):
         pass
+    detail = _one_line(detail)
     return f"Upstream HTTP {status}: {detail}" if detail else f"Upstream HTTP {status}"
 
 
