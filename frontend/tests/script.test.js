@@ -59,6 +59,7 @@ function fakeElement(id) {
                 return this.names.has(name);
             },
         },
+        dataset: {},
         listeners: {},
         addEventListener(type, listener) {
             (this.listeners[type] ||= []).push(listener);
@@ -96,6 +97,7 @@ function loadApp(globals = {}, { radios = [] } = {}) {
         "handleEnvironmentChange",
         "newUserMessage",
         "turnBtnClick",
+        "handleFunctionCallRequest",
     ];
     const context = loadScript("script.js", exportNames, {
         window: { location: { protocol: "http:", host: "localhost:1234" }, addEventListener() {} },
@@ -486,3 +488,119 @@ test("a camera that stops on its own stops the WebRTC video and says why; Stop s
     assert.deepEqual(webRtc.detached, [camera, screen]);
     assert.equal(dialogText(), undefined); // The user ended the share themselves.
 });
+
+/**
+ * A connected session whose function-response simulator answers when the test
+ * says; `timers` holds the callbacks script.js scheduled.
+ */
+function loadFunctionCalls() {
+    const timers = [];
+    const app = loadApp({
+        AbortController,
+        setTimeout: (callback, ms) => timers.push({ callback, ms }) - 1,
+        clearTimeout: (id) => {
+            if (timers[id]) timers[id].cleared = true;
+        },
+    });
+    const api = app.context.AppState.geminiLiveApi;
+    api.webSocket = {};
+    api.sessionId = "s-1";
+    api.frUrl = "/api/post_endpoint";
+    const posts = [];
+    api.sendPostRequest = (url, data, { signal }) =>
+        new Promise((resolve, reject) => {
+            posts.push({ name: data.functionName, signal, resolve });
+            signal.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+    api.sendMessage = (message) => api.sent.push(message);
+    const chat = [];
+    app.element("text-chat").appendChild = (line) => chat.push(line.textContent);
+    return { ...app, api, posts, timers, chat };
+}
+
+/** Lets the awaits between one simulator answer and the next request run. */
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+test("a function call the server cancels is aborted and not answered", async () => {
+    const { context, api, posts } = loadFunctionCalls();
+    const done = context.handleFunctionCallRequest([
+        { id: "c1", name: "slow", args: {} },
+        { id: "c2", name: "next", args: {} },
+    ]);
+    assert.equal(posts.length, 1);
+    context.handleReceiveResponse({ type: "FUNCTION_CALL_CANCELLATION", data: ["c1"] });
+    assert.equal(posts[0].signal.aborted, true);
+    await settle();
+    posts[1].resolve({ response: "ok" });
+    await done;
+    assert.deepEqual(
+        plainJson(api.sent.map((m) => m.toolResponse.functionResponses.map((r) => r.id))),
+        [["c2"]]
+    );
+});
+
+test("calls cancelled before or after their simulation get no response", async () => {
+    const { context, api, posts, chat } = loadFunctionCalls();
+    const done = context.handleFunctionCallRequest([
+        { id: "c1", name: "first" },
+        { id: "c2", name: "second" },
+        { id: "c3", name: "third" },
+    ]);
+    posts[0].resolve({ response: "one" });
+    await settle();
+    // c1 has its answer; c2 is being simulated; c3 hasn't started.
+    context.handleReceiveResponse({ type: "FUNCTION_CALL_CANCELLATION", data: ["c1", "c3"] });
+    posts[1].resolve({ response: "two" });
+    await done;
+    assert.deepEqual(
+        posts.map((p) => p.name),
+        ["first", "second"]
+    );
+    assert.deepEqual(
+        plainJson(api.sent.map((m) => m.toolResponse.functionResponses.map((r) => r.id))),
+        [["c2"]]
+    );
+    assert.ok(chat.includes("Function calls cancelled: c1, c3"));
+
+    // Once every call is cancelled, nothing is sent.
+    const all = context.handleFunctionCallRequest([{ id: "c4", name: "fourth" }]);
+    context.handleReceiveResponse({ type: "FUNCTION_CALL_CANCELLATION", data: ["c4"] });
+    await all;
+    assert.equal(api.sent.length, 1);
+});
+
+test("a simulator that doesn't answer times out, and the model still gets a response", async () => {
+    const { context, api, posts, timers, chat } = loadFunctionCalls();
+    const done = context.handleFunctionCallRequest([{ id: "c1", name: "hung" }]);
+    assert.equal(posts.length, 1);
+    assert.equal(timers.length, 1);
+    assert.equal(timers[0].ms, 30000);
+    timers[0].callback();
+    await done;
+    assert.deepEqual(plainJson(api.sent), [
+        {
+            toolResponse: {
+                functionResponses: [
+                    { id: "c1", name: "hung", response: { error: "the simulator didn't answer within 30 s" } },
+                ],
+            },
+        },
+    ]);
+    assert.ok(chat.includes("Function hung failed: the simulator didn't answer within 30 s"));
+});
+
+test("an answered call clears its timeout", async () => {
+    const { context, api, posts, timers } = loadFunctionCalls();
+    const done = context.handleFunctionCallRequest([{ id: "c1", name: "quick" }]);
+    posts[0].resolve({ response: "ok" });
+    await done;
+    assert.equal(timers[0].cleared, true);
+    assert.deepEqual(plainJson(api.sent[0].toolResponse.functionResponses[0].response), {
+        result: { response: "ok" },
+    });
+});
+
+/** Objects from the VM context have another realm's prototypes. */
+function plainJson(value) {
+    return JSON.parse(JSON.stringify(value));
+}
