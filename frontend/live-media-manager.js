@@ -964,6 +964,7 @@ class G3RtcWebRtcManager {
         }, WEBRTC_CONNECT_TIMEOUT_MS);
     }
 
+    /** @param {string | null} [deviceId] - The microphone to use; null for the default. */
     async startMicrophone(deviceId = null) {
         this.stopMicrophone();
         const generation = this.micGeneration;

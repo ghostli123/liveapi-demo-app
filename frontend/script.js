@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * Global application state and UI coordinator for the Gemini Realtime Demo web application.
  * Manages WebSocket connections, media devices (camera/mic/screen), Cookie persistence,
@@ -5,8 +6,8 @@
  */
 
 /* global GeminiLiveAPI, LiveAudioOutputManager, LiveVideoOutputManager, LiveAudioInputManager,
-   MicLevelMeter, LiveVideoManager, LiveScreenManager -- from gemini-live-api.js and
-   live-media-manager.js, loaded before this script (see index.html) */
+   MicLevelMeter, LiveVideoManager, LiveScreenManager, getAvatarVideoElement -- from
+   gemini-live-api.js and live-media-manager.js, loaded before this script (see index.html) */
 
 // --- Application Configuration ---
 const isHttps = window.location.protocol === "https:";
@@ -19,37 +20,39 @@ const AppConfig = {
     FR_SERVICE_URL: "/api/post_endpoint",
 };
 
-// --- Application State Coordinator ---
-const AppState = {
-    geminiLiveApi: null,
-    liveAudioOutputManager: null,
-    liveVideoOutputManager: null,
-    liveAudioInputManager: null,
-    liveVideoManager: null,
-    liveScreenManager: null,
-    customVoiceBase64: "",
-    functionCallDefinition: null,
-    mediaRecorder: null,
-    audioChunks: [],
-    isRecording: false,
-    userTurnActive: false, // Between "Start speaking" and "Done speaking"
-    cancelRecording: null, // Stops the voice recording in progress, if any
-    turnStarting: false, // "Start speaking" is waiting for the microphone
-    preferredTransport: null, // The transport the user last picked
-    recordingStartTime: null,
-};
-
 // --- Secure UI Management ---
+/**
+ * The members this script uses on form controls: native inputs and selects,
+ * and their Material Web counterparts (md-outlined-select, md-checkbox, ...),
+ * which tsc has no types for. Not every control has every member.
+ * @typedef {HTMLElement & {
+ *     value: string,
+ *     checked: boolean,
+ *     disabled: boolean,
+ *     options?: Iterable<{value: string}>,
+ *     updateComplete?: Promise<unknown>,
+ * }} FormControl
+ */
+
 const AppUI = {
     getElement(id) {
         return document.getElementById(id);
+    },
+    /** @returns {FormControl | null} */
+    getControl(id) {
+        return /** @type {FormControl | null} */ (document.getElementById(id));
+    },
+    /** True if the element is hidden or missing. */
+    isHidden(id) {
+        const el = this.getElement(id);
+        return el ? el.hidden : true;
     },
     setHidden(id, hidden) {
         const el = this.getElement(id);
         if (el) el.hidden = hidden;
     },
     setDisabled(id, disabled) {
-        const el = this.getElement(id);
+        const el = this.getControl(id);
         if (el) el.disabled = disabled;
     },
     setText(id, text) {
@@ -57,15 +60,17 @@ const AppUI = {
         if (el) el.textContent = text; // Secure against XSS
     },
     getValue(id, fallback = "") {
-        const el = this.getElement(id);
+        const el = this.getControl(id);
         return el ? el.value : fallback;
     },
     getChecked(id, fallback = false) {
-        const el = this.getElement(id);
+        const el = this.getControl(id);
         return el ? el.checked : fallback;
     },
     showModal(message) {
-        const dialog = this.getElement("dialog");
+        const dialog = /** @type {(HTMLElement & {show?: () => void}) | null} */ (
+            this.getElement("dialog")
+        );
         const dialogMessage = this.getElement("dialogMessage");
         if (dialogMessage) {
             dialogMessage.textContent = message; // Secure against XSS
@@ -88,14 +93,37 @@ const AppUI = {
     },
 };
 
-// --- Immediate Manager Initialization ---
-function initApplicationManagers() {
-    AppState.geminiLiveApi = new GeminiLiveAPI(
-        AppConfig.PROXY_URL,
-        AppConfig.CONTROL_URL,
-        AppConfig.FR_SERVICE_URL
-    );
+// --- Application State Coordinator ---
+// The managers are created as the script loads (it is deferred, so the DOM is
+// parsed); initApplicationManagers() then wires their callbacks.
+const AppState = {
+    geminiLiveApi: new GeminiLiveAPI(AppConfig.PROXY_URL, AppConfig.CONTROL_URL, AppConfig.FR_SERVICE_URL),
+    liveAudioOutputManager: new LiveAudioOutputManager(),
+    liveVideoOutputManager: new LiveVideoOutputManager(),
+    liveAudioInputManager: new LiveAudioInputManager(),
+    micLevelMeter: new MicLevelMeter(() => {}), // onLevel is set in initApplicationManagers().
+    // Camera and screen sharing share the preview <video> and <canvas>.
+    liveVideoManager: new LiveVideoManager(AppUI.getElement("video"), AppUI.getElement("canvas")),
+    liveScreenManager: new LiveScreenManager(AppUI.getElement("video"), AppUI.getElement("canvas")),
+    customVoiceBase64: "",
+    /** @type {object[] | null} */
+    functionCallDefinition: null,
+    /** @type {MediaRecorder | null} */
+    mediaRecorder: null,
+    /** @type {Blob[]} */
+    audioChunks: [],
+    isRecording: false,
+    userTurnActive: false, // Between "Start speaking" and "Done speaking"
+    /** @type {(() => void) | null} */
+    cancelRecording: null, // Stops the voice recording in progress, if any
+    turnStarting: false, // "Start speaking" is waiting for the microphone
+    /** @type {string | null} */
+    preferredTransport: null, // The transport the user last picked
+    recordingStartTime: 0, // Date.now() when the voice recording started
+};
 
+// --- Manager Callbacks ---
+function initApplicationManagers() {
     AppState.geminiLiveApi.onErrorMessage = (message) => {
         AppUI.showModal(message);
         newErrorMessage(message);
@@ -128,10 +156,6 @@ function initApplicationManagers() {
         handleSessionResumptionReconnect();
     };
 
-    AppState.liveAudioOutputManager = new LiveAudioOutputManager();
-    AppState.liveVideoOutputManager = new LiveVideoOutputManager();
-    AppState.liveAudioInputManager = new LiveAudioInputManager();
-
     const showAutoplayBlocked = () => {
         AppUI.showModal(
             "The browser blocked audio and video playback. Press play on the avatar video to start it."
@@ -144,22 +168,18 @@ function initApplicationManagers() {
     }
 
     const micLevelBar = AppUI.getElement("micLevelBar");
-    AppState.micLevelMeter = new MicLevelMeter((level) => {
+    AppState.micLevelMeter.onLevel = (level) => {
         if (micLevelBar) micLevelBar.style.transform = `scaleY(${level.toFixed(3)})`;
-    });
+    };
 
     AppState.liveAudioInputManager.onNewAudioRecordingChunk = (audioData) => {
         AppState.geminiLiveApi.sendAudioMessage(audioData);
     };
 
-    const videoElement = AppUI.getElement("video");
-    const canvasElement = AppUI.getElement("canvas");
+    const videoElement = AppState.liveVideoManager.previewVideoElement;
     // Covers both camera and screen sharing, which share this element.
     videoElement.addEventListener("loadedmetadata", () => AppUI.setHidden("previewPlaceholder", true));
     videoElement.addEventListener("emptied", () => AppUI.setHidden("previewPlaceholder", false));
-
-    AppState.liveVideoManager = new LiveVideoManager(videoElement, canvasElement);
-    AppState.liveScreenManager = new LiveScreenManager(videoElement, canvasElement);
 
     AppState.liveVideoManager.onNewFrame = (b64Image) => {
         AppState.geminiLiveApi.sendImageMessage(b64Image);
@@ -195,7 +215,7 @@ const SETTINGS_KEY = "liveapi-demo-settings";
 function loadSavedSettings() {
     let saved = {};
     try {
-        saved = JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {};
+        saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "null") || {};
     } catch {
         // Missing or corrupt; start from the page defaults.
     }
@@ -213,11 +233,11 @@ function loadSavedSettings() {
 function saveSettings() {
     const settings = {};
     for (const id of PERSISTED_FIELDS) {
-        const element = AppUI.getElement(id);
+        const element = AppUI.getControl(id);
         if (element) settings[id] = element.value;
     }
     for (const id of PERSISTED_CHECKBOXES) {
-        const element = AppUI.getElement(id);
+        const element = AppUI.getControl(id);
         if (element) settings[id] = element.checked;
     }
     settings.responseModality = getSelectedResponseModality();
@@ -236,12 +256,12 @@ async function restoreSettings() {
         )
     );
     for (const id of PERSISTED_CHECKBOXES) {
-        const element = AppUI.getElement(id);
+        const element = AppUI.getControl(id);
         if (!element) continue;
         if (typeof saved[id] === "boolean") element.checked = saved[id];
         element.addEventListener("change", saveSettings);
     }
-    for (const radio of document.querySelectorAll('md-radio[name="responseModality"]')) {
+    for (const radio of getResponseModalityRadios()) {
         if (typeof saved.responseModality === "string") {
             radio.checked = radio.value === saved.responseModality;
         }
@@ -249,7 +269,7 @@ async function restoreSettings() {
     }
     toggleAvatarMode(); // Apply the restored avatar-mode layout.
     for (const id of PERSISTED_FIELDS) {
-        const element = AppUI.getElement(id);
+        const element = AppUI.getControl(id);
         if (!element) continue;
         await element.updateComplete;
         const value = saved[id];
@@ -283,6 +303,7 @@ function initDOMEventListeners() {
     // index.html has no inline on* handlers: the Content-Security-Policy
     // (backend/main.py) blocks them.
     const clickToOpen = (inputId) => () => AppUI.getElement(inputId)?.click();
+    /** @type {[string, string, (event: any) => void][]} */
     const listeners = [
         ["#cameraSource", "change", newCameraSelected],
         ["#audioSource", "change", newMicSelected],
@@ -362,24 +383,24 @@ function initDOMEventListeners() {
         voiceDropdown.addEventListener("change", selectBrandedVoice);
     }
 
-    const envSelect = AppUI.getElement("envApiHost");
+    const envSelect = AppUI.getControl("envApiHost");
     if (envSelect) {
         envSelect.addEventListener("change", handleEnvironmentChange);
     }
 
-    const modelSelect = AppUI.getElement("liveApiModel");
+    const modelSelect = AppUI.getControl("liveApiModel");
     if (modelSelect) {
         modelSelect.addEventListener("change", handleModelChange);
     }
 
-    const transportSelect = AppUI.getElement("transportMode");
+    const transportSelect = AppUI.getControl("transportMode");
     if (transportSelect) {
         transportSelect.addEventListener("change", () => {
             AppState.preferredTransport = transportSelect.value;
         });
     }
 
-    const textMessage = AppUI.getElement("text-message");
+    const textMessage = AppUI.getControl("text-message");
     if (textMessage) {
         textMessage.addEventListener("keydown", (event) => {
             if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
@@ -421,7 +442,7 @@ const PROD_US_REP_MODEL = "gemini-3.8-live";
 
 function handleEnvironmentChange() {
     const envVal = AppUI.getValue("envApiHost");
-    const modelSelect = AppUI.getElement("liveApiModel");
+    const modelSelect = AppUI.getControl("liveApiModel");
     if (!modelSelect) return;
     const isCommon = isCommonEnvironment(envVal);
     const currentModel = modelSelect.value;
@@ -437,7 +458,7 @@ function handleEnvironmentChange() {
     ) {
         modelSelect.value = "gemini-3.1-flash-live-preview-04-2026";
     }
-    const transportSelect = AppUI.getElement("transportMode");
+    const transportSelect = AppUI.getControl("transportMode");
     if (transportSelect) {
         if (isWebSocketOnlyEnvironment(envVal)) {
             if (transportSelect.value === "webrtc") transportSelect.value = "websocket";
@@ -455,12 +476,12 @@ function handleModelChange() {
         return;
     }
 
-    const locationInput = AppUI.getElement("location");
+    const locationInput = AppUI.getControl("location");
     if (locationInput && locationInput.value !== "us-central1") {
         locationInput.value = "us-central1";
     }
 
-    const envSelect = AppUI.getElement("envApiHost");
+    const envSelect = AppUI.getControl("envApiHost");
     if (!envSelect) return;
     const envVal = envSelect.value;
     if (envVal === "staging-us-rep" || envVal === "staging-common") {
@@ -516,7 +537,8 @@ async function toVoiceSample(audioData) {
 
 /** Adds a voice to the Branded Voice dropdown and selects it. */
 function addBrandedVoice(name, base64) {
-    const dropdown = AppUI.getElement("voice-dropdown");
+    const dropdown = AppUI.getControl("voice-dropdown");
+    if (!dropdown) return;
     const id = `custom-${BrandedVoices.size + 1}`;
     BrandedVoices.set(id, base64);
     const option = document.createElement("option");
@@ -528,7 +550,7 @@ function addBrandedVoice(name, base64) {
 }
 
 function selectBrandedVoice() {
-    const dropdown = AppUI.getElement("voice-dropdown");
+    const dropdown = AppUI.getControl("voice-dropdown");
     AppState.customVoiceBase64 = (dropdown && BrandedVoices.get(dropdown.value)) || "";
 }
 
@@ -592,9 +614,9 @@ function handleFcFileInputChange(event) {
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = () => {
         try {
-            const declarations = GeminiLiveAPI.toFunctionDeclarations(JSON.parse(e.target.result));
+            const declarations = GeminiLiveAPI.toFunctionDeclarations(JSON.parse(String(reader.result)));
             const unnamed = declarations.filter((d) => !d || typeof d.name !== "string");
             if (declarations.length === 0 || unnamed.length > 0) {
                 throw new Error("expected a list of function declarations, each with a name");
@@ -621,10 +643,14 @@ function removeFunctionDeclarations() {
     AppUI.setHidden("fcRemove", true);
 }
 
+/** @returns {NodeListOf<FormControl>} */
+function getResponseModalityRadios() {
+    return document.querySelectorAll('md-radio[name="responseModality"]');
+}
+
 function getSelectedResponseModality() {
-    const radioButtons = document.querySelectorAll('md-radio[name="responseModality"]');
     let selectedValue = "VIDEO";
-    for (const radioButton of radioButtons) {
+    for (const radioButton of getResponseModalityRadios()) {
         if (radioButton.checked) {
             selectedValue = radioButton.value;
             break;
@@ -691,10 +717,10 @@ function handleReceiveResponse(messageResponse) {
             break;
         case "RESUMPTION": {
             console.log("Resumption handle received: ", messageResponse.data);
-            const enableResumption = AppUI.getElement("resumption");
+            const enableResumption = AppUI.getControl("resumption");
             if (enableResumption) enableResumption.checked = true;
 
-            const resumptionHandle = AppUI.getElement("handle");
+            const resumptionHandle = AppUI.getControl("handle");
             if (resumptionHandle) resumptionHandle.value = messageResponse.data;
             break;
         }
@@ -766,7 +792,12 @@ function handleReceiveResponse(messageResponse) {
 // --- Response latency ---
 // Time from the end of the user's turn to the model's first audio or text.
 // For speech, the end is approximated by the last input transcript.
-const LatencyState = { turnEndedAt: null, source: "", responding: false };
+const LatencyState = {
+    /** @type {number | null} */
+    turnEndedAt: null,
+    source: "",
+    responding: false,
+};
 
 /**
  * Records (or moves) the end of the user's turn. Input transcripts trail the
@@ -801,6 +832,7 @@ function resetLatencyTurn() {
 // --- Connection age ---
 // Time since the current connection was set up (reset by resumption). The
 // server sends GoAway based on connection age, so this helps when testing it.
+/** @type {number | null} */
 let connectionTimer = null;
 
 function startConnectionTimer() {
@@ -896,7 +928,7 @@ async function handleFunctionCallRequest(functionCalls) {
         // The connection that made these calls has closed or been replaced;
         // the new one doesn't know their IDs.
         console.warn("Dropping responses to calls from a previous connection.");
-        if (AppUI.getElement("disconnected").hidden) {
+        if (AppUI.isHidden("disconnected")) {
             newSystemMessage(
                 "The connection was replaced while function calls were running, so their " +
                 "results weren't sent. Ask again if the model is waiting for them."
@@ -910,6 +942,7 @@ async function handleFunctionCallRequest(functionCalls) {
 // --- Chat Interface Helpers ---
 const ChatState = {
     // The chat line each transcript stream is appending to, if any.
+    /** @type {{input: HTMLElement | null, output: HTMLElement | null}} */
     transcriptLines: { input: null, output: null },
 };
 
@@ -940,7 +973,7 @@ function addMessageToChat(text, kind = "system") {
 function newSystemMessage(message) {
     // Collapse repeats (e.g. several interruptions in a row) into a count.
     const textChat = AppUI.getElement("text-chat");
-    const last = textChat && textChat.lastElementChild;
+    const last = /** @type {HTMLElement | null} */ (textChat && textChat.lastElementChild);
     if (last && last.classList.contains("chat-system") && last.dataset.message === message) {
         last.dataset.count = String(Number(last.dataset.count || 1) + 1);
         last.textContent = `${message} (×${last.dataset.count})`;
@@ -957,18 +990,20 @@ function newErrorMessage(message) {
 
 /**
  * Streams transcript text into one chat line per utterance.
+ * @param {"input"|"output"} stream
+ * @param {string} text
  * @param {{fixSpacing?: boolean}} [options] - fixSpacing: add the space that
  *     transcript fragments sometimes omit after a sentence.
  */
 function appendTranscript(stream, text, { fixSpacing = true } = {}) {
-    if (!text) return;
+    const textChat = AppUI.getElement("text-chat");
+    if (!text || !textChat) return;
     let line = ChatState.transcriptLines[stream];
     if (!line || !line.isConnected) {
         line = addMessageToChat(TRANSCRIPT_LABELS[stream], stream === "input" ? "user" : "model");
         ChatState.transcriptLines[stream] = line;
     }
     if (!line) return;
-    const textChat = AppUI.getElement("text-chat");
     const atBottom = textChat.scrollHeight - textChat.scrollTop - textChat.clientHeight < 24;
     // Fragments don't always carry the space after a sentence ("dog.She").
     if (fixSpacing && /[.!?]$/.test(line.textContent) && /^\p{L}/u.test(text)) {
@@ -986,7 +1021,7 @@ function closeTranscriptLine(stream) {
 }
 
 function newUserMessage() {
-    const textMessage = AppUI.getElement("text-message");
+    const textMessage = AppUI.getControl("text-message");
     if (!textMessage) return;
 
     const val = textMessage.value;
@@ -1234,7 +1269,7 @@ function setMaterialSelect(allOptions, selectElement) {
             : "";
     selectElement.replaceChildren(); // Clean old options securely
     allOptions.forEach((optionData) => {
-        const option = document.createElement("md-select-option");
+        const option = /** @type {FormControl} */ (document.createElement("md-select-option"));
         option.value = optionData.id;
 
         const slotDiv = document.createElement("div");
@@ -1315,8 +1350,8 @@ function setAppStatus(status) {
 
 /** Switches between the "connected" and "model speaking" badges. */
 function setModelSpeaking(speaking) {
-    const connected = !AppUI.getElement("connected").hidden;
-    const speakingNow = !AppUI.getElement("speaking").hidden;
+    const connected = !AppUI.isHidden("connected");
+    const speakingNow = !AppUI.isHidden("speaking");
     if (speaking && connected) {
         setAppStatus("speaking");
     } else if (!speaking && speakingNow) {
@@ -1327,6 +1362,7 @@ function setModelSpeaking(speaking) {
 function setMediaButtonsEnabled(enabled) {
     for (const id of ["micOffBtn", "cameraOffBtn", "screenBtn"]) {
         const element = AppUI.getElement(id);
+        /** @type {FormControl | null} */
         const iconBtn = element && element.querySelector("md-filled-icon-button");
         if (iconBtn) iconBtn.disabled = !enabled;
     }
@@ -1350,7 +1386,7 @@ function endSession() {
     AppState.liveAudioOutputManager.clear();
     // The next Connect starts a new conversation unless the user pastes a
     // handle back in, so keep the last one where they can find it.
-    const handleInput = AppUI.getElement("handle");
+    const handleInput = AppUI.getControl("handle");
     if (handleInput && handleInput.value) {
         newSystemMessage(
             `To resume this conversation later, enter this handle in Advanced Settings: ${handleInput.value}`
@@ -1369,7 +1405,7 @@ function connectBtnClick() {
     // Safari also needs play() on the video element during the click, or it
     // refuses to start the avatar's sound when the stream arrives later.
     AppState.liveAudioOutputManager.resume();
-    const avatarVideo = AppUI.getElement("video_player");
+    const avatarVideo = getAvatarVideoElement();
     if (avatarVideo) {
         avatarVideo.muted = false;
         avatarVideo.play().catch(() => {}); // No source yet; this only unlocks.
@@ -1387,7 +1423,7 @@ function connectBtnClick() {
         transportMode === "webrtc"
     ) {
         transportMode = "websocket";
-        const transportSelect = AppUI.getElement("transportMode");
+        const transportSelect = AppUI.getControl("transportMode");
         if (transportSelect) {
             transportSelect.value = "websocket";
         }
@@ -1443,7 +1479,7 @@ function connectBtnClick() {
     );
     // The backend normalizes the location for the host; use the same value in
     // the model URI.
-    const locationInput = AppUI.getElement("location");
+    const locationInput = AppUI.getControl("location");
     if (locationInput) locationInput.value = locationInput.value.trim().toLowerCase();
     AppState.geminiLiveApi.setLocation(AppUI.getValue("location"));
     AppState.geminiLiveApi.setApiHost(AppUI.getValue("envApiHost"));
@@ -1468,7 +1504,7 @@ function openModal() {
     const modal = AppUI.getElement("brandedVoiceModal");
     if (modal) modal.style.display = "flex";
 
-    const nameInput = AppUI.getElement("newVoiceName");
+    const nameInput = AppUI.getControl("newVoiceName");
     if (nameInput) nameInput.value = "";
 
     AppUI.setDisabled("recordButton", false);
@@ -1489,7 +1525,7 @@ function closeModal() {
 }
 
 async function handleRecordClick() {
-    const nameInput = AppUI.getElement("newVoiceName");
+    const nameInput = AppUI.getControl("newVoiceName");
     const voiceName = nameInput ? nameInput.value.trim() : "";
     if (voiceName === "") {
         AppUI.showModal("Please enter a name for the reference voice.");
@@ -1498,7 +1534,7 @@ async function handleRecordClick() {
     }
 
     if (AppState.isRecording) {
-        const duration = (new Date() - AppState.recordingStartTime) / 1000;
+        const duration = (Date.now() - AppState.recordingStartTime) / 1000;
         if (duration < 10) {
             AppUI.showModal(
                 "A recording of at least 10 seconds is required to ensure reference voice quality."
@@ -1517,6 +1553,7 @@ async function handleRecordClick() {
 
         AppState.isRecording = false;
     } else {
+        /** @type {MediaStream | null} */
         let stream = null;
         try {
             stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -1538,7 +1575,7 @@ async function handleRecordClick() {
             recorder.onstop = async () => {
                 // Release the microphone; otherwise the browser keeps showing
                 // it as in use.
-                stream.getTracks().forEach((track) => track.stop());
+                recorder.stream.getTracks().forEach((track) => track.stop());
                 AppState.cancelRecording = null;
                 if (cancelled) {
                     AppState.audioChunks = [];
@@ -1562,7 +1599,7 @@ async function handleRecordClick() {
             };
 
             recorder.start();
-            AppState.recordingStartTime = new Date();
+            AppState.recordingStartTime = Date.now();
             AppState.isRecording = true;
 
             AppUI.setButtonWithIcon("recordButton", "stop", "Stop Recording");
@@ -1649,7 +1686,7 @@ function downloadBlob(blob, filename) {
 
 function toggleSchedulingDisable() {
     const toolBehaviorVal = AppUI.getValue("toolBehavior");
-    const fcScheduling = AppUI.getElement("fcScheduling");
+    const fcScheduling = AppUI.getControl("fcScheduling");
     if (fcScheduling) {
         fcScheduling.disabled = (toolBehaviorVal === "BLOCKING");
     }
@@ -1667,27 +1704,6 @@ function toggleAvatarMode() {
     }
 }
 
-function showDialogWithMessage(messageText) {
-    AppUI.showModal(messageText);
-}
-
 // --- Expose Public HTML Interface on Global Window Scope ---
-window.AppState = AppState;
-window.AppUI = AppUI;
-window.connectBtnClick = connectBtnClick;
-window.disconnectBtnClick = disconnectBtnClick;
-window.micBtnClick = micBtnClick;
-window.micOffBtnClick = micOffBtnClick;
-window.turnBtnClick = turnBtnClick;
-window.removeFunctionDeclarations = removeFunctionDeclarations;
-window.useSampleAvatar = useSampleAvatar;
-window.useStockAvatar = useStockAvatar;
-window.cameraBtnClick = cameraBtnClick;
-window.cameraOffBtnClick = cameraOffBtnClick;
-window.screenShareBtnClick = screenShareBtnClick;
-window.newUserMessage = newUserMessage;
-window.newCameraSelected = newCameraSelected;
-window.newMicSelected = newMicSelected;
-window.toggleSchedulingDisable = toggleSchedulingDisable;
-window.toggleAvatarMode = toggleAvatarMode;
-window.showDialogWithMessage = showDialogWithMessage;
+// Top-level functions are already properties of window; the consts aren't.
+Object.assign(window, { AppState, AppUI });
