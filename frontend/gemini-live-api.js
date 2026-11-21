@@ -45,7 +45,9 @@ class GeminiLiveResponseMessage {
         }
 
         const toolCall = field(raw, "toolCall", "tool_call");
-        const functionCalls = list(field(toolCall, "functionCalls", "function_calls"));
+        const functionCalls = list(field(toolCall, "functionCalls", "function_calls")).filter(
+            (call) => call && typeof call === "object"
+        );
         if (functionCalls.length) {
             add("FUNCTION_CALL", functionCalls);
         }
@@ -1301,15 +1303,17 @@ class GeminiLiveAPI {
      * Executes an HTTP POST request and parses the JSON response.
      * @param {string} url - Target HTTP URL.
      * @param {Object} data - JSON payload to post.
+     * @param {{signal?: AbortSignal}} [options] - `signal` aborts the request.
      * @returns {Promise<Object>} Parsed JSON response.
      */
-    async sendPostRequest(url, data) {
+    async sendPostRequest(url, data, { signal } = {}) {
         const response = await fetch(url, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
             },
             body: JSON.stringify(data),
+            signal,
         });
 
         /** @type {any} */

@@ -812,7 +812,7 @@ function handleReceiveResponse(messageResponse) {
             handleFunctionCallRequest(messageResponse.data);
             break;
         case "FUNCTION_CALL_CANCELLATION":
-            newSystemMessage("Function calls cancelled: " + messageResponse.data.join(", "));
+            cancelFunctionCalls(messageResponse.data);
             break;
         case "USAGE":
             showUsage(messageResponse.data);
@@ -915,24 +915,57 @@ async function handleSessionResumptionReconnect() {
     }
 }
 
-async function simulateFunctionResponse(funcCall, sessionId) {
+// The simulator is a Gemini call; with BLOCKING tools the model waits for it.
+const FUNCTION_RESPONSE_TIMEOUT_MS = 30000;
+
+// Function calls waiting for or running their simulation, by call ID, so a
+// toolCallCancellation can stop them.
+/** @type {Map<string, AbortController>} */
+const pendingFunctionCalls = new Map();
+
+/** Handles a toolCallCancellation: the calls with these IDs get no response. */
+function cancelFunctionCalls(ids) {
+    for (const id of ids) {
+        pendingFunctionCalls.get(id)?.abort("cancelled");
+    }
+    newSystemMessage("Function calls cancelled: " + ids.join(", "));
+}
+
+/**
+ * Asks the backend's simulator for a function's response. Returns null if the
+ * server cancelled the call meanwhile.
+ * @param {AbortController} controller - Aborted with "cancelled" or "timeout".
+ */
+async function simulateFunctionResponse(funcCall, sessionId, controller) {
+    const timer = setTimeout(() => controller.abort("timeout"), FUNCTION_RESPONSE_TIMEOUT_MS);
     try {
         return {
-            result: await AppState.geminiLiveApi.sendPostRequest(AppState.geminiLiveApi.frUrl, {
-                objective: "fr_generate",
-                session_id: sessionId,
-                functionName: funcCall.name,
-                functionArgs: funcCall.args,
-            }),
+            result: await AppState.geminiLiveApi.sendPostRequest(
+                AppState.geminiLiveApi.frUrl,
+                {
+                    objective: "fr_generate",
+                    session_id: sessionId,
+                    functionName: funcCall.name,
+                    functionArgs: funcCall.args,
+                },
+                { signal: controller.signal }
+            ),
         };
     } catch (error) {
+        if (controller.signal.reason === "cancelled") return null;
+        const message =
+            controller.signal.reason === "timeout"
+                ? `the simulator didn't answer within ${FUNCTION_RESPONSE_TIMEOUT_MS / 1000} s`
+                : error.message;
         console.error(`Simulating ${funcCall.name} failed:`, error);
         // After a reconnect the old session is gone; that isn't the function's fault.
         if (AppState.geminiLiveApi.sessionId === sessionId) {
-            newErrorMessage(`Function ${funcCall.name} failed: ${error.message}`);
+            newErrorMessage(`Function ${funcCall.name} failed: ${message}`);
         }
         // Answer anyway: with BLOCKING tools the model waits for a response.
-        return { error: error.message };
+        return { error: message };
+    } finally {
+        clearTimeout(timer);
     }
 }
 
@@ -941,9 +974,12 @@ async function handleFunctionCallRequest(functionCalls) {
     const api = AppState.geminiLiveApi;
     const webSocket = api.webSocket;
     const sessionId = api.sessionId;
-    for (const funcCall of functionCalls) {
+    const controllers = functionCalls.map((funcCall) => {
         newSystemMessage(`Function call: ${funcCall.name}(${JSON.stringify(funcCall.args || {})})`);
-    }
+        const controller = new AbortController();
+        if (funcCall.id) pendingFunctionCalls.set(funcCall.id, controller);
+        return controller;
+    });
 
     // Scheduling only applies to NON_BLOCKING functions.
     const schedulingVal =
@@ -951,13 +987,22 @@ async function handleFunctionCallRequest(functionCalls) {
             ? AppUI.getValue("fcScheduling", "WHEN_IDLE")
             : null;
     // Sequential, since the simulator is one chat session per connection.
-    const functionResponses = [];
-    for (const funcCall of functionCalls) {
+    const responses = [];
+    for (const [i, funcCall] of functionCalls.entries()) {
         if (api.webSocket !== webSocket) break;
-        const response = await simulateFunctionResponse(funcCall, sessionId);
+        if (controllers[i].signal.aborted) continue; // Cancelled before it started.
+        const response = await simulateFunctionResponse(funcCall, sessionId, controllers[i]);
+        if (!response) continue;
         if (schedulingVal) response.scheduling = schedulingVal;
-        functionResponses.push({ id: funcCall.id, name: funcCall.name, response });
+        responses.push({ controller: controllers[i], item: { id: funcCall.id, name: funcCall.name, response } });
     }
+    for (const [i, funcCall] of functionCalls.entries()) {
+        if (pendingFunctionCalls.get(funcCall.id) === controllers[i]) pendingFunctionCalls.delete(funcCall.id);
+    }
+    // Calls cancelled while a later one ran aren't answered either.
+    const functionResponses = responses
+        .filter(({ controller }) => controller.signal.reason !== "cancelled")
+        .map(({ item }) => item);
     if (AppState.geminiLiveApi.webSocket !== webSocket) {
         // The connection that made these calls has closed or been replaced;
         // the new one doesn't know their IDs.
@@ -970,6 +1015,7 @@ async function handleFunctionCallRequest(functionCalls) {
         }
         return;
     }
+    if (!functionResponses.length) return; // All cancelled.
     AppState.geminiLiveApi.sendMessage({ toolResponse: { functionResponses } });
 }
 

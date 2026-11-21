@@ -150,6 +150,16 @@ test("parseAll ignores parts, calls and ids that aren't lists", () => {
     assert.equal(events[1].data, "");
 });
 
+test("parseAll drops function calls that aren't objects and keeps the rest", () => {
+    const events = GeminiLiveResponseMessage.parseAll({
+        toolCall: { functionCalls: [null, "f", 3, { id: "c1", name: "f" }] },
+    });
+    assert.deepEqual(types(events), ["FUNCTION_CALL"]);
+    assert.deepEqual(plain(events[0].data), [{ id: "c1", name: "f" }]);
+
+    assert.deepEqual(types(GeminiLiveResponseMessage.parseAll({ toolCall: { functionCalls: [null] } })), []);
+});
+
 test("a non-string resumption handle is ignored, not offered for a resume", () => {
     // A stored non-string handle made the resume's setup throw on .trim().
     const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
