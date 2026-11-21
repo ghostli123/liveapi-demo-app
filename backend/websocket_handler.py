@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging as std_logging
 import ssl
 import time
 from collections.abc import Awaitable, Callable
@@ -24,6 +25,11 @@ _RESERVED_CLOSE_CODES = frozenset({1005, 1006, 1015})
 # A close frame carries at most 123 bytes of reason after the 2-byte code.
 _MAX_CLOSE_REASON_BYTES = 123
 _DEBUG_PREVIEW_CHARS = 300
+# websockets logs every handshake header at debug level, the Authorization
+# header with the access token included, and --debug sets the root logger to
+# debug. The upstream connection logs here instead, a logger kept at INFO.
+_UPSTREAM_LOGGER = std_logging.getLogger("websockets.client.upstream")
+_UPSTREAM_LOGGER.setLevel(std_logging.INFO)
 
 
 def truncate_close_reason(reason: str) -> str:
@@ -141,6 +147,7 @@ class WebsocketHandler:
             "ping_interval": self.keepalive_s,
             "ping_timeout": self.keepalive_s,
             "close_timeout": UPSTREAM_CLOSE_TIMEOUT_S,
+            "logger": _UPSTREAM_LOGGER,
         }
         if token is None:
             return websockets.connect(self.liveapi_service_url, **options)
