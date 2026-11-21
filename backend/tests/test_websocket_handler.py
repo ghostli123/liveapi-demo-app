@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import types
 import unittest
@@ -123,6 +124,44 @@ class UpstreamRedirectTest(unittest.IsolatedAsyncioTestCase):
             websocket_handler.describe_connect_error(caught.exception),
             "Upstream HTTP 302",
         )
+
+
+class FakeConnection:
+    def __init__(self, recv_error=None):
+        self.recv_error = recv_error
+        self.close_code = None
+        self.close_reason = ""
+
+    async def recv(self):
+        if self.recv_error:
+            raise self.recv_error
+        await asyncio.Event().wait()
+
+    async def send(self, message):
+        pass
+
+    async def close(self, code=1000, reason=""):
+        self.close_code = code
+
+
+class ProxyErrorTest(unittest.IsolatedAsyncioTestCase):
+    async def test_unexpected_relay_error_ends_session_with_1011(self):
+        # The finished task's error was never retrieved, so the session ended
+        # as a clean 1000 and nothing was logged.
+        upstream = FakeConnection(recv_error=RuntimeError("boom"))
+        handler = websocket_handler.WebsocketHandler(
+            "ws://unused", "s", FakeConnection(), keepalive_s=None
+        )
+        with mock.patch.object(
+            handler, "_connect_upstream", return_value=asyncio.sleep(0, upstream)
+        ):
+            with self.assertLogs("absl", level="ERROR") as logs:
+                await handler.create_proxy()
+        self.assertEqual(upstream.close_code, 1011)
+        self.assertEqual(
+            handler.client_close_frame(), (1011, "Proxy error: RuntimeError")
+        )
+        self.assertIn("boom", "\n".join(logs.output))
 
 
 if __name__ == "__main__":
