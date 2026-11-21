@@ -107,6 +107,73 @@ test("parseAll ignores resumption updates without a handle", () => {
     assert.equal(events.length, 0);
 });
 
+test("parseAll skips malformed parts and keeps the rest of the message", () => {
+    const events = GeminiLiveResponseMessage.parseAll({
+        setupComplete: { sessionId: 7 },
+        serverContent: {
+            modelTurn: {
+                parts: [
+                    null,
+                    "text",
+                    { inlineData: { mimeType: 5, data: "AAA=" } },
+                    { inlineData: { mimeType: "video/mp4", data: { bad: 1 } } },
+                    { text: ["not", "a", "string"] },
+                    { text: "hi" },
+                ],
+            },
+            outputTranscription: { text: 3 },
+            turnComplete: true,
+        },
+    });
+    assert.deepEqual(types(events), [
+        "SETUP COMPLETE",
+        "AUDIO",
+        "TEXT",
+        "OUTPUT_TRANSCRIPTION",
+        "END_OF_TURN",
+    ]);
+    assert.equal(events[0].sessionId, "");
+    assert.equal(events[1].mimeType, "");
+    assert.equal(events[2].data, "hi");
+    assert.equal(events[3].data, "");
+});
+
+test("parseAll ignores parts, calls and ids that aren't lists", () => {
+    const events = GeminiLiveResponseMessage.parseAll({
+        serverContent: { modelTurn: { parts: { text: "x" } } },
+        toolCall: { functionCalls: { id: "c1" } },
+        toolCallCancellation: { ids: "c0" },
+        goAway: { timeLeft: 10 },
+    });
+    assert.deepEqual(types(events), ["FUNCTION_CALL_CANCELLATION", "GO_AWAY"]);
+    assert.deepEqual(plain(events[0].data), []);
+    assert.equal(events[1].data, "");
+});
+
+test("a non-string resumption handle is ignored, not offered for a resume", () => {
+    // A stored non-string handle made the resume's setup throw on .trim().
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    api.webSocket = new FakeWebSocket();
+    api.enableSessionResumption = true;
+    const received = [];
+    api.onReceiveResponse = (message) => received.push(message.type);
+    api.onConnectionStarted = () => {};
+    api.onReceiveMessage({
+        data: JSON.stringify({
+            setupComplete: {},
+            sessionResumptionUpdate: { newHandle: { id: "h1" } },
+        }),
+    });
+    assert.deepEqual(received, ["SETUP COMPLETE"]);
+    assert.equal(api.canResume(), false);
+
+    api.onReceiveMessage({
+        data: JSON.stringify({ sessionResumptionUpdate: { newHandle: "h2" } }),
+    });
+    assert.equal(api.latestResumptionHandle, "h2");
+    assert.equal(api.canResume(), true);
+});
+
 test("tools put behavior on each function declaration, only for NON_BLOCKING", () => {
     const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
     api.setFunctionCall([{ name: "f" }, { name: "g" }]);
