@@ -138,6 +138,7 @@ function initApplicationManagers() {
         );
     };
     AppState.liveVideoOutputManager.onAutoplayBlocked = showAutoplayBlocked;
+    AppState.liveVideoOutputManager.onPlaybackError = (message) => newErrorMessage(message);
     if (AppState.geminiLiveApi.webRtcManager) {
         AppState.geminiLiveApi.webRtcManager.onAutoplayBlocked = showAutoplayBlocked;
     }
