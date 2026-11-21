@@ -20,6 +20,8 @@ DEFAULT_KEEPALIVE_S = 20
 # after a missed pong. A dead upstream is detected within
 # 2 * keepalive + this many seconds.
 UPSTREAM_CLOSE_TIMEOUT_S = 10
+# How long the upstream WebSocket handshake may take (websockets' default too).
+UPSTREAM_OPEN_TIMEOUT_S = 10
 # Close codes that must not appear in a close frame (RFC 6455, section 7.4.1).
 _RESERVED_CLOSE_CODES = frozenset({1005, 1006, 1015})
 # A close frame carries at most 123 bytes of reason after the 2-byte code.
@@ -103,9 +105,9 @@ class WebsocketHandler:
         logging.info("Websocket handler initialized for session: %s", self.session_id)
 
     async def proxy_task(
-        self, source_websocket, target_websocket, service_name: str
+        self, source_websocket, target_websocket, service_name: str, pending=()
     ) -> None:
-        """Forwards messages from source to target until either side closes.
+        """Forwards pending, then messages from source to target, until either side closes.
 
         Messages are forwarded as-is, without parsing: video frames are large,
         and re-encoding them cost more CPU than the rest of the proxy combined.
@@ -113,6 +115,9 @@ class WebsocketHandler:
         sends its JSON that way) become text frames, since the browser client
         only handles text frames.
         """
+        for message in pending:
+            if not await self._forward(message, target_websocket, service_name):
+                return
         while True:
             try:
                 message = await source_websocket.recv()
@@ -123,42 +128,49 @@ class WebsocketHandler:
                     "%s: source closed for session %s", service_name, self.session_id
                 )
                 return
-            if isinstance(message, bytes):
-                try:
-                    message = message.decode("utf-8")
-                except UnicodeDecodeError:
-                    pass
-            if self.debug_mode:
-                preview = (
-                    message[:_DEBUG_PREVIEW_CHARS]
-                    if isinstance(message, str)
-                    else "<binary>"
-                )
-                logging.debug(
-                    "%s proxying %d bytes: %s", service_name, len(message), preview
-                )
-            try:
-                await target_websocket.send(message)
-            # The target closed; aiohttp and websockets raise different types.
-            except Exception as e:
-                if target_websocket is self.client_websocket:
-                    self.client_closed = True
-                logging.info(
-                    "%s: target closed for session %s (%s)",
-                    service_name,
-                    self.session_id,
-                    e,
-                )
+            if not await self._forward(message, target_websocket, service_name):
                 return
-            counts = self.traffic[service_name]
-            counts[0] += 1
-            counts[1] += len(message)
+
+    async def _forward(self, message, target_websocket, service_name: str) -> bool:
+        """Sends one message to target; False if target has closed."""
+        if isinstance(message, bytes):
+            try:
+                message = message.decode("utf-8")
+            except UnicodeDecodeError:
+                pass
+        if self.debug_mode:
+            preview = (
+                message[:_DEBUG_PREVIEW_CHARS]
+                if isinstance(message, str)
+                else "<binary>"
+            )
+            logging.debug(
+                "%s proxying %d bytes: %s", service_name, len(message), preview
+            )
+        try:
+            await target_websocket.send(message)
+        # The target closed; aiohttp and websockets raise different types.
+        except Exception as e:
+            if target_websocket is self.client_websocket:
+                self.client_closed = True
+            logging.info(
+                "%s: target closed for session %s (%s)",
+                service_name,
+                self.session_id,
+                e,
+            )
+            return False
+        counts = self.traffic[service_name]
+        counts[0] += 1
+        counts[1] += len(message)
+        return True
 
     def _connect_upstream(self, token: str | None):
         options = {
             "max_size": MAX_MESSAGE_BYTES,
             "ping_interval": self.keepalive_s,
             "ping_timeout": self.keepalive_s,
+            "open_timeout": UPSTREAM_OPEN_TIMEOUT_S,
             "close_timeout": UPSTREAM_CLOSE_TIMEOUT_S,
             "logger": _UPSTREAM_LOGGER,
         }
@@ -171,16 +183,16 @@ class WebsocketHandler:
             options["ssl"] = ssl.create_default_context(cafile=certifi.where())
         return _NoRedirectConnect(self.liveapi_service_url, **options)
 
-    async def create_proxy(self) -> None:
-        """Connects upstream and relays in both directions until one side closes."""
+    async def _open_upstream(self):
+        """Opens the upstream connection; None (with close_code set) if it fails.
+
+        A failed token fetch raises instead, and its message reaches the browser.
+        """
         token = None
         if not self.liveapi_service_url.startswith("ws://"):
             token = await asyncio.to_thread(get_credentials.get_access_token)
-
         try:
-            server_websocket = await self._connect_upstream(
-                token.token if token else None
-            )
+            return await self._connect_upstream(token.token if token else None)
         except Exception as e:
             self.close_code = 1011
             self.close_reason = describe_connect_error(e)
@@ -189,6 +201,61 @@ class WebsocketHandler:
                 self.session_id,
                 self.close_reason,
             )
+            return None
+
+    async def _read_client_while_connecting(self, messages: list) -> None:
+        """Collects browser messages (the setup) until cancelled or it closes."""
+        while True:
+            try:
+                messages.append(await self.client_websocket.recv())
+            except websockets.exceptions.ConnectionClosed:
+                self.client_closed = True
+                return
+
+    async def _connect_while_watching_client(self, messages: list):
+        """Opens upstream unless the browser leaves first; returns the connection.
+
+        The token fetch and handshake can take many seconds. Reading the
+        browser meanwhile answers its Close frame, and ends the attempt so the
+        session's --max_sessions slot frees at once; otherwise it was held
+        until the upstream connection opened (or timed out) and closed again.
+        """
+        watch = asyncio.create_task(self._read_client_while_connecting(messages))
+        connect = asyncio.create_task(self._open_upstream())
+        waited = False
+        try:
+            await asyncio.wait([watch, connect], return_when=asyncio.FIRST_COMPLETED)
+            waited = True
+        finally:
+            # Cancelling recv() loses no message, in aiohttp or websockets.
+            for task in (watch, connect):
+                task.cancel()
+            await asyncio.gather(watch, connect, return_exceptions=True)
+            upstream = None
+            if not connect.cancelled() and connect.exception() is None:
+                upstream = connect.result()
+            # Keep it only if the browser was still there when it opened
+            # (watch had to be cancelled) and this task isn't being cancelled.
+            if upstream is not None and not (waited and watch.cancelled()):
+                await upstream.close(1001)
+                upstream = None
+        if self.client_closed:
+            logging.info(
+                "Browser left before the upstream connection opened for session %s",
+                self.session_id,
+            )
+            return None
+        for task in (watch, connect):
+            error = None if task.cancelled() else task.exception()
+            if error is not None:
+                raise error
+        return upstream
+
+    async def create_proxy(self) -> None:
+        """Connects upstream and relays in both directions until one side closes."""
+        early_messages: list = []
+        server_websocket = await self._connect_while_watching_client(early_messages)
+        if server_websocket is None:
             return
 
         # The token is only checked at the handshake. Don't push a refreshed
@@ -197,13 +264,16 @@ class WebsocketHandler:
         self.server_websocket = server_websocket
         started_at = self.started_at = time.monotonic()
         client_to_server = asyncio.create_task(
-            self.proxy_task(self.client_websocket, server_websocket, "c->s")
+            self.proxy_task(
+                self.client_websocket, server_websocket, "c->s", early_messages
+            )
         )
         server_to_client = asyncio.create_task(
             self.proxy_task(server_websocket, self.client_websocket, "s->c")
         )
         logging.info("Proxy established for session %s", self.session_id)
         upstream_close_code = 1000
+        error: BaseException | None = None
         try:
             await asyncio.wait(
                 [client_to_server, server_to_client],
@@ -221,12 +291,28 @@ class WebsocketHandler:
         finally:
             for task in (client_to_server, server_to_client):
                 task.cancel()
+            # Retrieves an unexpected error from either direction, which would
+            # otherwise vanish and end the session as a clean 1000.
+            for result in await asyncio.gather(
+                client_to_server, server_to_client, return_exceptions=True
+            ):
+                if isinstance(result, Exception) and error is None:
+                    error = result
+                    upstream_close_code = 1011
+                    logging.error(
+                        "Proxy failed for session %s",
+                        self.session_id,
+                        exc_info=result,
+                    )
             # Completes the closing handshake, so the upstream close code is
             # known afterwards.
             await server_websocket.close(upstream_close_code)
             self.server_websocket = None
             self.close_code = server_websocket.close_code
             self.close_reason = server_websocket.close_reason or ""
+            if error is not None:
+                self.close_code = 1011
+                self.close_reason = f"Proxy error: {type(error).__name__}"
             self._log_summary(time.monotonic() - started_at)
 
     def _log_summary(self, duration_s: float) -> None:

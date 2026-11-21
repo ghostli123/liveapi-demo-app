@@ -633,6 +633,96 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                         await asyncio.sleep(0.02)
                 self.assertEqual(handler.close_code, 1006)
 
+    async def test_slot_frees_when_browser_leaves_during_handshake(self):
+        # Nothing read the browser socket until the proxy started, so its
+        # Close went unanswered and the slot stayed held until the upstream
+        # handshake timed out.
+        async def silent(reader, writer):
+            await reader.read()
+
+        server = await asyncio.start_server(silent, "127.0.0.1", 0)
+        self.addCleanup(server.close)
+        port = server.sockets[0].getsockname()[1]
+        with flagsaver.flagsaver(
+            common_bag_ws_port=port, max_sessions=1, ws_heartbeat_s=0
+        ):
+            await self.connect_session("s43")
+            ws = await self.client.ws_connect("/ws?session_id=s43")
+            await asyncio.sleep(0.3)
+            async with asyncio.timeout(2):
+                await ws.close()
+                await self.wait_for_session_end("s43")
+                status, body = await self.connect_session("s44")
+            self.assertEqual(status, 200, body)
+
+    async def test_slot_frees_when_browser_leaves_during_token_fetch(self):
+        fetching, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def slow_token():
+            fetching.set()
+            release.wait(10)
+            raise RuntimeError("No access token")
+
+        with (
+            mock.patch.object(main.get_credentials, "get_access_token", slow_token),
+            flagsaver.flagsaver(max_sessions=1, ws_heartbeat_s=0),
+        ):
+            await self.connect_session("s45", endpoint="aiplatform.googleapis.com")
+            ws = await self.client.ws_connect("/ws?session_id=s45")
+            await asyncio.to_thread(fetching.wait, 5)
+            async with asyncio.timeout(2):
+                await ws.close()
+                await self.wait_for_session_end("s45")
+                status, body = await self.connect_session("s46")
+            self.assertEqual(status, 200, body)
+
+    async def test_messages_sent_while_connecting_are_forwarded(self):
+        # The browser sends its setup as soon as the socket opens, while the
+        # proxy is still connecting upstream.
+        open_upstream = websocket_handler.WebsocketHandler._open_upstream
+
+        async def slow_open(handler):
+            await asyncio.sleep(0.3)
+            return await open_upstream(handler)
+
+        async with FakeUpstream() as upstream:
+            with (
+                flagsaver.flagsaver(common_bag_ws_port=upstream.port),
+                mock.patch.object(
+                    websocket_handler.WebsocketHandler, "_open_upstream", slow_open
+                ),
+            ):
+                await self.connect_session("s47")
+                ws = await self.client.ws_connect("/ws?session_id=s47")
+                await ws.send_str("setup")
+                await ws.send_bytes(b"second")
+                first = await asyncio.wait_for(ws.receive(), 5)
+                second = await asyncio.wait_for(ws.receive(), 5)
+                await ws.close()
+                await self.wait_for_session_end("s47")
+        self.assertEqual(json.loads(first.data), {"echo": "setup"})
+        self.assertEqual(json.loads(second.data), {"echo": "second"})
+        self.assertEqual(upstream.received, ["setup", "second"])
+
+    async def test_upstream_handshake_times_out(self):
+        async def silent(reader, writer):
+            await reader.read()
+
+        server = await asyncio.start_server(silent, "127.0.0.1", 0)
+        self.addCleanup(server.close)
+        port = server.sockets[0].getsockname()[1]
+        with (
+            flagsaver.flagsaver(common_bag_ws_port=port),
+            mock.patch.object(websocket_handler, "UPSTREAM_OPEN_TIMEOUT_S", 0.3),
+        ):
+            await self.connect_session("s48")
+            ws = await self.client.ws_connect("/ws?session_id=s48")
+            msg = await asyncio.wait_for(ws.receive(), 5)
+        self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(msg.data, 1011)
+        self.assertIn("timed out during handshake", str(msg.extra))
+
     async def test_concurrent_websockets_for_one_session(self):
         # The /ws handler attached itself to the record only after
         # ws.prepare, so two requests could both pass the 409 check.
