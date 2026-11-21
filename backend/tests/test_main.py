@@ -780,6 +780,51 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(second.data), {"echo": "second"})
         self.assertEqual(upstream.received, ["setup", "second"])
 
+    async def test_too_much_data_while_connecting_closes_the_browser(self):
+        # Nothing pushes back on the browser until the relay starts, so the
+        # proxy held all of it (336 MB in a second, measured).
+        open_upstream = websocket_handler.WebsocketHandler._open_upstream
+        opened = asyncio.Event()
+
+        async def slow_open(handler):
+            await opened.wait()
+            return await open_upstream(handler)
+
+        async with FakeUpstream() as upstream:
+            with (
+                flagsaver.flagsaver(common_bag_ws_port=upstream.port),
+                mock.patch.object(
+                    websocket_handler.WebsocketHandler, "_open_upstream", slow_open
+                ),
+                mock.patch.object(websocket_handler, "MAX_PENDING_CLIENT_BYTES", 1000),
+            ):
+                await self.connect_session("s49")
+                ws = await self.client.ws_connect("/ws?session_id=s49")
+                await ws.send_str("x" * 600)
+                await ws.send_bytes(b"y" * 400)  # Exactly the limit.
+                await asyncio.sleep(0.3)
+                opened.set()
+                echo = await asyncio.wait_for(ws.receive(), 5)
+                await ws.close()
+                await self.wait_for_session_end("s49")
+                opened.clear()
+
+                await self.connect_session("s50")
+                ws = await self.client.ws_connect("/ws?session_id=s50")
+                await ws.send_str("x" * 600)
+                await ws.send_bytes(b"y" * 401)
+                msg = await asyncio.wait_for(ws.receive(), 5)
+                await self.wait_for_session_end("s50")
+        self.assertEqual(json.loads(echo.data), {"echo": "x" * 600})
+        self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(msg.data, 1009)
+        self.assertEqual(
+            msg.extra, "Too much data sent before the Live API connection opened"
+        )
+        # The second session never reached upstream.
+        self.assertEqual(upstream.received, ["x" * 600, "y" * 400])
+        self.assertEqual(len(upstream.close_codes), 1)
+
     async def test_upstream_handshake_times_out(self):
         async def silent(reader, writer):
             await reader.read()

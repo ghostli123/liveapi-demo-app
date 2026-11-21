@@ -14,6 +14,11 @@ from absl import logging
 import get_credentials
 
 MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+# Most bytes of browser messages held while the upstream connection opens,
+# when nothing pushes back on the browser yet. The setup message is the only
+# large one: at most ~46 MB, with a 20 MB avatar image and a 5-minute voice
+# sample in base64. A browser that sends more is closed with 1009.
+MAX_PENDING_CLIENT_BYTES = 64 * 1024 * 1024
 # Seconds between pings to the Live API, and how long to wait for each pong.
 DEFAULT_KEEPALIVE_S = 20
 # How long to wait for upstream to acknowledge a close, including the one sent
@@ -204,13 +209,26 @@ class WebsocketHandler:
             return None
 
     async def _read_client_while_connecting(self, messages: list) -> None:
-        """Collects browser messages (the setup) until cancelled or it closes."""
+        """Collects browser messages (the setup) until cancelled or it closes.
+
+        Returns early, with close_code set, once they would exceed
+        MAX_PENDING_CLIENT_BYTES.
+        """
+        pending_bytes = 0
         while True:
             try:
-                messages.append(await self.client_websocket.recv())
+                message = await self.client_websocket.recv()
             except websockets.exceptions.ConnectionClosed:
                 self.client_closed = True
                 return
+            pending_bytes += len(message)
+            if pending_bytes > MAX_PENDING_CLIENT_BYTES:
+                self.close_code = 1009
+                self.close_reason = (
+                    "Too much data sent before the Live API connection opened"
+                )
+                return
+            messages.append(message)
 
     async def _connect_while_watching_client(self, messages: list):
         """Opens upstream unless the browser leaves first; returns the connection.
@@ -243,6 +261,15 @@ class WebsocketHandler:
             logging.info(
                 "Browser left before the upstream connection opened for session %s",
                 self.session_id,
+            )
+            return None
+        if not watch.cancelled() and watch.exception() is None:
+            # It returned with the browser still there: too much data.
+            logging.warning(
+                "Session %s: browser sent over %d bytes before the upstream "
+                "connection opened; closing it",
+                self.session_id,
+                MAX_PENDING_CLIENT_BYTES,
             )
             return None
         for task in (watch, connect):
