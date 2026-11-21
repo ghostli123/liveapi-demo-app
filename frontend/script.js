@@ -547,6 +547,13 @@ function handleModelChange() {
 // feature/Live_API_Branded_Voice.ipynb, whatever format the user provides.
 const VOICE_SAMPLE_RATE = 24000;
 const MIN_VOICE_SAMPLE_S = 10;
+// The voice sample and avatar image travel base64-encoded in the setup message,
+// which the backend caps at 64 MB (MAX_CLIENT_MESSAGE_BYTES in main.py). These
+// limits keep both together well under it: 5 min of 24 kHz 16-bit WAV is
+// 19 MB as base64, a 20 MB image 27 MB.
+const MAX_VOICE_SAMPLE_S = 300;
+const MAX_AVATAR_IMAGE_BYTES = 20 * 1024 * 1024;
+const AVATAR_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 const BrandedVoices = new Map(); // voice-dropdown value -> base64 WAV
 
 function blobToBase64(blob) {
@@ -569,6 +576,12 @@ async function toVoiceSample(audioData) {
     const decoded = await new OfflineAudioContext(1, 1, VOICE_SAMPLE_RATE).decodeAudioData(
         audioData
     );
+    if (decoded.duration > MAX_VOICE_SAMPLE_S) {
+        throw new Error(
+            `it is ${formatMinutes(decoded.duration)} long; samples are limited to ` +
+            `${formatMinutes(MAX_VOICE_SAMPLE_S)}.`
+        );
+    }
     const offline = new OfflineAudioContext(
         1, // Mixing to a mono destination downmixes stereo input.
         Math.ceil(decoded.duration * VOICE_SAMPLE_RATE),
@@ -580,6 +593,11 @@ async function toVoiceSample(audioData) {
     source.start();
     const rendered = await offline.startRendering();
     return { base64: await blobToBase64(bufferToWave(rendered)), durationS: decoded.duration };
+}
+
+/** Rounds up, so a duration over a limit never reads as equal to it. */
+function formatMinutes(seconds) {
+    return `${Math.ceil(seconds / 6) / 10} min`;
 }
 
 /** Adds a voice to the Branded Voice dropdown and selects it. */
@@ -603,7 +621,14 @@ function selectBrandedVoice() {
 
 // --- Custom avatar image ---
 async function setAvatarImage(blob, name) {
-    AppState.geminiLiveApi.setCustomizedAvatar(await blobToBase64(blob), blob.type || "image/png");
+    if (!AVATAR_IMAGE_TYPES.has(blob.type)) {
+        throw new Error("use a PNG, JPEG or WebP image.");
+    }
+    if (blob.size > MAX_AVATAR_IMAGE_BYTES) {
+        const mb = (bytes) => `${Math.ceil(bytes / 104857.6) / 10} MB`; // Rounded up, as above.
+        throw new Error(`it is ${mb(blob.size)}; images are limited to ${mb(MAX_AVATAR_IMAGE_BYTES)}.`);
+    }
+    AppState.geminiLiveApi.setCustomizedAvatar(await blobToBase64(blob), blob.type);
     AppUI.setText("avatarName", `Avatar: ${name}`);
     AppUI.setHidden("avatarStockLink", false);
 }
@@ -615,7 +640,7 @@ async function handleAvatarFileInputChange(event) {
     try {
         await setAvatarImage(file, file.name);
     } catch (error) {
-        AppUI.showModal(`Could not read "${file.name}": ${error.message}`);
+        AppUI.showModal(`Could not use "${file.name}" as the avatar: ${error.message}`);
     }
 }
 
@@ -652,7 +677,7 @@ async function handleAudioFileInputChange(event) {
         );
     } catch (error) {
         console.error("Could not read voice sample:", error);
-        AppUI.showModal(`Could not read "${file.name}" as audio: ${error.message}`);
+        AppUI.showModal(`Could not use "${file.name}" as a voice sample: ${error.message}`);
     }
 }
 

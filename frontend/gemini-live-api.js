@@ -835,6 +835,10 @@ class GeminiLiveAPI {
         if (event.code === 1006) {
             return "Lost the connection to the server.";
         }
+        if (event.code === 1009 && !event.reason) {
+            // The backend's limit; the voice sample and avatar image count toward it.
+            return "Connection closed (code 1009): a message was larger than the server accepts (64 MB).";
+        }
         return `Connection closed (code ${event.code})${event.reason ? `: ${event.reason}` : "."}`;
     }
 
