@@ -21,6 +21,8 @@ class GeminiLiveResponseMessage {
     /**
      * Splits a raw server message into events, in the order the UI should
      * handle them. Accepts both camelCase and snake_case field names.
+     * Malformed fields (a null part, a non-string handle) are skipped, so
+     * the rest of the message, setupComplete included, still gets through.
      * @param {Object} raw - Parsed JSON message from the WebSocket.
      * @returns {GeminiLiveResponseMessage[]}
      */
@@ -29,24 +31,26 @@ class GeminiLiveResponseMessage {
         const add = (type, data, extra) =>
             events.push(new GeminiLiveResponseMessage(type, data, extra));
         const field = (obj, camel, snake) => obj?.[camel] ?? obj?.[snake];
+        const str = (value) => (typeof value === "string" ? value : "");
+        const list = (value) => (Array.isArray(value) ? value : []);
 
         const setupComplete = field(raw, "setupComplete", "setup_complete");
         if (setupComplete) {
             const rtc = field(setupComplete, "rtcSetupComplete", "rtc_setup_complete");
             add("SETUP COMPLETE", "", {
-                answerSdp: field(rtc, "answerSdp", "answer_sdp") || "",
-                sessionId: field(setupComplete, "sessionId", "session_id") || "",
+                answerSdp: str(field(rtc, "answerSdp", "answer_sdp")),
+                sessionId: str(field(setupComplete, "sessionId", "session_id")),
             });
         }
 
         const toolCall = field(raw, "toolCall", "tool_call");
-        const functionCalls = field(toolCall, "functionCalls", "function_calls");
-        if (functionCalls) {
+        const functionCalls = list(field(toolCall, "functionCalls", "function_calls"));
+        if (functionCalls.length) {
             add("FUNCTION_CALL", functionCalls);
         }
         const cancellation = field(raw, "toolCallCancellation", "tool_call_cancellation");
         if (cancellation) {
-            add("FUNCTION_CALL_CANCELLATION", cancellation.ids || []);
+            add("FUNCTION_CALL_CANCELLATION", list(cancellation.ids));
         }
 
         if (field(raw, "voiceActivityDetectionSignal", "voice_activity_detection_signal")) {
@@ -60,24 +64,26 @@ class GeminiLiveResponseMessage {
             }
             const inputTranscription = field(content, "inputTranscription", "input_transcription");
             if (inputTranscription) {
-                add("INPUT_TRANSCRIPTION", inputTranscription.text || "", {
+                add("INPUT_TRANSCRIPTION", str(inputTranscription.text), {
                     finished: !!inputTranscription.finished,
                 });
             }
-            for (const part of field(content, "modelTurn", "model_turn")?.parts || []) {
-                if (part.text) {
-                    add("TEXT", part.text);
+            for (const part of list(field(content, "modelTurn", "model_turn")?.parts)) {
+                const text = str(part?.text);
+                if (text) {
+                    add("TEXT", text);
                 }
-                const inline = part.inlineData || part.inline_data || part.video;
-                if (inline?.data) {
-                    const mimeType = inline.mimeType || inline.mime_type || "";
+                const inline = part?.inlineData || part?.inline_data || part?.video;
+                const data = str(inline?.data);
+                if (data) {
+                    const mimeType = str(inline.mimeType) || str(inline.mime_type);
                     const isVideo = mimeType.startsWith("video/") || mimeType.startsWith("image/");
-                    add(isVideo ? "VIDEO" : "AUDIO", inline.data, { mimeType });
+                    add(isVideo ? "VIDEO" : "AUDIO", data, { mimeType });
                 }
             }
             const outputTranscription = field(content, "outputTranscription", "output_transcription");
             if (outputTranscription) {
-                add("OUTPUT_TRANSCRIPTION", outputTranscription.text || "", {
+                add("OUTPUT_TRANSCRIPTION", str(outputTranscription.text), {
                     finished: !!outputTranscription.finished,
                 });
             }
@@ -90,14 +96,14 @@ class GeminiLiveResponseMessage {
         }
 
         const resumption = field(raw, "sessionResumptionUpdate", "session_resumption_update");
-        const newHandle = field(resumption, "newHandle", "new_handle");
+        const newHandle = str(field(resumption, "newHandle", "new_handle"));
         if (newHandle) {
             add("RESUMPTION", newHandle);
         }
 
         const goAway = field(raw, "goAway", "go_away");
         if (goAway) {
-            add("GO_AWAY", field(goAway, "timeLeft", "time_left") || "");
+            add("GO_AWAY", str(field(goAway, "timeLeft", "time_left")));
         }
 
         const usage = field(raw, "usageMetadata", "usage_metadata");
