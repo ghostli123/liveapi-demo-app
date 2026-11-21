@@ -207,6 +207,29 @@ test("realtime input is dropped until the server confirms setup", () => {
     assert.equal(api.webSocket.sent[0].realtime_input.media_chunks[0].data, "AAA=");
 });
 
+test("text and push-to-talk aren't sent until the server confirms setup", () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    api.webSocket = new FakeWebSocket();
+    api.lastActivityAt = 0;
+    assert.equal(api.sendTextMessage("hello"), false);
+    assert.equal(api.sendVoiceActivityMessage(true), false);
+    assert.equal(api.webSocket.sent.length, 0);
+    assert.equal(api.lastActivityAt, 0); // Dropped input isn't activity.
+
+    api.onReceiveResponse = () => {};
+    api.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) });
+    assert.equal(api.sendTextMessage("hello"), true);
+    assert.equal(api.sendVoiceActivityMessage(true), true);
+    assert.deepEqual(plain(api.webSocket.sent.map((m) => Object.keys(m.realtime_input || m))), [
+        ["client_content"],
+        ["activity_start"],
+    ]);
+
+    // During a resume there is no connection until the new one is set up.
+    api.webSocket = null;
+    assert.equal(api.sendVoiceActivityMessage(false), false);
+});
+
 test("onConnectionStarted runs on setupComplete", () => {
     const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
     let started = 0;
@@ -605,6 +628,7 @@ test("a session ends after the server's idle timeout without activity", async ()
 
 test("conversation events and user input postpone the idle timeout", async () => {
     const api = await idleApi(60);
+    api.isSetupComplete = true; // Input is only sent once set up.
     const activities = {
         "input transcript": { serverContent: { inputTranscription: { text: "hi" } } },
         "output transcript": { serverContent: { outputTranscription: { text: "hello" } } },

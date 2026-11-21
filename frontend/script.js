@@ -1042,6 +1042,17 @@ function closeTranscriptLine(stream) {
     ChatState.transcriptLines[stream] = null;
 }
 
+/**
+ * Explains why input wasn't sent: the session only takes it once the server
+ * has confirmed the setup, which a resume or a WebRTC connect waits for.
+ * @param {string} action - What the user tried, e.g. "speaking".
+ */
+function notReadyMessage(action) {
+    return AppUI.isHidden("disconnected")
+        ? `The session is still connecting. Try ${action} again once it's connected.`
+        : `Connect before ${action}.`;
+}
+
 function newUserMessage() {
     const textMessage = AppUI.getControl("text-message");
     if (!textMessage) return;
@@ -1050,14 +1061,13 @@ function newUserMessage() {
     if (val.trim() === "") return;
 
     const api = AppState.geminiLiveApi;
-    if (!api.webSocket || api.webSocket.readyState !== WebSocket.OPEN) {
-        AppUI.showModal("Connect before sending a message.");
-        return;
+    if (!api.sendTextMessage(val)) {
+        AppUI.showModal(notReadyMessage("sending a message"));
+        return; // The text stays in the box to send later.
     }
     closeTranscriptLine("input");
     closeTranscriptLine("output");
     addMessageToChat("You: " + val, "user");
-    api.sendTextMessage(val);
     markUserTurnEnd("text", { force: true });
 
     textMessage.value = "";
@@ -1154,6 +1164,10 @@ async function turnBtnClick() {
         return;
     }
     if (AppState.turnStarting) return; // Already waiting for the microphone.
+    if (!AppState.geminiLiveApi.isSetupComplete) {
+        AppUI.showModal(notReadyMessage("speaking"));
+        return;
+    }
     AppState.turnStarting = true;
     try {
         if (!isMicOn()) {
@@ -1161,7 +1175,11 @@ async function turnBtnClick() {
             await startAudioInput();
             if (!isMicOn()) return; // The microphone failed to start.
         }
-        AppState.geminiLiveApi.sendVoiceActivityMessage(true);
+        // The session may have started resuming during the permission prompt.
+        if (!AppState.geminiLiveApi.sendVoiceActivityMessage(true)) {
+            AppUI.showModal(notReadyMessage("speaking"));
+            return;
+        }
         setUserTurnActive(true);
     } finally {
         AppState.turnStarting = false;

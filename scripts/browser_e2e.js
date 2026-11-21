@@ -17,7 +17,7 @@
 // scenario that passes with some of its checks left out prints "PASS*" and
 // says which.
 
-/* global document, customElements, AppState, handleSessionResumptionReconnect -- used in
+/* global window, document, customElements, AppState, handleSessionResumptionReconnect -- used in
    page.evaluate() callbacks, which run in the app page */
 const { chromium } = require("playwright-core");
 const path = require("path");
@@ -300,6 +300,68 @@ const scenarios = {
         const answer = await reply(page, "What is my favorite fruit?", 2000);
         check(/mango/i.test(answer), `reply after resume: ${answer || "none"}`);
         check((await dialog(page)) === null, `GoAway showed: ${await dialog(page)}`);
+        await endSession(page);
+    },
+
+    async "input during a GoAway resume waits for the new session"(browser, run) {
+        if (!MOCK) skip("needs --mock");
+        const page = await run.newPage(browser);
+        await connect(page, {
+            transport: "websocket",
+            modality: "AUDIO",
+            // Shows "Start speaking", which sends activity_start/activity_end.
+            before: () => (document.getElementById("disableDetection").checked = true),
+        });
+        await waitConnected(page);
+        await say(page, "Hello.", 1000);
+        await page.waitForFunction(() => AppState.geminiLiveApi.latestResumptionHandle, null, { timeout: 15000 });
+        // Press "Start speaking" and send text right after resume() drops the
+        // old connection, before the new one is set up.
+        await page.evaluate(() => {
+            const api = AppState.geminiLiveApi;
+            const resume = api.resume.bind(api);
+            api.resume = (handle) => {
+                const resumed = resume(handle);
+                const dialogText = () => document.getElementById("dialogMessage").textContent;
+                document.getElementById("turnBtn").click();
+                window.duringResume = { turn: dialogText() };
+                document.getElementById("text-message").value = "Sent too early.";
+                document.getElementById("sendMessageBtn").click();
+                window.duringResume.text = dialogText();
+                return resumed;
+            };
+        });
+        await say(page, "/goaway 1", 0);
+        await page
+            .waitForFunction(() => window.duringResume && AppState.geminiLiveApi.isSetupComplete, null, {
+                timeout: 15000,
+            })
+            .catch(() => {
+                throw new Error("no new connection after GoAway");
+            });
+        const during = await page.evaluate(() => window.duringResume);
+        check(/still connecting.*speaking/.test(during.turn), `Start speaking while resuming showed: ${during.turn}`);
+        check(/still connecting.*sending/.test(during.text), `text while resuming showed: ${during.text}`);
+        const turnText = () => page.evaluate(() => document.getElementById("turnBtn").textContent);
+        check((await turnText()) === "Start speaking", `turn button while resuming: ${await turnText()}`);
+        check(
+            (await page.evaluate(() => document.getElementById("text-message").value)) === "Sent too early.",
+            "the text sent while resuming left the box"
+        );
+        check(
+            !(await chat(page)).some((l) => l.text.includes("Sent too early.")),
+            "the text sent while resuming is in the chat"
+        );
+
+        // Both work once the new session is set up.
+        await page.evaluate(() => document.getElementById("dialog").close());
+        await page.click("#turnBtn");
+        await page.waitForFunction(() => document.getElementById("turnBtn").textContent === "Done speaking", null, {
+            timeout: 5000,
+        });
+        await page.click("#turnBtn");
+        const answer = await reply(page, "Hello again.", 2000);
+        check(answer.length > 0, "no reply after resume");
         await endSession(page);
     },
 
