@@ -438,22 +438,27 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(msg.extra, "Server restarting")
 
     async def test_session_without_websocket_expires(self):
-        with mock.patch.object(main, "PENDING_SESSION_TTL_S", 0.05):
+        with mock.patch.object(main, "PENDING_SESSION_TTL_S", 0.3):
             await self.connect_session("s5")
-            self.assertIsNotNone(await main.SESSION_MANAGER.search_item("s5"))
-            await asyncio.sleep(0.2)
+            record = await main.SESSION_MANAGER.search_item("s5")
+        assert record is not None and record.expiry_task is not None
+        await asyncio.wait_for(record.expiry_task, 5)
         self.assertIsNone(await main.SESSION_MANAGER.search_item("s5"))
 
     async def test_connected_session_does_not_expire(self):
         async with FakeUpstream() as upstream:
             with (
                 flagsaver.flagsaver(common_bag_ws_port=upstream.port),
-                mock.patch.object(main, "PENDING_SESSION_TTL_S", 0.05),
+                mock.patch.object(main, "PENDING_SESSION_TTL_S", 0.3),
             ):
                 await self.connect_session("s6")
+                record = await main.SESSION_MANAGER.search_item("s6")
                 ws = await self.client.ws_connect("/ws?session_id=s6")
-                await asyncio.sleep(0.2)
-                self.assertIsNotNone(await main.SESSION_MANAGER.search_item("s6"))
+                # The expiry check has run, rather than a sleep that a slow
+                # machine could end before it.
+                assert record is not None and record.expiry_task is not None
+                await asyncio.wait_for(record.expiry_task, 5)
+                self.assertIs(await main.SESSION_MANAGER.search_item("s6"), record)
                 await ws.send_str("ping")
                 msg = await asyncio.wait_for(ws.receive(), 5)
                 self.assertEqual(json.loads(msg.data), {"echo": "ping"})
@@ -708,10 +713,13 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         closed upstream.
         """
 
+        # By code object, not name, so a rename fails here instead of making
+        # this stop waiting for the proxy.
+        proxy_code = websocket_handler.WebsocketHandler.create_proxy.__code__
+
         def proxy_running():
             return any(
-                getattr(t.get_coro(), "__qualname__", "")
-                == "WebsocketHandler.create_proxy"
+                getattr(t.get_coro(), "cr_code", None) is proxy_code
                 for t in asyncio.all_tasks()
                 if not t.done()
             )
@@ -768,13 +776,27 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         await self.wait_for_session_end("s18")
 
     async def test_heartbeat_can_be_disabled(self):
+        # Watching for pings alone can't tell "disabled" from a default
+        # interval longer than the test, so also check what each leg was given.
+        heartbeats = []
+
+        class RecordingResponse(web.WebSocketResponse):
+            def __init__(self, *args, **kwargs):
+                heartbeats.append(kwargs.get("heartbeat"))
+                super().__init__(*args, **kwargs)
+
         async with UnresponsiveUpstream() as upstream:
             with (
                 flagsaver.flagsaver(common_bag_ws_port=upstream.port, ws_heartbeat_s=0),
                 mock.patch.object(websocket_handler, "UPSTREAM_CLOSE_TIMEOUT_S", 0.1),
+                mock.patch.object(main.web, "WebSocketResponse", RecordingResponse),
             ):
                 await self.connect_session("s19")
                 ws = await self.client.ws_connect("/ws?session_id=s19")
+                record = await main.SESSION_MANAGER.search_item("s19")
+                assert record is not None and record.websocket_handler is not None
+                self.assertIsNone(record.websocket_handler.keepalive_s)
+                self.assertEqual(heartbeats, [None])
                 with self.assertRaises(TimeoutError):
                     await asyncio.wait_for(ws.receive(), 0.5)
                 self.assertIsNotNone(await main.SESSION_MANAGER.search_item("s19"))
