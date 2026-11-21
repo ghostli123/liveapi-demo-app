@@ -899,11 +899,16 @@ class G3RtcWebRtcManager {
         // Session resumption renegotiates; keep sending the same mic and camera.
         this.close({ keepLocalMedia: true });
 
-        this.pc = new RTCPeerConnection({
+        const pc = new RTCPeerConnection({
             iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
         });
+        this.pc = pc;
+        // close() (e.g. Disconnect) or a newer initiateSession() may run while
+        // this awaits; stop then instead of touching the newer connection.
+        const ensureOpen = () => {
+            if (this.pc !== pc) throw new Error("The WebRTC session was closed.");
+        };
 
-        const pc = this.pc;
         // close() above showed "closed"; this connection is still being set up.
         G3RtcWebRtcManager.showState("negotiating");
         pc.onconnectionstatechange = () => {
@@ -916,18 +921,18 @@ class G3RtcWebRtcManager {
             }
         };
 
-        this.dataChannel = this.pc.createDataChannel("g3rtc-media-stats");
+        this.dataChannel = pc.createDataChannel("g3rtc-media-stats");
 
         const transceiverToGroupId = new Map();
         const sendStreamGroupId = crypto.randomUUID();
 
-        const sendAudioTransceiver = this.pc.addTransceiver("audio", {
+        const sendAudioTransceiver = pc.addTransceiver("audio", {
             direction: "sendonly",
         });
         this.audioSender = sendAudioTransceiver.sender;
         transceiverToGroupId.set(sendAudioTransceiver, sendStreamGroupId);
 
-        const sendVideoTransceiver = this.pc.addTransceiver("video", {
+        const sendVideoTransceiver = pc.addTransceiver("video", {
             direction: "sendonly",
         });
         this.videoSender = sendVideoTransceiver.sender;
@@ -935,34 +940,34 @@ class G3RtcWebRtcManager {
 
         const micTrack = this.micStream && this.micStream.getAudioTracks()[0];
         if (micTrack && micTrack.readyState === "live") {
-            await this.audioSender.replaceTrack(micTrack);
+            await sendAudioTransceiver.sender.replaceTrack(micTrack);
+            ensureOpen();
         }
         if (this.videoTrack && this.videoTrack.readyState === "live") {
-            await this.videoSender.replaceTrack(this.videoTrack);
+            await sendVideoTransceiver.sender.replaceTrack(this.videoTrack);
+            ensureOpen();
         }
 
-        this.remoteStream = new MediaStream();
-        const recvGroupId = this.remoteStream.id || crypto.randomUUID();
+        const remoteStream = new MediaStream();
+        this.remoteStream = remoteStream;
+        const recvGroupId = remoteStream.id || crypto.randomUUID();
 
-        const recvAudioTransceiver = this.pc.addTransceiver("audio", {
+        const recvAudioTransceiver = pc.addTransceiver("audio", {
             direction: "recvonly",
         });
-        this.remoteStream.addTrack(recvAudioTransceiver.receiver.track);
+        remoteStream.addTrack(recvAudioTransceiver.receiver.track);
         transceiverToGroupId.set(recvAudioTransceiver, recvGroupId);
 
         if (wantsVideo) {
-            const recvVideoTransceiver = this.pc.addTransceiver("video", {
+            const recvVideoTransceiver = pc.addTransceiver("video", {
                 direction: "recvonly",
             });
-            this.remoteStream.addTrack(recvVideoTransceiver.receiver.track);
+            remoteStream.addTrack(recvVideoTransceiver.receiver.track);
             transceiverToGroupId.set(recvVideoTransceiver, recvGroupId);
         }
 
-        // close() (e.g. Disconnect) may run while this awaits.
-        const ensureOpen = () => {
-            if (this.pc !== pc) throw new Error("The WebRTC session was closed.");
-        };
         await pc.setLocalDescription();
+        ensureOpen();
         await this.waitForIceGathering(3000);
         ensureOpen();
         await pc.setLocalDescription();
@@ -975,7 +980,7 @@ class G3RtcWebRtcManager {
             }
         }
 
-        const rawSdp = this.pc.localDescription ? this.pc.localDescription.sdp : "";
+        const rawSdp = pc.localDescription ? pc.localDescription.sdp : "";
         return G3RtcWebRtcManager.applyG3rtcAttributesToSdp(rawSdp, midToGroupId);
     }
 
@@ -1110,9 +1115,13 @@ class G3RtcWebRtcManager {
         this.lastStatsTimeMs = performance.now();
 
         this.statsInterval = setInterval(async () => {
-            if (!this.pc) return;
+            const pc = this.pc;
+            if (!pc) return;
             try {
-                const stats = await this.pc.getStats();
+                const stats = await pc.getStats();
+                // Chrome still delivers stats after close(); a newer session
+                // reset the counters, and a closed one shows nothing.
+                if (this.pc !== pc) return;
                 let bytesReceived = 0;
                 let bytesSent = 0;
                 let packetsLost = 0;
