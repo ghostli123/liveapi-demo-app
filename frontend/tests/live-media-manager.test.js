@@ -604,9 +604,10 @@ test("a full buffer while playing trims behind the playhead and leaves it alone"
 // next addModule() reject; like Chrome and Firefox, a context whose load
 // failed keeps rejecting.
 function audioOutputWithFakeContexts() {
-    const fake = { contexts: [], failNextLoad: false };
+    const fake = { contexts: [], failNextLoad: false, refuseContexts: false, errors: [] };
     class FakeAudioContext {
         constructor() {
+            if (fake.refuseContexts) throw new Error("NotSupportedError");
             this.state = "suspended";
             this.destination = {};
             let failed = false;
@@ -641,6 +642,7 @@ function audioOutputWithFakeContexts() {
     const context = loadScript("live-media-manager.js", ["LiveAudioOutputManager"], {
         window: { AudioContext: FakeAudioContext, atob },
         AudioWorkletNode: FakeWorkletNode,
+        console: { log() {}, warn() {}, error: (message) => fake.errors.push(message) },
     });
     return { manager: new context.LiveAudioOutputManager(), fake };
 }
@@ -665,6 +667,33 @@ test("a failed audio worklet load is retried on a new context", async () => {
         assert.equal(manager.workletNode.context, fake.contexts[1]);
         assert.equal(manager.workletNode.posted.length, 1);
         assert.equal(fake.contexts[1].state, "running");
+        assert.deepEqual(unhandled, []);
+    } finally {
+        process.off("unhandledRejection", onUnhandled);
+    }
+});
+
+test("a refused AudioContext rejects instead of throwing, and is retried later", async () => {
+    const { manager, fake } = audioOutputWithFakeContexts();
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+        fake.refuseContexts = true;
+        manager.resume(); // The Connect click; a throw here left Connect stuck.
+        manager.playAudioChunk(AUDIO_CHUNK);
+        await assert.rejects(manager.initializeAudioContext(), /NotSupportedError/);
+        manager.clear();
+        await settle();
+        assert.equal(manager.ready, null);
+        assert.equal(manager.audioContext, null);
+        assert.ok(fake.errors.includes("Could not create the audio player:"));
+
+        fake.refuseContexts = false;
+        manager.playAudioChunk(AUDIO_CHUNK);
+        await settle();
+        assert.equal(fake.contexts.length, 1);
+        assert.equal(manager.workletNode.posted.length, 1);
         assert.deepEqual(unhandled, []);
     } finally {
         process.off("unhandledRejection", onUnhandled);
