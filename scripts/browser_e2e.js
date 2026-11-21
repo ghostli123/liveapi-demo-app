@@ -114,6 +114,18 @@ const chat = (page) =>
         [...document.querySelectorAll("#text-chat > *")].map((p) => ({ kind: p.className, text: p.textContent }))
     );
 const modelLines = async (page) => (await chat(page)).filter((l) => l.kind.includes("chat-model"));
+
+// Says text and returns the model lines that came after it, joined. The chat
+// keeps earlier replies across a resume, so the last line alone could be from
+// before it.
+async function reply(page, text, waitMs) {
+    const before = (await modelLines(page)).length;
+    await say(page, text, waitMs);
+    return (await modelLines(page))
+        .slice(before)
+        .map((l) => l.text)
+        .join(" ");
+}
 const dialog = (page) =>
     page.evaluate(() => (document.getElementById("dialog").open ? document.getElementById("dialogMessage").textContent : null));
 
@@ -175,9 +187,8 @@ const scenarios = {
         await page.evaluate(() => handleSessionResumptionReconnect()); // As on GoAway.
         await waitConnected(page);
         await page.waitForTimeout(1000);
-        await say(page, "What is my favorite fruit? One word.");
-        const last = (await modelLines(page)).pop();
-        check(last && /mango/i.test(last.text), `reply after resume: ${last && last.text}`);
+        const answer = await reply(page, "What is my favorite fruit? One word.");
+        check(/mango/i.test(answer), `reply after resume: ${answer || "none"}`);
         await page.click("#disconnectBtn");
     },
 
@@ -243,9 +254,8 @@ const scenarios = {
                 throw new Error("no new connection after GoAway");
             });
         await page.waitForTimeout(2000); // Past the old connection's close.
-        await say(page, "What is my favorite fruit?", 2000);
-        const last = (await modelLines(page)).pop();
-        check(last && /mango/i.test(last.text), `reply after resume: ${last && last.text}`);
+        const answer = await reply(page, "What is my favorite fruit?", 2000);
+        check(/mango/i.test(answer), `reply after resume: ${answer || "none"}`);
         check((await dialog(page)) === null, `GoAway showed: ${await dialog(page)}`);
         check(page.errors.length === 0, `console errors: ${page.errors}`);
         await page.click("#disconnectBtn");
