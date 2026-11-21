@@ -137,6 +137,11 @@ const AppState = {
     /** @type {string | null} */
     preferredTransport: null, // The transport the user last picked
     recordingStartTime: 0, // Date.now() when the voice recording started
+    // Advanced by each choice of that kind, so a slow read that a later choice
+    // superseded is dropped rather than applied when it finishes.
+    avatarAttempt: 0, // Avatar file, sample image or stock avatar
+    voiceAttempt: 0, // Voice file, recorded take or voice picked from the dropdown
+    fcAttempt: 0, // Function declarations file or Remove
 };
 
 // --- Manager Callbacks ---
@@ -442,7 +447,10 @@ function initDOMEventListeners() {
 
     const voiceDropdown = AppUI.getElement("voice-dropdown");
     if (voiceDropdown) {
-        voiceDropdown.addEventListener("change", selectBrandedVoice);
+        voiceDropdown.addEventListener("change", () => {
+            AppState.voiceAttempt++; // A voice file still being read doesn't replace this choice.
+            selectBrandedVoice();
+        });
     }
 
     const envSelect = AppUI.getControl("envApiHost");
@@ -671,6 +679,7 @@ function formatMegabytes(bytes) {
 function addBrandedVoice(name, base64) {
     const dropdown = AppUI.getControl("voice-dropdown");
     if (!dropdown) return;
+    AppState.voiceAttempt++; // Supersedes voice files still being read.
     const id = `custom-${BrandedVoices.size + 1}`;
     BrandedVoices.set(id, base64);
     const option = document.createElement("option");
@@ -687,7 +696,8 @@ function selectBrandedVoice() {
 }
 
 // --- Custom avatar image ---
-async function setAvatarImage(blob, name) {
+/** Sets the avatar image, unless a later avatar choice than `attempt` was made meanwhile. */
+async function setAvatarImage(blob, name, attempt) {
     if (!AVATAR_IMAGE_TYPES.has(blob.type)) {
         throw new Error("use a PNG, JPEG or WebP image.");
     }
@@ -696,7 +706,9 @@ async function setAvatarImage(blob, name) {
             `it is ${formatMegabytes(blob.size)}; images are limited to ${formatMegabytes(MAX_AVATAR_IMAGE_BYTES)}.`
         );
     }
-    AppState.geminiLiveApi.setCustomizedAvatar(await blobToBase64(blob), blob.type);
+    const base64 = await blobToBase64(blob);
+    if (attempt !== AppState.avatarAttempt) return;
+    AppState.geminiLiveApi.setCustomizedAvatar(base64, blob.type);
     AppUI.setText("avatarName", `Avatar: ${name}`);
     AppUI.setHidden("avatarStockLink", false);
 }
@@ -705,24 +717,29 @@ async function handleAvatarFileInputChange(event) {
     const file = event.target.files[0];
     if (!file) return;
     event.target.value = ""; // So choosing the same file again fires change.
+    const attempt = ++AppState.avatarAttempt;
     try {
-        await setAvatarImage(file, file.name);
+        await setAvatarImage(file, file.name, attempt);
     } catch (error) {
+        if (attempt !== AppState.avatarAttempt) return;
         AppUI.showModal(`Could not use "${file.name}" as the avatar: ${error.message}`);
     }
 }
 
 async function useSampleAvatar() {
+    const attempt = ++AppState.avatarAttempt;
     try {
         const response = await fetch("/frontend/assets/avatar_image.png");
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        await setAvatarImage(await response.blob(), "sample image");
+        await setAvatarImage(await response.blob(), "sample image", attempt);
     } catch (error) {
+        if (attempt !== AppState.avatarAttempt) return;
         AppUI.showModal(`Could not load the sample avatar image: ${error.message}`);
     }
 }
 
 function useStockAvatar() {
+    AppState.avatarAttempt++;
     AppState.geminiLiveApi.setCustomizedAvatar("", "image/png");
     AppUI.setText("avatarName", "Avatar: Piper (stock)");
     AppUI.setHidden("avatarStockLink", true);
@@ -732,6 +749,7 @@ async function handleAudioFileInputChange(event) {
     const file = event.target.files[0];
     if (!file) return;
     event.target.value = ""; // So choosing the same file again fires change.
+    const attempt = ++AppState.voiceAttempt;
 
     try {
         if (file.size > MAX_VOICE_FILE_BYTES) {
@@ -740,6 +758,7 @@ async function handleAudioFileInputChange(event) {
             );
         }
         const { base64, durationS } = await toVoiceSample(await file.arrayBuffer());
+        if (attempt !== AppState.voiceAttempt) return;
         addBrandedVoice(file.name, base64);
         AppUI.setText("fileName", `File: ${file.name} (${durationS.toFixed(1)} s)`);
         AppUI.showModal(
@@ -750,6 +769,7 @@ async function handleAudioFileInputChange(event) {
         );
     } catch (error) {
         console.error("Could not read voice sample:", error);
+        if (attempt !== AppState.voiceAttempt) return;
         AppUI.showModal(`Could not use "${file.name}" as a voice sample: ${error.message}`);
     }
 }
@@ -758,6 +778,7 @@ async function handleFcFileInputChange(event) {
     const file = event.target.files[0];
     if (!file) return;
     event.target.value = ""; // So choosing the same file again fires change.
+    const attempt = ++AppState.fcAttempt;
 
     try {
         // Rejects if the file was moved or changed since it was picked. The
@@ -765,6 +786,7 @@ async function handleFcFileInputChange(event) {
         const text = await file.text().catch((error) => {
             throw new Error(`the file can't be read (${(error && (error.message || error.name)) || error})`);
         });
+        if (attempt !== AppState.fcAttempt) return;
         const declarations = GeminiLiveAPI.toFunctionDeclarations(JSON.parse(text));
         const unnamed = declarations.filter((d) => !d || typeof d.name !== "string");
         if (declarations.length === 0 || unnamed.length > 0) {
@@ -779,11 +801,13 @@ async function handleFcFileInputChange(event) {
             "They apply from the next connection."
         );
     } catch (error) {
+        if (attempt !== AppState.fcAttempt) return;
         AppUI.showModal(`Could not use "${file.name}": ${error.message}`);
     }
 }
 
 function removeFunctionDeclarations() {
+    AppState.fcAttempt++;
     AppState.functionCallDefinition = null;
     AppUI.setText("fcFileName", "");
     AppUI.setHidden("fcRemove", true);

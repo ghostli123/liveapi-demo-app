@@ -136,6 +136,9 @@ function loadApp(globals = {}, { radios = [] } = {}) {
         "handleAudioFileInputChange",
         "handleAvatarFileInputChange",
         "handleFcFileInputChange",
+        "useSampleAvatar",
+        "useStockAvatar",
+        "removeFunctionDeclarations",
         "AppUI",
         "toggleSchedulingDisable",
         "endSession",
@@ -1296,6 +1299,109 @@ test("a function declarations file that can't be read is reported, and the same 
     assert.match(element("dialogMessage").textContent, /^Loaded 1 function declaration\(s\) from "tools.json"/);
     assert.equal(element("fcFileName").textContent, "File: tools.json (get_weather)");
     assert.equal(input.value, "");
+});
+
+/** Records every message the app shows in its dialog. */
+function recordDialogs(context) {
+    const dialogs = [];
+    const showModal = context.AppUI.showModal;
+    context.AppUI.showModal = function (message) {
+        dialogs.push(message);
+        return showModal.call(this, message);
+    };
+    return dialogs;
+}
+
+test("the last avatar choice wins over a slower earlier one, which shows no dialog", async () => {
+    let download = Promise.withResolvers();
+    const { context, element } = loadApp({ FileReader: FakeFileReader, fetch: () => download.promise });
+    const avatars = [];
+    context.AppState.geminiLiveApi.setCustomizedAvatar = (data, type) => avatars.push([data, type]);
+    const dialogs = recordDialogs(context);
+
+    // "Use the sample image", then a file picked while the sample downloads.
+    const sample = context.useSampleAvatar();
+    const file = { name: "face.jpg", type: "image/jpeg", size: 3, bytes: "abc" };
+    await context.handleAvatarFileInputChange({ target: { value: file.name, files: [file] } });
+    download.resolve({ ok: true, blob: async () => ({ type: "image/png", size: 3, bytes: "png" }) });
+    await sample;
+    assert.deepEqual(plainJson(avatars), [["YWJj", "image/jpeg"]]);
+    assert.equal(element("avatarName").textContent, "Avatar: face.jpg");
+
+    // A sample that fails after "Use the stock avatar" says nothing.
+    download = Promise.withResolvers();
+    const failing = context.useSampleAvatar();
+    context.useStockAvatar();
+    download.resolve({ ok: false, status: 500 });
+    await failing;
+    assert.deepEqual(plainJson(avatars.slice(1)), [["", "image/png"]]);
+    assert.equal(element("avatarName").textContent, "Avatar: Piper (stock)");
+    assert.deepEqual(dialogs, []);
+});
+
+test("a voice file superseded by another file or a dropdown choice while it is read is dropped", async () => {
+    const { context, element, document } = loadApp({ OfflineAudioContext: fakeOfflineAudioContext(12), FileReader: FakeFileReader });
+    document.querySelector = (selector) => (selector.startsWith("#") ? element(selector.slice(1)) : null);
+    context.initDOMEventListeners();
+    const dropdown = element("voice-dropdown");
+    const added = [];
+    dropdown.appendChild = (option) => added.push(option.textContent);
+    const dialogs = recordDialogs(context);
+    const pick = (file) => context.handleAudioFileInputChange({ target: { value: file.name, files: [file] } });
+    const slowFile = (name) => {
+        const read = Promise.withResolvers();
+        return { read, file: { name, size: 8, arrayBuffer: () => read.promise } };
+    };
+
+    const slow = slowFile("slow.wav");
+    const first = pick(slow.file);
+    await pick({ name: "fast.wav", size: 8, arrayBuffer: async () => new ArrayBuffer(8) });
+    slow.read.resolve(new ArrayBuffer(8));
+    await first;
+    assert.deepEqual(added, ["fast.wav"]);
+    assert.equal(dropdown.value, "custom-1");
+
+    // A voice picked from the dropdown while a file is read stays selected.
+    const later = slowFile("later.wav");
+    const second = pick(later.file);
+    dropdown.value = "Puck";
+    for (const listener of dropdown.listeners.change) listener({ target: dropdown });
+    later.read.resolve(new ArrayBuffer(8));
+    await second;
+    assert.deepEqual(added, ["fast.wav"]);
+    assert.equal(dropdown.value, "Puck");
+    assert.equal(context.AppState.customVoiceBase64, "");
+    assert.equal(dialogs.length, 1);
+    assert.match(dialogs[0], /^Branded voice "fast.wav" is selected/);
+});
+
+test("a function declarations file superseded by another file or Remove while it is read is dropped", async () => {
+    const { context, element } = loadApp({
+        GeminiLiveAPI: class extends FakeGeminiLiveAPI {
+            static toFunctionDeclarations = (json) => json;
+        },
+    });
+    const dialogs = recordDialogs(context);
+    const pick = (name, text) => context.handleFcFileInputChange({ target: { value: name, files: [{ name, text }] } });
+
+    const slow = Promise.withResolvers();
+    const first = pick("slow.json", () => slow.promise);
+    await pick("tools.json", async () => '[{"name": "fast_fn"}]');
+    slow.resolve('[{"name": "slow_fn"}]');
+    await first;
+    assert.equal(element("fcFileName").textContent, "File: tools.json (fast_fn)");
+    assert.deepEqual(plainJson(context.AppState.functionCallDefinition), [{ name: "fast_fn" }]);
+
+    // Remove during a read wins, and the read's later failure says nothing.
+    const later = Promise.withResolvers();
+    const second = pick("later.json", () => later.promise);
+    context.removeFunctionDeclarations();
+    later.reject(new Error("The operation was aborted."));
+    await second;
+    assert.equal(context.AppState.functionCallDefinition, null);
+    assert.equal(element("fcFileName").textContent, "");
+    assert.equal(dialogs.length, 1);
+    assert.match(dialogs[0], /^Loaded 1 function declaration\(s\) from "tools.json"/);
 });
 
 test("a recording stops itself at the sample limit and is kept, cut to the limit", async () => {
