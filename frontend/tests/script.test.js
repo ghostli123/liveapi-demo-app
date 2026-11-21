@@ -712,7 +712,7 @@ test("a mic level meter that fails to start leaves the microphone on without it"
 });
 
 /** loadApp with a WebRTC manager stand-in that records what it was told. */
-function loadWithWebRtcManager() {
+function loadWithWebRtcManager(globals = {}) {
     const webRtc = {
         videoTrack: null,
         detached: [],
@@ -739,6 +739,7 @@ function loadWithWebRtcManager() {
         LiveAudioInputManager: class {
             disconnectMicrophone() {}
         },
+        ...globals,
     });
     return { ...app, webRtc, dialogText: () => app.element("dialogMessage").textContent };
 }
@@ -779,6 +780,56 @@ test("a camera that stops on its own stops the WebRTC video and says why; Stop s
     context.AppState.liveScreenManager.onEnded(screen);
     assert.deepEqual(webRtc.detached, [camera, screen]);
     assert.equal(dialogText(), undefined); // The user ended the share themselves.
+});
+
+test("a camera that fails to start stops the WebRTC video the screen share or old camera was sending", async () => {
+    const tracks = { screen: { kind: "video", readyState: "live" }, camera: { kind: "video", readyState: "live" } };
+    let cameraError = null;
+    const { context, element, webRtc, dialogText } = loadWithWebRtcManager({
+        console: { error() {} },
+        navigator: {},
+        requestAnimationFrame: () => 0,
+        LiveVideoManager: class extends FakeFrameSource {
+            stopWebcam() {
+                if (this.stream) tracks.camera.readyState = "ended";
+                this.stream = null;
+            }
+            async startWebcam() {
+                if (cameraError) throw cameraError;
+                tracks.camera.readyState = "live";
+                this.stream = { getVideoTracks: () => [tracks.camera] };
+            }
+        },
+        LiveScreenManager: class extends FakeFrameSource {
+            stopCapture() {
+                tracks.screen.readyState = "ended";
+            }
+        },
+    });
+    context.AppState.geminiLiveApi.transportMode = "webrtc";
+    webRtc.attachVideoStream = async (stream) => {
+        webRtc.videoTrack = stream.getVideoTracks()[0];
+    };
+
+    // Screen shared, then the camera can't be opened.
+    webRtc.videoTrack = tracks.screen;
+    cameraError = new Error("Device in use");
+    await context.startCameraCapture();
+    assert.equal(tracks.screen.readyState, "ended");
+    assert.deepEqual(webRtc.detached, [tracks.screen]);
+    assert.equal(webRtc.videoTrack, null);
+    assert.equal(dialogText(), "Could not start the camera: Device in use");
+    assert.equal(element("cameraBtn").hidden, true);
+
+    // Camera on, then a switch to a camera that can't be opened.
+    cameraError = null;
+    await context.startCameraCapture();
+    assert.equal(webRtc.videoTrack, tracks.camera);
+    cameraError = new Error("Device in use");
+    await context.startCameraCapture();
+    assert.equal(tracks.camera.readyState, "ended");
+    assert.deepEqual(webRtc.detached, [tracks.screen, tracks.camera]);
+    assert.equal(webRtc.videoTrack, null);
 });
 
 /**

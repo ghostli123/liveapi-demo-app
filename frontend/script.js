@@ -1422,6 +1422,12 @@ async function startCameraCapture() {
         AppUI.showModal(`Could not start the camera: ${err.message}`);
         camera.stopWebcam();
         showCameraState(false);
+        // The screen share or previous camera was stopped above; the WebRTC
+        // sender still holds its ended track, and no "ended" event will come.
+        const webRtcManager = webRtcManagerIfActive();
+        if (webRtcManager) {
+            webRtcManager.detachVideoStream();
+        }
     }
 }
 
