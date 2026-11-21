@@ -455,6 +455,45 @@ function initDOMEventListeners() {
             }
         });
     }
+
+    initMetricsDisclosure();
+}
+
+/** Opens or closes the metrics panel and tells assistive technology which. */
+function setMetricsOpen(open) {
+    AppUI.getElement("metrics-panel")?.classList[open ? "add" : "remove"]("open");
+    AppUI.getElement("metrics-icon")?.setAttribute("aria-expanded", String(open));
+}
+
+/**
+ * The 📊 icon is a disclosure button: click, Enter or Space toggles the panel
+ * (hover still previews it), Escape closes it, and so does moving focus away.
+ */
+function initMetricsDisclosure() {
+    const icon = AppUI.getElement("metrics-icon");
+    const panel = AppUI.getElement("metrics-panel");
+    const container = icon?.parentElement;
+    if (!icon || !panel || !container) return;
+    const toggle = () => setMetricsOpen(!panel.classList.contains("open"));
+    icon.addEventListener("click", toggle);
+    icon.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault(); // Space would scroll the page.
+            toggle();
+        }
+    });
+    container.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && panel.classList.contains("open")) {
+            event.preventDefault();
+            setMetricsOpen(false);
+            icon.focus();
+        }
+    });
+    // The panel is focusable (tabindex -1), so selecting the session ID in it
+    // keeps focus inside and the panel open.
+    container.addEventListener("focusout", (event) => {
+        if (!container.contains(/** @type {Node | null} */ (event.relatedTarget))) setMetricsOpen(false);
+    });
 }
 
 const COMMON_ONLY_MODELS = new Set([
@@ -1464,7 +1503,27 @@ async function refreshDeviceLists() {
 }
 
 // --- App Lifecycle Handlers (Connect / Disconnect) ---
+const CONNECTION_ANNOUNCEMENTS = {
+    disconnected: "Disconnected",
+    connecting: "Connecting",
+    connected: "Connected",
+};
+let lastConnectionAnnouncement = "";
+
+/**
+ * Puts a connection change in the status live region for screen readers.
+ * "Model speaking" counts as connected: announcing every model turn would
+ * talk over the model.
+ */
+function announceConnectionStatus(status) {
+    const text = CONNECTION_ANNOUNCEMENTS[status === "speaking" ? "connected" : status];
+    if (!text || text === lastConnectionAnnouncement) return;
+    lastConnectionAnnouncement = text;
+    AppUI.setText("connection-announcer", text);
+}
+
 function setAppStatus(status) {
+    announceConnectionStatus(status);
     AppUI.setHidden("disconnected", true);
     AppUI.setHidden("connecting", true);
     AppUI.setHidden("connected", true);
