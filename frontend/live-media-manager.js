@@ -56,22 +56,32 @@ class LiveAudioOutputManager {
 
     /**
      * Creates the audio context and worklet once; later calls return the same
-     * promise, so concurrent chunks can't create a second context.
+     * promise, so concurrent chunks can't create a second context. If the
+     * worklet fails to load (e.g. during a deploy), the next call starts over.
      */
     initializeAudioContext() {
         if (!this.ready) {
-            this.audioContext = new (window.AudioContext ||
+            const audioContext = new (window.AudioContext ||
                 window.webkitAudioContext)({ sampleRate: 24000 });
-            this.ready = this.audioContext.audioWorklet
+            const ready = audioContext.audioWorklet
                 .addModule("/frontend/pcm-processor.js")
                 .then(() => {
-                    this.workletNode = new AudioWorkletNode(
-                        this.audioContext,
-                        "pcm-processor",
-                        { outputChannelCount: [1] }
-                    );
-                    this.workletNode.connect(this.audioContext.destination);
+                    this.workletNode = new AudioWorkletNode(audioContext, "pcm-processor", {
+                        outputChannelCount: [1],
+                    });
+                    this.workletNode.connect(audioContext.destination);
                 });
+            ready.catch((error) => {
+                console.error("Could not load the audio player:", error);
+                // Chrome and Firefox remember a failed module fetch per
+                // context and reject a retry without fetching, so the next
+                // attempt needs a new context.
+                this.audioContext = null;
+                this.ready = null;
+                audioContext.close().catch(() => {});
+            });
+            this.audioContext = audioContext;
+            this.ready = ready;
         }
         return this.ready;
     }
@@ -900,13 +910,17 @@ class G3RtcWebRtcManager {
     }
 
     async completeSession(answerSdp) {
-        if (!this.pc) {
+        const pc = this.pc;
+        if (!pc) {
             throw new Error("RTCPeerConnection is not initialized");
         }
-        await this.pc.setRemoteDescription({
+        await pc.setRemoteDescription({
             type: "answer",
             sdp: G3RtcWebRtcManager.fixAnswerSdp(answerSdp),
         });
+        // close() (e.g. Disconnect) or a newer session ran meanwhile; don't
+        // start polling or a connect timer for a connection that's gone.
+        if (this.pc !== pc) return;
 
         const videoEl =
             this.videoPlayerElement || document.getElementById("video_player");
@@ -924,7 +938,6 @@ class G3RtcWebRtcManager {
 
         // If no candidate pair works, the connection can sit in "connecting"
         // without ever reaching "failed", so give up after a timeout.
-        const pc = this.pc;
         clearTimeout(this.connectTimer);
         this.connectTimer = setTimeout(() => {
             if (this.pc === pc && pc.connectionState !== "connected") {
