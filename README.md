@@ -73,7 +73,7 @@ The page is served with a Content-Security-Policy (`CONTENT_SECURITY_POLICY` in 
 
 ### Credentials
 
-The backend tries, in order: Application Default Credentials through google-auth, then `gcloud auth application-default print-access-token`, then the LOAS helper `backend/common_bag_ws_proxy.par` if present. The gcloud fallback matters on machines with certificate-based access, where google-auth's own token refresh fails with "Account restricted" but gcloud works. The server log says which source it used. The token is cached and shared by all sessions; a session that can't get one within 15 s closes with the reason (each ADC request times out after 10 s), so the upstream handshake's 10 s still fits the browser's 30 s setup timeout.
+The backend tries, in order: Application Default Credentials through google-auth, then `gcloud auth application-default print-access-token`, then the LOAS helper `backend/common_bag_ws_proxy.par` if present. The gcloud fallback matters on machines with certificate-based access, where google-auth's own token refresh fails with "Account restricted" but gcloud works. The server log says which source it used. The token is cached and shared by all sessions and refreshed 2 minutes before it expires; if the refresh fails, or another session's refresh is still running after 15 s, the cached token keeps being used while it has more than 30 s left (with a warning in the log), since the Live API only checks it when a session opens. A session that can't get one within 15 s closes with the reason (each ADC request times out after 10 s), so the upstream handshake's 10 s still fits the browser's 30 s setup timeout.
 
 ## Using the app
 

@@ -31,6 +31,9 @@ _SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
 
 # A cached token is reused until it is this close to expiring.
 _EXPIRY_MARGIN = datetime.timedelta(minutes=2)
+# If refreshing it fails, it is still handed out while it has this long left:
+# the upstream only checks the token at the handshake.
+_MIN_REMAINING = datetime.timedelta(seconds=30)
 # Lifetime assumed when a source doesn't report one.
 _ASSUMED_LIFETIME = datetime.timedelta(minutes=30)
 # Callers give up on a token after this many seconds, including the wait for
@@ -140,6 +143,23 @@ _SOURCES = (
 )
 
 
+def _fallback_token(error: str) -> AccessToken:
+    """Returns the cached token if it is still usable, else raises error."""
+    token = _cached_token
+    if token is None:
+        raise RuntimeError(error)
+    remaining = token.expiry - _utcnow()
+    if remaining <= _MIN_REMAINING:
+        raise RuntimeError(error)
+    logging.warning(
+        "Reusing the cached token from %s, which expires in %d s: %s",
+        token.source,
+        remaining.total_seconds(),
+        error,
+    )
+    return token
+
+
 def get_access_token() -> AccessToken:
     """Returns a cached or freshly fetched token. Blocks; call off the event loop."""
     global _cached_token, _failed_fetches, _last_failure
@@ -147,7 +167,7 @@ def get_access_token() -> AccessToken:
     # Waiting threads would otherwise pile up behind a stuck fetch, in the
     # to_thread pool that /api/control also uses.
     if not _lock.acquire(timeout=FETCH_TIMEOUT_S):
-        raise RuntimeError(
+        return _fallback_token(
             f"Timed out after {FETCH_TIMEOUT_S} s waiting for an access token"
         )
     try:
@@ -157,7 +177,7 @@ def get_access_token() -> AccessToken:
         # for gcloud) would otherwise add up per queued session, and the
         # waiting threads fill the to_thread pool that /api/control also uses.
         if _failed_fetches != failed_before:
-            raise RuntimeError(_last_failure)
+            return _fallback_token(_last_failure)
         errors = []
         for name, fetch in _SOURCES:
             try:
@@ -176,7 +196,7 @@ def get_access_token() -> AccessToken:
             return token
         _last_failure = "No access token available. " + " | ".join(errors)
         _failed_fetches += 1
-        raise RuntimeError(_last_failure)
+        return _fallback_token(_last_failure)
     finally:
         _lock.release()
 

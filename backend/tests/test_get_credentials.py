@@ -112,6 +112,74 @@ class GetAccessTokenTest(unittest.TestCase):
         first.join(timeout=5)
         self.assertEqual(get_credentials.get_access_token().source, "late")
 
+    def test_failed_refresh_reuses_a_still_valid_token(self):
+        def failing():
+            raise RuntimeError("gcloud down")
+
+        self.use_sources(failing)
+        get_credentials._cached_token = _token(1.5, "cached")
+        with self.assertLogs(level="WARNING") as logs:
+            self.assertEqual(get_credentials.get_access_token().source, "cached")
+        output = "\n".join(logs.output)
+        self.assertIn("Reusing the cached token from cached", output)
+        self.assertIn("gcloud down", output)
+        self.assertNotIn("token-cached", output)
+
+        get_credentials._cached_token = _token(10 / 60, "almost-expired")
+        with self.assertRaisesRegex(RuntimeError, "gcloud down"):
+            get_credentials.get_access_token()
+
+    def test_waiting_callers_reuse_a_still_valid_token_after_a_failure(self):
+        get_credentials._cached_token = _token(1.5, "cached")
+        release = threading.Event()
+
+        def slow_failure():
+            release.wait()
+            raise RuntimeError("gcloud down")
+
+        fetch = mock.Mock(side_effect=slow_failure)
+        self.use_sources(fetch)
+        sources = []
+        threads = [
+            threading.Thread(
+                target=lambda: sources.append(get_credentials.get_access_token().source)
+            )
+            for _ in range(4)
+        ]
+        threads[0].start()
+        while not fetch.called:
+            time.sleep(0.01)
+        for thread in threads[1:]:
+            thread.start()
+        time.sleep(0.3)  # Lets the others queue on the lock.
+        release.set()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(sources, ["cached"] * 4)
+
+    def test_waiting_caller_reuses_a_still_valid_token_during_a_stuck_fetch(self):
+        self.enterContext(mock.patch.object(get_credentials, "FETCH_TIMEOUT_S", 0.3))
+        get_credentials._cached_token = _token(1.5, "cached")
+        fetching, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def stuck():
+            fetching.set()
+            release.wait(10)
+            return _token(60, "late")
+
+        self.use_sources(stuck)
+        first = threading.Thread(target=get_credentials.get_access_token)
+        first.start()
+        self.assertTrue(fetching.wait(5))
+        started = time.monotonic()
+        self.assertEqual(get_credentials.get_access_token().source, "cached")
+        self.assertLess(time.monotonic() - started, 3)
+        release.set()
+        first.join(timeout=5)
+
     def test_retries_after_a_failed_fetch(self):
         fetch = mock.Mock(side_effect=[RuntimeError("down"), _token(60, "later")])
         self.use_sources(fetch)
