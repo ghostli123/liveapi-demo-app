@@ -1,3 +1,4 @@
+// @ts-check
 /* global G3RtcWebRtcManager -- from live-media-manager.js (see index.html) */
 /* exported GeminiLiveAPI */
 
@@ -577,7 +578,7 @@ class GeminiLiveAPI {
         this.isSetupComplete = false;
         this.stopUpdateBandwidthUsage();
         const closed = oldWebSocket
-            ? new Promise((resolve) => {
+            ? /** @type {Promise<void>} */ (new Promise((resolve) => {
                 oldWebSocket.onopen = null;
                 oldWebSocket.onmessage = null;
                 oldWebSocket.onclose = () => resolve();
@@ -587,7 +588,7 @@ class GeminiLiveAPI {
                 } else {
                     oldWebSocket.close(1000);
                 }
-            })
+            }))
             : Promise.resolve();
 
         this.setResumption(true, handle);
@@ -1110,6 +1111,7 @@ class GeminiLiveAPI {
     }
 
     _buildToolsConfig() {
+        /** @type {Object[] | null} */
         let fcDef = null;
 
         if (this.googleSearchEnabled) {
@@ -1301,6 +1303,7 @@ class GeminiLiveAPI {
             body: JSON.stringify(data),
         });
 
+        /** @type {any} */
         let receivedData = null;
         try {
             receivedData = await response.json();
@@ -1309,9 +1312,10 @@ class GeminiLiveAPI {
         }
         if (!response.ok) {
             const detail = receivedData?.error || response.statusText;
-            const error = new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
-            error.status = response.status;
-            throw error;
+            throw Object.assign(
+                new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`),
+                { status: response.status }
+            );
         }
         console.log("Received data:", receivedData);
         return receivedData;

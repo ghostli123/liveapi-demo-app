@@ -33,6 +33,8 @@ jobs:
       - run: npm ci
       - name: Lint
         run: npm run lint
+      - name: Type check
+        run: npm run typecheck
       - name: Syntax check
         run: for f in frontend/*.js; do node --check "$f"; done
       - name: Unit tests
