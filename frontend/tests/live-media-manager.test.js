@@ -1191,6 +1191,41 @@ test("a playback worklet that throws is rebuilt after a growing delay and report
     assert.equal(manager.crashDelayMs, 1000);
 });
 
+test("a playback worklet crash long after the last start waits 1 s again", async () => {
+    const { manager, fake } = audioOutputWithFakeContexts();
+    const crash = () => manager.workletNode.onprocessorerror(new Event("processorerror"));
+    // Whether a chunk at `now` builds a new player.
+    const rebuildsAt = async (now) => {
+        const contexts = fake.contexts.length;
+        fake.now = now;
+        manager.playAudioChunk(AUDIO_CHUNK);
+        await settle();
+        return fake.contexts.length > contexts;
+    };
+    manager.resume(); // The Connect click, at 0.
+    await settle();
+    crash(); // Waits 1 s, then 2 s, then 4 s while it keeps crashing at once.
+    assert.ok(await rebuildsAt(1000));
+    crash();
+    assert.ok(await rebuildsAt(3000));
+    crash();
+    assert.ok(await rebuildsAt(7000));
+
+    // Just under a minute of playing is still the same problem: 8 s.
+    fake.now = 7000 + 59999;
+    crash();
+    assert.equal(await rebuildsAt(66999 + 7999), false);
+    assert.ok(await rebuildsAt(66999 + 8000));
+
+    // A minute of playing: 1 s, not 16 s (before, the delay only reset at
+    // the next Connect, so a long session's rare crashes reached 30 s each).
+    fake.now = 74999 + 60000;
+    crash();
+    assert.equal(manager.crashDelayMs, 1000);
+    assert.equal(await rebuildsAt(134999 + 999), false);
+    assert.ok(await rebuildsAt(134999 + 1000));
+});
+
 test("a mic level meter the browser refuses throws and leaves nothing running", () => {
     const contexts = [];
     let refuseContext = false;

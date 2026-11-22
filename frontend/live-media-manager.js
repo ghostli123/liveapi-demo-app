@@ -3,6 +3,10 @@
    LiveScreenManager, LiveVideoOutputManager, G3RtcWebRtcManager, parseIntervalMs,
    AUDIO_INTERVAL_MS, VIDEO_INTERVAL_MS */
 
+// A playback worklet crash this long after the player started is treated as a
+// new problem: the wait before rebuilding starts over at 1 s.
+const PLAYER_CRASH_RESET_MS = 60000;
+
 class LiveAudioOutputManager {
     constructor() {
         this.audioContext = null;
@@ -16,8 +20,11 @@ class LiveAudioOutputManager {
         this.retryAt = 0;
         this.retryDelayMs = 0;
         // The wait after the worklet crashes, doubling per crash until the
-        // next Connect; see processorFailed().
+        // next Connect or a crash long after the last start; see
+        // processorFailed(). startedAt is the Date.now() time the current
+        // worklet node was created.
         this.crashDelayMs = 0;
+        this.startedAt = 0;
         this.crashReported = false;
         // Called with a message for the user the first time the player
         // crashes after a Connect.
@@ -118,6 +125,7 @@ class LiveAudioOutputManager {
                 workletNode.onprocessorerror = (event) => this.processorFailed(workletNode, event);
                 workletNode.connect(audioContext.destination);
                 this.workletNode = workletNode;
+                this.startedAt = Date.now();
                 this.failed = null;
                 this.retryDelayMs = 0;
                 return workletNode;
@@ -142,7 +150,9 @@ class LiveAudioOutputManager {
      * stopped it and the node plays nothing from now on. Drops the context so
      * a later chunk builds a new one, after 1 s, doubling to 30 s across
      * crashes (so a worklet that throws on every chunk isn't rebuilt per
-     * chunk), and reports the first crash since Connect.
+     * chunk), and reports the first crash since Connect. A player that ran
+     * for PLAYER_CRASH_RESET_MS before crashing waits 1 s again, so a few
+     * crashes spread over a long session don't each mute it for 30 s.
      * @param {AudioWorkletNode} workletNode
      * @param {Event} event
      */
@@ -154,6 +164,7 @@ class LiveAudioOutputManager {
         this.ready = null;
         this.workletNode = null;
         audioContext?.close().catch(() => {});
+        if (Date.now() - this.startedAt >= PLAYER_CRASH_RESET_MS) this.crashDelayMs = 0;
         this.crashDelayMs = Math.min(30000, this.crashDelayMs * 2 || 1000);
         const failed = Promise.reject(new Error("The audio player stopped"));
         failed.catch(() => {});
