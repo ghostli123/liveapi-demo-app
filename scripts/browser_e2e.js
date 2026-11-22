@@ -222,6 +222,29 @@ class Run {
     }
 }
 
+// In GitHub Actions, prints a failed scenario as an error annotation too: reading
+// a job's log takes admin rights, but annotations are public (the check run's
+// annotations API), so a failure can be diagnosed without them. Names the lines
+// of this file the error passed through (a Playwright timeout doesn't say which
+// wait it was), any dialog the app is showing, and the pages' first console
+// errors.
+async function annotateFailure(name, error, pages) {
+    if (process.env.GITHUB_ACTIONS !== "true") return;
+    const lines = [...(error.stack || "").matchAll(/browser_e2e\.js:(\d+)/g)].map((match) => match[1]);
+    const dialogs = (await Promise.all(pages.map((page) => dialog(page).catch(() => null)))).filter(Boolean);
+    const consoleErrors = pages.flatMap((page) => page.errors || []).slice(0, 3);
+    let message = error.message.slice(0, 1000);
+    if (lines.length) message += `\nat browser_e2e.js lines ${[...new Set(lines)].join(", ")}`;
+    if (dialogs.length) message += `\ndialog: ${dialogs.join(" | ")}`;
+    if (consoleErrors.length) message += `\nconsole errors: ${consoleErrors.join(" | ")}`;
+    // Workflow command escaping (as in @actions/core).
+    const data = (text) => text.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+    const property = (text) => data(text).replace(/:/g, "%3A").replace(/,/g, "%2C");
+    const properties = [`title=${property(`e2e (${BROWSER}): ${name}`)}`];
+    if (lines.length) properties.push("file=scripts/browser_e2e.js", `line=${lines[0]}`);
+    console.log(`::error ${properties.join(",")}::${data(message)}`);
+}
+
 const scenarios = {
     async "no accessibility violations (axe-core)"(browser, run) {
         const page = await run.newPage(browser);
@@ -604,6 +627,7 @@ const scenarios = {
             line = run.notes.length ? ["PASS*", `${ms}; not checked: ${run.notes.join("; ")}`] : ["PASS", ms];
         } catch (error) {
             line = [error instanceof Skip ? "SKIP" : "FAIL", `: ${error.message}`];
+            if (!(error instanceof Skip)) await annotateFailure(name, error, run.pages);
         } finally {
             await run.close();
         }

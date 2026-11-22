@@ -86,7 +86,12 @@ jobs:
           done
       - name: Server and mock logs
         if: failure()
-        run: cat server.log mock.log
+        # Job logs need admin rights to read; annotations are public, so the
+        # server's last warning and error lines (absl "W/E<date>") are repeated
+        # as annotations.
+        run: |
+          cat server.log mock.log
+          grep -E '^[EW][0-9]{4} ' server.log | tail -n 5 | sed 's/%/%25/g; s/^/::warning title=server.log::/' || true
 
   docker:
     runs-on: ubuntu-latest
