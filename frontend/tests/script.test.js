@@ -960,6 +960,79 @@ test("a mic level meter that fails to start leaves the microphone on without it"
     assert.deepEqual(errors, ["Could not start the microphone level meter: Error: no audio device"]);
 });
 
+test("a resume that falls back to WebSocket media restarts the mic and camera frames over the WebSocket", async () => {
+    const { GeminiLiveAPI } = loadScript("gemini-live-api.js", ["GeminiLiveAPI"], {
+        setInterval: () => 1,
+        clearInterval() {},
+    });
+    const mic = { starts: 0, stops: 0 };
+    const frames = { camera: 0, screen: 0 };
+    const meterStreams = [];
+    const { context, element } = loadApp({
+        navigator: {},
+        requestAnimationFrame: () => 0,
+        GeminiLiveAPI,
+        LiveAudioInputManager: class {
+            stream = { id: "websocket mic" };
+            async updateAudioInterval() {
+                mic.starts++;
+            }
+            recordChunk() {}
+            disconnectMicrophone() {
+                mic.stops++;
+            }
+        },
+        MicLevelMeter: class {
+            start(stream) {
+                meterStreams.push(stream);
+            }
+            stop() {}
+        },
+        LiveVideoManager: class extends FakeFrameSource {
+            startSendingFrames() {
+                frames.camera++;
+            }
+        },
+        LiveScreenManager: class extends FakeFrameSource {
+            startSendingFrames() {
+                frames.screen++;
+            }
+        },
+    });
+    context.AppState.liveVideoOutputManager.initMediaSource = () => {};
+    const api = context.AppState.geminiLiveApi;
+    // A WebRTC session with the mic on; closing the peer connection stops its mic.
+    let webRtcMicLive = true;
+    api.webRtcManager = {
+        close({ keepLocalMedia = false } = {}) {
+            if (!keepLocalMedia) webRtcMicLive = false;
+        },
+        stopMicrophone() {},
+    };
+    api.transportMode = "webrtc";
+    element("micBtn").hidden = false;
+    element("micOffBtn").hidden = true;
+
+    api.fallBackToWebSocketMedia(); // The resumed session's setupComplete had no SDP answer.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(webRtcMicLive, false);
+    assert.equal(mic.starts, 1, "the mic restarts on the WebSocket");
+    assert.deepEqual(
+        meterStreams.map((stream) => stream.id),
+        ["websocket mic"]
+    );
+    assert.equal(element("micBtn").hidden, false);
+    assert.deepEqual(frames, { camera: 1, screen: 1 });
+
+    // With the mic off, the fallback leaves it off.
+    element("micBtn").hidden = true;
+    element("micOffBtn").hidden = false;
+    api.transportMode = "webrtc";
+    api.fallBackToWebSocketMedia();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(mic.starts, 1);
+});
+
 /** loadApp with a WebRTC manager stand-in that records what it was told. */
 function loadWithWebRtcManager(globals = {}) {
     const webRtc = {

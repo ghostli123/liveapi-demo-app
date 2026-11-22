@@ -478,6 +478,21 @@ test("a camera stopped by the app isn't reported when its track ends later", asy
     assert.equal(manager.stream.getVideoTracks()[0], requests[1].track);
 });
 
+test("a camera opened for WebRTC starts sending frames once media moves to the WebSocket", async () => {
+    const { manager, requests, intervals } = cameraManagerWithPendingCamera();
+    manager.startSendingFrames(); // Not started: nothing to send.
+    assert.equal(intervals.size, 0);
+    const starting = manager.startWebcam({ sendFrames: false });
+    requests[0].grant();
+    await starting;
+    assert.equal(intervals.size, 0);
+    manager.startSendingFrames();
+    manager.startSendingFrames(); // Already sending: no second timer.
+    assert.equal(intervals.size, 1);
+    manager.stopWebcam();
+    assert.equal(intervals.size, 0);
+});
+
 test("a camera refused after stopWebcam() doesn't throw or touch the newer one", async () => {
     const { manager, requests, intervals } = cameraManagerWithPendingCamera();
     const first = manager.startWebcam();

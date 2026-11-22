@@ -176,6 +176,11 @@ function initApplicationManagers() {
         AppUI.setText("active-transport", "WebSocket");
         AppUI.setText("webrtc-state", "n/a");
         newSystemMessage("This endpoint didn't accept WebRTC, so media uses the WebSocket.");
+        // On a resume, input that was on went over the peer connection, which
+        // is closed now (with the WebRTC mic). Send it over the WebSocket.
+        if (isMicOn()) startAudioInput();
+        AppState.liveVideoManager.startSendingFrames();
+        AppState.liveScreenManager.startSendingFrames();
     };
     AppState.geminiLiveApi.onReconnectNeeded = () => {
         newSystemMessage("The server restarted. Resuming the session...");

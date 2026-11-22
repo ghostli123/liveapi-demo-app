@@ -504,13 +504,23 @@ class LiveFrameSource {
         this.stream = stream;
         this.previewVideoElement.srcObject = stream;
         if (sendFrames) {
-            this.interval = setInterval(() => this.newFrame(), this.intervalMs);
+            this.startSendingFrames();
         }
         onTrackEnded(stream.getVideoTracks(), (track) => {
             if (this.stream !== stream) return; // Already replaced or stopped.
             this._detach();
             this.onEnded(track);
         });
+    }
+
+    /**
+     * Sends JPEG frames every intervalMs from the running source, e.g. one
+     * started for WebRTC when media moves to the WebSocket. No-op if stopped.
+     */
+    startSendingFrames() {
+        if (this.stream && !this.interval) {
+            this.interval = setInterval(() => this.newFrame(), this.intervalMs);
+        }
     }
 
     _detach() {
