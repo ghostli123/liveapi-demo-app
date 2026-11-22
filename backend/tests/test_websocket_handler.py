@@ -64,9 +64,23 @@ class DescribeConnectErrorTest(unittest.TestCase):
             websocket_handler.describe_connect_error(error),
             "Upstream HTTP 502: Bad gateway",
         )
+
+    def test_network_errors_show_only_their_type(self):
+        # Their text names internal hosts (a proxy's address) or files.
+        error = ConnectionRefusedError(111, "Connect call failed ('10.1.2.3', 3128)")
         self.assertEqual(
-            websocket_handler.describe_connect_error(OSError("refused")),
-            "OSError: refused",
+            websocket_handler.describe_connect_error(error),
+            "Could not connect to the Live API (ConnectionRefusedError); "
+            "see the server log",
+        )
+        self.assertEqual(
+            websocket_handler.connect_error_detail(error),
+            "ConnectionRefusedError: [Errno 111] Connect call failed "
+            "('10.1.2.3', 3128)",
+        )
+        self.assertEqual(
+            websocket_handler.describe_connect_error(TimeoutError("timed out")),
+            "TimeoutError: timed out",
         )
 
     def test_long_html_body_becomes_one_short_line(self):
@@ -89,7 +103,7 @@ class DescribeConnectErrorTest(unittest.TestCase):
         reason = websocket_handler.describe_connect_error(RejectedHandshake(429, body))
         self.assertTrue(reason.startswith("Upstream HTTP 429: Quota exceeded. xxx"))
         self.assertTrue(reason.endswith("..."))
-        reason = websocket_handler.describe_connect_error(OSError("a\nb " + "c" * 500))
+        reason = websocket_handler.connect_error_detail(OSError("a\nb " + "c" * 500))
         self.assertTrue(reason.startswith("OSError: a b ccc"))
         self.assertEqual(len(reason), websocket_handler._MAX_CONNECT_ERROR_CHARS)
 

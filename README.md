@@ -73,7 +73,7 @@ The page is served with a Content-Security-Policy (`CONTENT_SECURITY_POLICY` in 
 
 ### Credentials
 
-The backend tries, in order: Application Default Credentials through google-auth, then `gcloud auth application-default print-access-token`, then the LOAS helper `backend/common_bag_ws_proxy.par` if present. The gcloud fallback matters on machines with certificate-based access, where google-auth's own token refresh fails with "Account restricted" but gcloud works. The server log says which source it used. The token is cached and shared by all sessions and refreshed 2 minutes before it expires; if the refresh fails, or another session's refresh is still running after 15 s, the cached token keeps being used while it has more than 30 s left (with a warning in the log), since the Live API only checks it when a session opens. A session that can't get one within 15 s closes with the reason (each ADC request times out after 10 s), so the upstream handshake's 10 s still fits the browser's 30 s setup timeout.
+The backend tries, in order: Application Default Credentials through google-auth, then `gcloud auth application-default print-access-token`, then the LOAS helper `backend/common_bag_ws_proxy.par` if present. The gcloud fallback matters on machines with certificate-based access, where google-auth's own token refresh fails with "Account restricted" but gcloud works. The server log says which source it used. The token is cached and shared by all sessions and refreshed 2 minutes before it expires; if the refresh fails, or another session's refresh is still running after 15 s, the cached token keeps being used while it has more than 30 s left (with a warning in the log), since the Live API only checks it when a session opens. A session that can't get one within 15 s closes with "Server could not get Google Cloud credentials; see the server log" (each ADC request times out after 10 s), so the upstream handshake's 10 s still fits the browser's 30 s setup timeout.
 
 ### Outbound proxy
 
@@ -96,7 +96,7 @@ Behind a proxy, set `https_proxy` (or `all_proxy`): the token fetch and the Live
 
 A session with no conversation and no typing or clicking on the page for 15 minutes (`--idle_timeout_s`) ends with "Disconnected after 15 minutes without activity."; the chat log shows its resumption handle as after Disconnect.
 
-If the server ends a session, the app shows the close code and the reason the Live API gave, such as a missing model or a permission error. If the backend doesn't answer Connect within 15 seconds, the app tries once more and then shows "the server didn't answer within 15 s"; when the server is unreachable or answers 502-504, Connect is tried up to four times.
+If the server ends a session, the app shows the close code and the reason the Live API gave, such as a missing model or a permission error. Errors from the server's own side (no credentials, a refused network connection, a failed simulator call) show only their type, since their text can name internal hosts or files; the server log has the detail. If the backend doesn't answer Connect within 15 seconds, the app tries once more and then shows "the server didn't answer within 15 s"; when the server is unreachable or answers 502-504, Connect is tried up to four times.
 
 ## Deploy to Cloud Run
 

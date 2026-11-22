@@ -16,6 +16,7 @@ import urllib.parse
 from aiohttp import web
 from absl import app, flags, logging
 from google import genai
+from google.genai import errors as genai_errors
 import websockets
 
 import get_credentials
@@ -367,9 +368,8 @@ async def aiohttp_websocket_handler(request: web.Request) -> web.StreamResponse:
     except Exception as e:
         logging.exception("Error in bridged websocket handler")
         close_code = 1011
-        close_reason = websocket_handler.truncate_close_reason(
-            f"{type(e).__name__}: {e}"
-        )
+        # Logged above; its text can name internal hosts or files.
+        close_reason = f"Proxy error: {type(e).__name__}"
     finally:
         logging.info("WebSocket connection cleanup for session %s", session_id)
         # Always clean up the session to prevent memory leaks, however the
@@ -417,7 +417,7 @@ async def handle_fr_post_request(request: web.Request):
     async with chat_session.fr_lock:
         if not chat_session.fr_session:
             return _json_error(
-                f"Function response simulator unavailable: {chat_session.fr_error or 'not initialized'}",
+                f"Function response simulator unavailable ({chat_session.fr_error or 'not initialized'}); see the server log",
                 503,
             )
         current_content = []
@@ -437,7 +437,7 @@ async def handle_fr_post_request(request: web.Request):
             response = await chat_session.fr_session.send_message(current_content)
         except Exception as e:
             logging.exception("Function response simulator request failed")
-            return _json_error(f"Function response simulator failed: {e}", 502)
+            return _json_error(_simulator_error(e), 502)
         if send_definitions:
             chat_session.fc_definitions_sent = True
     logging.debug("Sending back frontend with response:\n%s", response.text)
@@ -484,9 +484,13 @@ async def handle_control_request(request: web.Request):
     try:
         fr_session = await asyncio.to_thread(initialize_gemini_chat_session)
     except Exception as err:
-        fr_error = f"{type(err).__name__}: {err}"
+        # Only the type goes to the browser (see _simulator_error).
+        fr_error = type(err).__name__
         logging.warning(
-            "Skipping FR chat session init for endpoint %s: %s", endpoint, fr_error
+            "Skipping FR chat session init for endpoint %s: %s: %s",
+            endpoint,
+            fr_error,
+            err,
         )
     session_handler = session_management.SessionBaseModel(
         session_id=session_id, ws_host=ws_host, fr_session=fr_session, fr_error=fr_error
@@ -510,6 +514,18 @@ async def handle_control_request(request: web.Request):
             "idle_timeout_s": IDLE_TIMEOUT_S.value,
         }
     )
+
+
+def _simulator_error(error: Exception) -> str:
+    """The browser's text for a failed simulator call; the log has the rest.
+
+    A Gemini API error keeps its HTTP code and status (e.g. 429
+    RESOURCE_EXHAUSTED). Other errors, a failed token fetch among them, carry
+    gcloud's output, file paths or internal hosts, so only their type is shown.
+    """
+    if isinstance(error, genai_errors.APIError):
+        return f"Function response simulator failed ({error.code} {error.status})"
+    return f"Function response simulator failed ({type(error).__name__}); see the server log"
 
 
 def _session_limit_response(

@@ -39,6 +39,10 @@ _DEBUG_PREVIEW_CHARS = 300
 # body can be a whole HTML error page (up to websockets' 1 MiB limit); the
 # browser sees only the first 123 bytes anyway.
 _MAX_CONNECT_ERROR_CHARS = 300
+# The browser's close reason when no access token could be fetched.
+CREDENTIALS_ERROR_REASON = (
+    "Server could not get Google Cloud credentials; see the server log"
+)
 # What send() raises once its connection has closed: websockets raises
 # ConnectionClosed, aiohttp ClientConnectionResetError (a ConnectionResetError).
 _TARGET_CLOSED_ERRORS = (websockets.ConnectionClosed, ConnectionError)
@@ -79,7 +83,23 @@ def _one_line(text: str) -> str:
 
 
 def describe_connect_error(error: Exception) -> str:
-    """Turns an upstream handshake failure into a one-line, user-facing reason."""
+    """Turns an upstream handshake failure into a one-line, user-facing reason.
+
+    HTTP and WebSocket protocol errors keep their text, the Live API's own
+    message included. Others, such as a refused TCP connection, can name
+    internal hosts, proxies or files, so the browser gets only their type;
+    connect_error_detail() has the rest for the log.
+    """
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    if status is not None or isinstance(
+        error, (websockets.WebSocketException, TimeoutError)
+    ):
+        return connect_error_detail(error)
+    return f"Could not connect to the Live API ({type(error).__name__}); see the server log"
+
+
+def connect_error_detail(error: Exception) -> str:
+    """An upstream handshake failure as one line for the server log."""
     if isinstance(error, websockets.InvalidProxy):
         # Its text repeats the proxy URL, which can hold a user and password.
         return _one_line(f"Invalid proxy setting: {error.msg}")
@@ -239,13 +259,20 @@ class WebsocketHandler:
         return _NoRedirectConnect(self.liveapi_service_url, **options)
 
     async def _open_upstream(self):
-        """Opens the upstream connection; None (with close_code set) if it fails.
-
-        A failed token fetch raises instead, and its message reaches the browser.
-        """
+        """Opens the upstream connection; None (with close_code set) if it fails."""
         token = None
         if not self.liveapi_service_url.startswith("ws://"):
-            token = await get_credentials.fetch_access_token()
+            try:
+                token = await get_credentials.fetch_access_token()
+            except Exception as e:
+                # Its text has each source's error: gcloud's stderr, file
+                # paths. Only the log gets it.
+                self.close_code = 1011
+                self.close_reason = CREDENTIALS_ERROR_REASON
+                logging.warning(
+                    "No access token for session %s: %s", self.session_id, e
+                )
+                return None
         try:
             return await self._connect_upstream(token.token if token else None)
         except Exception as e:
@@ -254,7 +281,7 @@ class WebsocketHandler:
             logging.warning(
                 "Upstream connection failed for session %s: %s",
                 self.session_id,
-                self.close_reason,
+                connect_error_detail(e),
             )
             return None
 

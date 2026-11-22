@@ -310,22 +310,50 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             msg = await asyncio.wait_for(ws.receive(), 5)
         self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
         self.assertEqual(msg.data, 1011)
-        self.assertTrue(msg.extra)
+        # The address it tried (an internal proxy, in production) stays in
+        # the log.
+        self.assertEqual(
+            msg.extra,
+            "Could not connect to the Live API (ConnectionRefusedError); "
+            "see the server log",
+        )
+        self.assertNotIn(str(unused_port), str(msg.extra))
 
     async def test_missing_credentials_close_with_reason(self):
         # Cleanup used to re-raise the failed proxy task's error, so the
         # handler died before closing and the browser saw 1006, no reason.
-        await self.connect_session("s16", endpoint="aiplatform.googleapis.com")
-        with mock.patch.object(
-            main.get_credentials,
-            "get_access_token",
-            side_effect=RuntimeError("No access token source worked"),
-        ):
-            ws = await self.client.ws_connect("/ws?session_id=s16")
-            msg = await asyncio.wait_for(ws.receive(), 5)
+        # The error's text (gcloud's stderr, file paths) used to be the reason.
+        with tempfile.TemporaryDirectory() as bin_dir:
+            gcloud = os.path.join(bin_dir, "gcloud")
+            with open(gcloud, "w") as f:
+                f.write(
+                    "#!/bin/sh\n"
+                    "echo 'ERROR: (gcloud) cannot read /home/u/.config/gcloud/adc.json' >&2\n"
+                    "exit 1\n"
+                )
+            os.chmod(gcloud, 0o755)
+            self.enterContext(mock.patch.dict(os.environ, {"PATH": bin_dir}))
+            self.enterContext(
+                mock.patch.object(
+                    main.get_credentials,
+                    "_SOURCES",
+                    (("gcloud CLI", main.get_credentials._token_from_gcloud),),
+                )
+            )
+            self.enterContext(
+                mock.patch.object(main.get_credentials, "_cached_token", None)
+            )
+            await self.connect_session("s16", endpoint="aiplatform.googleapis.com")
+            with self.assertLogs("absl", level="WARNING") as logs:
+                ws = await self.client.ws_connect("/ws?session_id=s16")
+                msg = await asyncio.wait_for(ws.receive(), 5)
         self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
         self.assertEqual(msg.data, 1011)
-        self.assertIn("No access token source worked", str(msg.extra))
+        self.assertEqual(msg.extra, websocket_handler.CREDENTIALS_ERROR_REASON)
+        self.assertTrue(
+            any("/home/u/.config/gcloud/adc.json" in line for line in logs.output),
+            logs.output,
+        )
         self.assertIsNone(await main.SESSION_MANAGER.search_item("s16"))
 
     async def test_ws_requires_known_session(self):
@@ -433,13 +461,53 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             json={"session_id": "s4", "objective": "fr_generate", "functionName": "f"},
         )
         self.assertEqual(resp.status, 503)
-        self.assertIn("no creds", (await resp.json())["error"])
+        self.assertEqual(
+            (await resp.json())["error"],
+            "Function response simulator unavailable (RuntimeError); "
+            "see the server log",
+        )
 
         resp = await self.client.post(
             "/api/post_endpoint",
             json={"session_id": "nope", "objective": "fr_generate"},
         )
         self.assertEqual(resp.status, 404)
+
+    async def test_fr_endpoint_failure_shows_only_the_error_type(self):
+        # A failed token refresh inside the genai client carries every
+        # source's error, gcloud's stderr and helper paths included.
+        chat = mock.Mock()
+        chat.send_message = mock.AsyncMock(
+            side_effect=[
+                RuntimeError(
+                    "No access token available. LOAS helper: RuntimeError: "
+                    "helper not found at /srv/app/backend/common_bag_ws_proxy.par"
+                ),
+                main.genai_errors.ClientError(
+                    429,
+                    {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED"}},
+                ),
+            ]
+        )
+        with mock.patch.object(
+            main, "initialize_gemini_chat_session", return_value=chat
+        ):
+            await self.connect_session("s5")
+        body = {"session_id": "s5", "objective": "fr_generate", "functionName": "f"}
+        errors = []
+        with self.assertLogs("absl", level="ERROR") as logs:
+            for _ in range(2):
+                resp = await self.client.post("/api/post_endpoint", json=body)
+                self.assertEqual(resp.status, 502)
+                errors.append((await resp.json())["error"])
+        self.assertEqual(
+            errors,
+            [
+                "Function response simulator failed (RuntimeError); see the server log",
+                "Function response simulator failed (429 RESOURCE_EXHAUSTED)",
+            ],
+        )
+        self.assertIn("common_bag_ws_proxy.par", "\n".join(logs.output))
 
     async def test_fr_endpoint_rejects_invalid_session_ids(self):
         # A list or object used to reach the session dict and fail with 500.
@@ -850,7 +918,10 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         self.enterContext(
             mock.patch.object(main.get_credentials, "FETCH_TIMEOUT_S", 0.5)
         )
-        with flagsaver.flagsaver(ws_heartbeat_s=0):
+        with (
+            flagsaver.flagsaver(ws_heartbeat_s=0),
+            self.assertLogs("absl", level="WARNING") as logs,
+        ):
             await self.connect_session("s48", endpoint="aiplatform.googleapis.com")
             await self.connect_session("s49", endpoint="aiplatform.googleapis.com")
             ws = await self.client.ws_connect("/ws?session_id=s48")
@@ -862,7 +933,9 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         for msg in (first, second):
             self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
             self.assertEqual(msg.data, 1011)
-            self.assertIn("Timed out after 0.5 s", str(msg.extra))
+            self.assertEqual(msg.extra, websocket_handler.CREDENTIALS_ERROR_REASON)
+        timeouts = [line for line in logs.output if "Timed out after 0.5 s" in line]
+        self.assertEqual(len(timeouts), 2, logs.output)
 
     async def test_control_answers_while_token_fetches_wait(self):
         # Token fetches ran in the default executor, which /api/control's
