@@ -821,7 +821,7 @@ async def main_async():
         # when it comes from the gcloud fallback). Failures are retried per
         # session.
         prefetch = asyncio.create_task(
-            asyncio.to_thread(get_credentials.get_access_token)
+            get_credentials.fetch_access_token(bounded=False)
         )
         prefetch.add_done_callback(
             lambda task: (

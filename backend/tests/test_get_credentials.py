@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import threading
 import time
@@ -235,6 +236,75 @@ class GetAccessTokenTest(unittest.TestCase):
         self.assertEqual(creds.token, "token-fake")
         self.assertIsNone(creds.expiry.tzinfo)
         self.assertTrue(creds.valid)
+
+
+class FetchAccessTokenTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        get_credentials._cached_token = None
+        self.addCleanup(setattr, get_credentials, "_cached_token", None)
+        self.enterContext(mock.patch.object(get_credentials, "FETCH_TIMEOUT_S", 0.3))
+        self.release = threading.Event()
+        self.addCleanup(self.release.set)
+
+    def use_source(self, fetch):
+        self.enterContext(
+            mock.patch.object(get_credentials, "_SOURCES", (("source", fetch),))
+        )
+
+    def stuck(self):
+        self.release.wait(10)
+        raise RuntimeError("stuck source")
+
+    async def test_fresh_cached_token_needs_no_thread(self):
+        get_credentials._cached_token = _token(60, "cached")
+        self.enterContext(
+            mock.patch.object(get_credentials, "_EXECUTOR", mock.Mock(spec=[]))
+        )
+        token = await get_credentials.fetch_access_token()
+        self.assertEqual(token.source, "cached")
+
+    async def test_fetches_on_the_token_threads(self):
+        threads = []
+
+        def fetch():
+            threads.append(threading.current_thread().name)
+            return _token(60, "fetched")
+
+        self.use_source(fetch)
+        self.assertEqual((await get_credentials.fetch_access_token()).source, "fetched")
+        self.assertEqual(len(threads), 1)
+        self.assertTrue(threads[0].startswith("token"), threads)
+
+    async def test_deadline_reuses_a_still_valid_token(self):
+        get_credentials._cached_token = _token(1.5, "cached")
+        self.use_source(self.stuck)
+        token = await get_credentials.fetch_access_token()
+        self.assertEqual(token.source, "cached")
+
+    async def test_deadline_without_a_usable_token_raises(self):
+        self.use_source(self.stuck)
+        with self.assertRaisesRegex(RuntimeError, "Timed out after 0.3 s"):
+            await get_credentials.fetch_access_token()
+
+    async def test_calls_queued_behind_busy_threads_fall_back_at_the_deadline(self):
+        get_credentials._cached_token = _token(1.5, "cached")
+        self.use_source(self.stuck)
+        calls = [
+            get_credentials.fetch_access_token()
+            for _ in range(get_credentials._EXECUTOR._max_workers + 2)
+        ]
+        async with asyncio.timeout(2):
+            tokens = await asyncio.gather(*calls)
+        self.assertEqual({t.source for t in tokens}, {"cached"})
+
+    async def test_unbounded_waits_past_the_deadline(self):
+        def slow():
+            time.sleep(0.6)
+            return _token(60, "slow")
+
+        self.use_source(slow)
+        token = await get_credentials.fetch_access_token(bounded=False)
+        self.assertEqual(token.source, "slow")
 
 
 if __name__ == "__main__":

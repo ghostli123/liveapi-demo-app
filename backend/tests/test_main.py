@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import concurrent.futures
 import hashlib
 import html.parser
 import json
@@ -862,6 +863,48 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
             self.assertEqual(msg.data, 1011)
             self.assertIn("Timed out after 0.5 s", str(msg.extra))
+
+    async def test_control_answers_while_token_fetches_wait(self):
+        # Token fetches ran in the default executor, which /api/control's
+        # simulator setup also uses: a stuck fetch and its waiters held every
+        # worker, so new connects waited up to FETCH_TIMEOUT_S for a thread.
+        loop = asyncio.get_running_loop()
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        loop.set_default_executor(executor)
+        fetching, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def stuck():
+            fetching.set()
+            release.wait(10)
+            raise RuntimeError("stuck source")
+
+        self.enterContext(
+            mock.patch.object(main.get_credentials, "_SOURCES", (("stuck", stuck),))
+        )
+        self.enterContext(
+            mock.patch.object(main.get_credentials, "_cached_token", None)
+        )
+        self.enterContext(mock.patch.object(main.get_credentials, "FETCH_TIMEOUT_S", 3))
+        with flagsaver.flagsaver(ws_heartbeat_s=0):
+            sockets = []
+            for i in range(3):
+                await self.connect_session(
+                    f"s9{i}", endpoint="aiplatform.googleapis.com"
+                )
+            for i in range(3):
+                sockets.append(await self.client.ws_connect(f"/ws?session_id=s9{i}"))
+                if i == 0:
+                    await asyncio.to_thread(fetching.wait, 5)
+            await asyncio.sleep(0.3)  # The waiters reach their threads.
+            started = loop.time()
+            status, body = await self.connect_session("s93")
+            elapsed = loop.time() - started
+            release.set()
+            for ws in sockets:
+                await ws.close()
+        self.assertEqual(status, 200, body)
+        self.assertLess(elapsed, 1.5)
 
     async def test_messages_sent_while_connecting_are_forwarded(self):
         # The browser sends its setup as soon as the socket opens, while the

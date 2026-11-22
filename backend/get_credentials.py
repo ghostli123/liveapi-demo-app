@@ -12,6 +12,8 @@ The token is cached and shared by every session until shortly before it
 expires, so opening a session doesn't cost a token fetch.
 """
 
+import asyncio
+import concurrent.futures
 import dataclasses
 import datetime
 import json
@@ -43,6 +45,15 @@ FETCH_TIMEOUT_S = 15
 # Per HTTP request of an ADC refresh; google-auth's default is 120 s, all of
 # it spent holding _lock while every new session waits.
 ADC_REQUEST_TIMEOUT_S = 10
+
+# Threads for fetch_access_token(). A stuck source holds one for up to 30 s
+# (gcloud) and every waiter one for up to FETCH_TIMEOUT_S; in the default
+# executor they would delay /api/control's simulator setup. One fetch runs at
+# a time (_lock), so a few threads are enough; calls queued behind them fall
+# back at their deadline like the waiters do.
+_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="token"
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -160,22 +171,29 @@ def _fallback_token(error: str) -> AccessToken:
     return token
 
 
+def _fresh_cached_token() -> AccessToken | None:
+    token = _cached_token
+    if token and token.expiry - _utcnow() > _EXPIRY_MARGIN:
+        return token
+    return None
+
+
+def _timeout_error() -> str:
+    return f"Timed out after {FETCH_TIMEOUT_S} s waiting for an access token"
+
+
 def get_access_token() -> AccessToken:
     """Returns a cached or freshly fetched token. Blocks; call off the event loop."""
     global _cached_token, _failed_fetches, _last_failure
     failed_before = _failed_fetches
-    # Waiting threads would otherwise pile up behind a stuck fetch, in the
-    # to_thread pool that /api/control also uses.
+    # Waiting threads would otherwise pile up behind a stuck fetch.
     if not _lock.acquire(timeout=FETCH_TIMEOUT_S):
-        return _fallback_token(
-            f"Timed out after {FETCH_TIMEOUT_S} s waiting for an access token"
-        )
+        return _fallback_token(_timeout_error())
     try:
-        if _cached_token and _cached_token.expiry - _utcnow() > _EXPIRY_MARGIN:
-            return _cached_token
+        if token := _fresh_cached_token():
+            return token
         # A fetch failed while this call waited. The sources' timeouts (30 s
-        # for gcloud) would otherwise add up per queued session, and the
-        # waiting threads fill the to_thread pool that /api/control also uses.
+        # for gcloud) would otherwise add up per queued session.
         if _failed_fetches != failed_before:
             return _fallback_token(_last_failure)
         errors = []
@@ -199,6 +217,23 @@ def get_access_token() -> AccessToken:
         return _fallback_token(_last_failure)
     finally:
         _lock.release()
+
+
+async def fetch_access_token(*, bounded: bool = True) -> AccessToken:
+    """get_access_token() for the event loop, run on the token threads.
+
+    A fresh cached token is returned without a thread. If bounded and no token
+    arrives within FETCH_TIMEOUT_S, a still-usable cached token is returned,
+    else it raises. The fetch itself can't be interrupted; if it finishes late,
+    it caches the token for the next session.
+    """
+    if token := _fresh_cached_token():
+        return token
+    future = asyncio.get_running_loop().run_in_executor(_EXECUTOR, get_access_token)
+    try:
+        return await asyncio.wait_for(future, FETCH_TIMEOUT_S if bounded else None)
+    except TimeoutError:
+        return _fallback_token(_timeout_error())
 
 
 class ChainCredentials(google.auth.credentials.Credentials):
