@@ -960,6 +960,76 @@ test("a mic level meter that fails to start leaves the microphone on without it"
     assert.deepEqual(errors, ["Could not start the microphone level meter: Error: no audio device"]);
 });
 
+for (const transport of ["websocket", "webrtc"]) {
+    test(`a ${transport} mic start superseded during its prompt leaves the level meter hidden`, async () => {
+        // Each start waits on its own prompt; a superseded one ends without a
+        // stream, as the real managers do after their generation check.
+        const prompts = [];
+        let liveStream = null;
+        const startMic = async () => {
+            liveStream = null;
+            const prompt = Promise.withResolvers();
+            prompts.push(prompt);
+            const stream = await prompt.promise;
+            if (prompt === prompts.at(-1)) liveStream = stream;
+        };
+        const meterStreams = [];
+        const { context, element } = loadApp({
+            navigator: {},
+            requestAnimationFrame: () => 0,
+            LiveAudioInputManager: class {
+                get stream() {
+                    return liveStream;
+                }
+                updateAudioInterval = startMic;
+                recordChunk() {}
+                disconnectMicrophone() {
+                    liveStream = null;
+                }
+            },
+            MicLevelMeter: class {
+                start(stream) {
+                    meterStreams.push(stream);
+                }
+                stop() {}
+            },
+        });
+        const api = context.AppState.geminiLiveApi;
+        api.transportMode = transport;
+        if (transport === "webrtc") {
+            api.webRtcManager = {
+                get micStream() {
+                    return liveStream;
+                },
+                startMicrophone: startMic,
+                stopMicrophone() {
+                    liveStream = null;
+                },
+            };
+        }
+        const settle = () => new Promise((resolve) => setImmediate(resolve));
+        element("micLevel").hidden = true;
+
+        context.micOffBtnClick(); // Mic on: the first prompt opens.
+        context.micBtnClick(); // Mic off...
+        context.micOffBtnClick(); // ...and on again before answering it.
+        await settle();
+        assert.equal(prompts.length, 2);
+        prompts[0].resolve({ id: "first" }); // The superseded prompt is granted.
+        await settle();
+        assert.equal(element("micLevel").hidden, true);
+        assert.deepEqual(meterStreams, []);
+
+        prompts[1].resolve({ id: "second" });
+        await settle();
+        assert.equal(element("micLevel").hidden, false);
+        assert.deepEqual(
+            meterStreams.map((stream) => stream.id),
+            ["second"]
+        );
+    });
+}
+
 test("a resume that falls back to WebSocket media restarts the mic and camera frames over the WebSocket", async () => {
     const { GeminiLiveAPI } = loadScript("gemini-live-api.js", ["GeminiLiveAPI"], {
         setInterval: () => 1,

@@ -1359,6 +1359,9 @@ async function startAudioInput() {
 
 /** The level meter is decorative: if the browser refuses it, the mic stays on without it. */
 function startMicLevelMeter(stream) {
+    // A start superseded while its permission prompt was open returns without
+    // a stream; the newer start shows the meter once it has one.
+    if (!stream) return;
     try {
         AppState.micLevelMeter.start(stream);
     } catch (err) {
