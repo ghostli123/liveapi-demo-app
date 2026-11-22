@@ -77,7 +77,7 @@ The backend tries, in order: Application Default Credentials through google-auth
 
 ### Outbound proxy
 
-Behind a proxy, set `https_proxy` (or `all_proxy`): the token fetch and the Live API connection both use it, and `no_proxy` exempts hosts. The Live API connection goes through an HTTP proxy as a CONNECT tunnel, so the proxy never sees the access token; a SOCKS proxy (`socks5://`) needs `pip install python-socks` for that connection. The local gateway used by the internal environments (`autopush-common` and the like) never uses a proxy. If the proxy refuses the tunnel, the session closes with the proxy's reason (e.g. `proxy rejected connection: HTTP 407`).
+Behind a proxy, set `https_proxy` (or `all_proxy`): the token fetch and the Live API connection both use it, and `no_proxy` exempts hosts. A proxy without a scheme (`proxy.corp:3128`) is taken as `http://`, as curl and requests do. The Live API connection goes through an HTTP proxy as a CONNECT tunnel, so the proxy never sees the access token; a SOCKS proxy (`socks5://`) needs `pip install python-socks` for that connection. The local gateway used by the internal environments (`autopush-common` and the like) never uses a proxy. If the proxy refuses the tunnel, the session closes with the proxy's reason (e.g. `proxy rejected connection: HTTP 407`).
 
 ## Using the app
 

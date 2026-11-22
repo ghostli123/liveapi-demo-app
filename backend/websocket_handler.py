@@ -107,12 +107,18 @@ def upstream_proxy(url: str) -> str | None:
     websockets reads wss_proxy, socks_proxy and https_proxy and honors
     no_proxy; requests (google-auth) also falls back to all_proxy, so this
     does too. An HTTP proxy gets a CONNECT tunnel, so the token stays inside
-    TLS; a SOCKS one needs the python-socks package.
+    TLS; a SOCKS one needs the python-socks package. A proxy given without a
+    scheme (proxy.corp:3128) is an HTTP proxy, as requests and curl read it,
+    or SOCKS5 if it came from socks_proxy, as websockets reads that one.
     """
     uri = websockets.uri.parse_uri(url)
     proxy = websockets.proxy.get_proxy(uri)
+    proxies = urllib.request.getproxies()
     if proxy is None and not urllib.request.proxy_bypass(f"{uri.host}:{uri.port}"):
-        proxy = urllib.request.getproxies().get("all")
+        proxy = proxies.get("all")
+    if proxy and "://" not in proxy:
+        scheme = "socks5h" if proxy == proxies.get("socks") else "http"
+        proxy = f"{scheme}://{proxy}"
     return proxy
 
 

@@ -317,6 +317,38 @@ class UpstreamProxyTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(websocket_handler.upstream_proxy(url))
         with self.environ(all_proxy="http://all:8080", no_proxy=self.HOST):
             self.assertIsNone(websocket_handler.upstream_proxy(url))
+        # No scheme means HTTP, as in requests and curl; websockets refuses it.
+        with self.environ(https_proxy="corp:3128"):
+            self.assertEqual(websocket_handler.upstream_proxy(url), "http://corp:3128")
+        with self.environ(all_proxy="user:pw@all:8080"):
+            self.assertEqual(
+                websocket_handler.upstream_proxy(url), "http://user:pw@all:8080"
+            )
+        with self.environ(https_proxy="socks5h://corp:1080"):
+            self.assertEqual(
+                websocket_handler.upstream_proxy(url), "socks5h://corp:1080"
+            )
+        with self.environ(socks_proxy="corp:1080", https_proxy="other:3128"):
+            self.assertEqual(
+                websocket_handler.upstream_proxy(url), "socks5h://corp:1080"
+            )
+
+    async def test_upstream_tunnels_through_proxy_without_scheme(self):
+        async def echo(connection):
+            await connection.send(await connection.recv())
+
+        with tempfile.TemporaryDirectory() as directory:
+            server_port = await self.serve_tls(directory, echo)
+            proxy = ConnectProxy(server_port)
+            proxy_port = await self.start_proxy(proxy)
+            handler = websocket_handler.WebsocketHandler(
+                f"wss://{self.HOST}/ws", "s", None
+            )
+            with self.environ(https_proxy=f"127.0.0.1:{proxy_port}"):
+                async with handler._connect_upstream("secret-token") as connection:
+                    await connection.send("hello")
+                    self.assertEqual(await connection.recv(), "hello")
+        self.assertEqual(len(proxy.requests), 1)
 
     async def serve_tls(self, directory, handler):
         cert_path, key_path = _self_signed_cert(directory, self.HOST)
