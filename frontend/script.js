@@ -967,8 +967,13 @@ function handleReceiveResponse(messageResponse) {
             console.log("VAD signal");
             break;
         case "VOICE_ACTIVITY":
-            if (messageResponse.data === "ACTIVITY_START") markUserSpeechStart();
-            else if (messageResponse.data === "ACTIVITY_END") markUserTurnEnd("end of speech");
+            if (messageResponse.data === "ACTIVITY_START") {
+                markUserSpeechStart();
+                showHearingUser(true);
+            } else if (messageResponse.data === "ACTIVITY_END") {
+                markUserTurnEnd("end of speech");
+                showHearingUser(false);
+            }
             break;
         case "FUNCTION_CALL":
             closeTranscriptLine("input");
@@ -1084,6 +1089,7 @@ async function handleSessionResumptionReconnect() {
     closeTranscriptLine("input");
     closeTranscriptLine("output");
     setUserTurnActive(false); // The new session never saw activity_start.
+    showHearingUser(false); // Nor the speech: its ACTIVITY_END won't come.
     resetLatencyTurn();
     if (api.transportMode !== "webrtc" && AppState.liveVideoOutputManager) {
         // The new connection streams a new MP4, which needs a fresh MediaSource.
@@ -1410,6 +1416,8 @@ function stopAudioInput() {
     endAudioStream();
     AppState.micLevelMeter.stop();
     AppUI.setHidden("micLevel", true);
+    // Over WebRTC a stopped track sends nothing, so ACTIVITY_END may never come.
+    showHearingUser(false);
     if (
         AppState.geminiLiveApi &&
         AppState.geminiLiveApi.webRtcManager
@@ -1754,6 +1762,15 @@ function setModelSpeaking(speaking) {
     } else if (!speaking && speakingNow) {
         setAppStatus("connected");
     }
+}
+
+/**
+ * Shows "hearing you" while the server's voice activity detection hears speech,
+ * so the user can tell their microphone reaches the model even with input
+ * transcription off. Not announced: it would talk over the user.
+ */
+function showHearingUser(hearing) {
+    AppUI.setHidden("hearing", !hearing);
 }
 
 function setMediaButtonsEnabled(enabled) {

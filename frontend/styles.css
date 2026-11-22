@@ -194,9 +194,11 @@ details .details-content {
 #connecting { background-color: #fffde7; color: #a15c00; }
 #connected { background-color: #e8f5e9; color: #2e7d32; }
 #speaking { background-color: #e3f2fd; color: #1565c0; }
+#hearing { background-color: #f3e5f5; color: #6a1b9a; margin-left: 8px; }
 /* Only the icon pulses: faded text would fall below 4.5:1 contrast. */
 #connecting .material-symbols-outlined,
-#speaking .material-symbols-outlined { animation: throb 1.5s infinite ease-in-out; }
+#speaking .material-symbols-outlined,
+#hearing .material-symbols-outlined { animation: throb 1.5s infinite ease-in-out; }
 @keyframes throb {
   0%, 100% { opacity: 0.7; }
   50% { opacity: 1; }
@@ -204,7 +206,22 @@ details .details-content {
 /* The label text already says the state; endless motion bothers some users. */
 @media (prefers-reduced-motion: reduce) {
   #connecting .material-symbols-outlined,
-  #speaking .material-symbols-outlined { animation: none; }
+  #speaking .material-symbols-outlined,
+  #hearing .material-symbols-outlined { animation: none; }
+}
+/* Beside "model speaking" both labels would wrap on a phone, growing the row
+   while the user talks; the ear icon says it there, the label stays for
+   screen readers. */
+@media (max-width: 480px) {
+  #hearing { padding: 8px 12px; }
+  #hearing .icon-text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 }
 
 .state[hidden] {

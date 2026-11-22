@@ -20,7 +20,7 @@
 // scenario that passes with some of its checks left out prints "PASS*" and
 // says which.
 
-/* global window, document, customElements, AppState, handleSessionResumptionReconnect, axe -- used in
+/* global window, document, customElements, MutationObserver, AppState, handleSessionResumptionReconnect, axe -- used in
    page.evaluate() callbacks, which run in the app page */
 const { chromium, firefox } = require("playwright-core");
 const fs = require("fs");
@@ -578,11 +578,26 @@ const scenarios = {
             const page = await run.newPage(voiceBrowser);
             await connect(page, { transport: "webrtc", modality: "AUDIO" });
             await waitConnected(page);
+            // "hearing you" follows the server's voice activity frames.
+            await page.evaluate(() => {
+                const badge = document.getElementById("hearing");
+                window.hearingShown = 0;
+                new MutationObserver(() => (window.hearingShown += badge.hidden ? 0 : 1)).observe(badge, {
+                    attributes: true,
+                    attributeFilter: ["hidden"],
+                });
+            });
             await page.click("#micOffBtn md-filled-icon-button");
             await page.waitForTimeout(25000);
             const lines = await chat(page);
             check(lines.some((l) => l.kind.includes("chat-user")), "no input transcript");
             check(lines.some((l) => l.kind.includes("chat-model")), "no model reply");
+            const hearing = await page.evaluate(() => ({
+                shown: window.hearingShown,
+                hidden: document.getElementById("hearing").hidden,
+            }));
+            check(hearing.shown > 0, "'hearing you' never showed");
+            check(hearing.hidden, "'hearing you' still shows after the speech ended");
             // Timed from the server's voiceActivity ACTIVITY_END, not a transcript.
             const latency = await page.evaluate(() => document.getElementById("response-latency").textContent);
             check(/^[\d,]+ ms after end of speech/.test(latency), `response latency: ${latency}`);

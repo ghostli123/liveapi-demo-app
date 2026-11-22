@@ -678,6 +678,49 @@ test("without voice activity frames, latency counts from the last input transcri
     assert.equal(latency(), "300 ms after last transcript");
 });
 
+test("'hearing you' shows while the server hears speech, also over the model", () => {
+    const { context, element, at } = loadLatencySession();
+    const hearing = () => !element("hearing").hidden;
+    context.AppState.liveAudioOutputManager.clear = () => {};
+    element("hearing").hidden = true;
+    element("connected").hidden = false;
+    at(0, "VOICE_ACTIVITY", "ACTIVITY_START");
+    assert.equal(hearing(), true);
+    at(1000, "VOICE_ACTIVITY", "ACTIVITY_END");
+    assert.equal(hearing(), false);
+
+    at(1500, "TEXT", "Well,");
+    assert.equal(element("speaking").hidden, false);
+    at(2000, "VOICE_ACTIVITY", "ACTIVITY_START"); // The user talks over the model.
+    assert.equal(hearing(), true);
+    at(2100, "INTERRUPT"); // Still speaking: only ACTIVITY_END says it stopped.
+    assert.equal(hearing(), true);
+    at(3000, "VOICE_ACTIVITY", "ACTIVITY_END");
+    assert.equal(hearing(), false);
+});
+
+test("'hearing you' clears when no ACTIVITY_END will come: Mic off, a GoAway resume, Disconnect", () => {
+    const app = sessionWithBufferedAudio();
+    const { context, element, api } = app;
+    const hearing = () => !element("hearing").hidden;
+    const start = () => context.handleReceiveResponse({ type: "VOICE_ACTIVITY", data: "ACTIVITY_START" });
+
+    start();
+    context.micBtnClick();
+    assert.equal(hearing(), false);
+
+    start();
+    api.goAwayAction = () => "resume";
+    api.resume = async () => {};
+    context.AppState.liveVideoOutputManager.initMediaSource = () => {};
+    context.handleReceiveResponse({ type: "GO_AWAY", data: "10s" });
+    assert.equal(hearing(), false);
+
+    start();
+    reconnect(app);
+    assert.equal(hearing(), false);
+});
+
 test("connection age stops when a GoAway resume drops the connection and restarts with the new one", () => {
     const clock = { now: 0 };
     const intervals = new Map();
