@@ -476,9 +476,9 @@ async def handle_control_request(request: web.Request):
         return _json_error("Already running", 409)
     # Before the simulator init: a rejected connect shouldn't build a chat.
     try:
-        await SESSION_MANAGER.check_limit(session_id, MAX_SESSIONS.value)
-    except session_management.SessionLimitError as e:
-        return _session_limit_response(session_id, e)
+        await SESSION_MANAGER.check_can_add(session_id, MAX_SESSIONS.value)
+    except session_management.SessionAddError as e:
+        return _add_refused_response(session_id, e)
 
     fr_session, fr_error = None, ""
     try:
@@ -500,8 +500,8 @@ async def handle_control_request(request: web.Request):
         added = await SESSION_MANAGER.add_unless_connected(
             session_id, session_handler, max_sessions=MAX_SESSIONS.value
         )
-    except session_management.SessionLimitError as e:
-        return _session_limit_response(session_id, e)
+    except session_management.SessionAddError as e:
+        return _add_refused_response(session_id, e)
     if not added:
         return _json_error("Already running", 409)
     session_handler.expiry_task = asyncio.create_task(
@@ -528,9 +528,13 @@ def _simulator_error(error: Exception) -> str:
     return f"Function response simulator failed ({type(error).__name__}); see the server log"
 
 
-def _session_limit_response(
-    session_id: str, error: session_management.SessionLimitError
+def _add_refused_response(
+    session_id: str, error: session_management.SessionAddError
 ) -> web.Response:
+    if not isinstance(error, session_management.SessionLimitError):
+        # A disconnect arrived first; the browser no longer waits for this.
+        logging.info("Refused session %s: %s", session_id, error)
+        return _json_error(str(error), 409)
     logging.warning("Rejected session %s: %s", session_id, error)
     # The frontend retries 503s, which also covers a resume whose old
     # session hasn't been removed yet.

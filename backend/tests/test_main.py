@@ -822,6 +822,51 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 await ws.close()
                 await self.wait_for_session_end("s42")
 
+    async def test_disconnect_during_connect_drops_the_late_record(self):
+        # The disconnect found no record while the connect was still building
+        # the simulator chat; the connect then added one, which held its slot
+        # for PENDING_SESSION_TTL_S.
+        with flagsaver.flagsaver(max_sessions=1):
+            init_started, release = threading.Event(), threading.Event()
+
+            def slow_init():
+                init_started.set()
+                release.wait(5)
+                raise RuntimeError("no creds")
+
+            try:
+                with mock.patch.object(
+                    main, "initialize_gemini_chat_session", side_effect=slow_init
+                ):
+                    connect = asyncio.create_task(self.connect_session("s43"))
+                    self.assertTrue(await asyncio.to_thread(init_started.wait, 5))
+                    status, body = await self.disconnect_session("s43")
+                    self.assertEqual((status, body), (200, {"removed": False}))
+                    release.set()
+                    status, body = await connect
+            finally:
+                release.set()
+            self.assertEqual(status, 409, body)
+            self.assertIn("gave up", body["error"])
+            self.assertIsNone(await main.SESSION_MANAGER.search_item("s43"))
+            status, body = await self.connect_session("s44")
+            self.assertEqual(status, 200, body)
+
+    async def test_connect_retry_after_disconnect_is_refused(self):
+        # The frontend's connect retries can still be running after it sent
+        # disconnect; they get 409, which it doesn't retry.
+        init = mock.Mock(side_effect=RuntimeError("no creds"))
+        with mock.patch.object(main, "initialize_gemini_chat_session", init):
+            status, body = await self.connect_session("s45")
+            self.assertEqual(status, 200, body)
+            status, body = await self.disconnect_session("s45")
+            self.assertEqual((status, body), (200, {"removed": True}))
+            status, body = await self.connect_session("s45")
+            self.assertEqual(status, 409, body)
+            self.assertIsNone(await main.SESSION_MANAGER.search_item("s45"))
+            # Refused before the simulator chat is built.
+            init.assert_called_once()
+
     async def test_slot_frees_when_browser_closes(self):
         # The upstream never acknowledges the close, so the old session spends
         # UPSTREAM_CLOSE_TIMEOUT_S closing; a resume's new session ID must not
@@ -1752,17 +1797,67 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await manager.add_unless_connected("d", d))
         self.assertEqual(len(await manager.all_items()), 3)
 
-    async def test_check_limit(self):
+    async def test_check_can_add(self):
         manager = session_management.SessionManager()
-        await manager.check_limit("a", 1)
+        await manager.check_can_add("a", 1)
         a = session_management.SessionBaseModel("a", "host")
         self.assertTrue(await manager.add_unless_connected("a", a, max_sessions=1))
         with self.assertRaises(session_management.SessionLimitError):
-            await manager.check_limit("b", 1)
+            await manager.check_can_add("b", 1)
         # Its own ID fits, and 0 means no limit; nothing is stored.
-        await manager.check_limit("a", 1)
-        await manager.check_limit("b", 0)
+        await manager.check_can_add("a", 1)
+        await manager.check_can_add("b", 0)
         self.assertIsNone(await manager.search_item("b"))
+
+    async def test_remove_pending_refuses_the_id_for_a_while(self):
+        manager = session_management.SessionManager()
+        now = 1000.0
+        with (
+            mock.patch.object(session_management.time, "monotonic", lambda: now),
+            mock.patch.object(manager, "ABANDONED_ID_TTL_S", 10),
+        ):
+            # Removed or not yet added: both refuse a later add of the ID.
+            a = session_management.SessionBaseModel("a", "host")
+            self.assertTrue(await manager.add_unless_connected("a", a))
+            self.assertTrue(await manager.remove_pending("a"))
+            self.assertFalse(await manager.remove_pending("b"))
+            for session_id in ("a", "b"):
+                with self.assertRaises(session_management.SessionAbandonedError):
+                    await manager.check_can_add(session_id, 0)
+                record = session_management.SessionBaseModel(session_id, "host")
+                with self.assertRaises(session_management.SessionAbandonedError):
+                    await manager.add_unless_connected(session_id, record)
+                self.assertIsNone(await manager.search_item(session_id))
+
+            # A connected record is left alone, and its ID isn't refused.
+            c = session_management.SessionBaseModel("c", "host")
+            self.assertTrue(await manager.add_unless_connected("c", c))
+            self.assertTrue(await manager.claim_websocket("c", c, mock.AsyncMock()))
+            self.assertFalse(await manager.remove_pending("c"))
+            self.assertIs(await manager.search_item("c"), c)
+            await manager.check_can_add("c", 0)
+
+            now += 10
+            await manager.check_can_add("a", 0)
+            await manager.check_can_add("b", 0)
+
+    async def test_abandoned_ids_are_bounded(self):
+        manager = session_management.SessionManager()
+        with mock.patch.object(manager, "MAX_ABANDONED_IDS", 3):
+            for i in range(5):
+                await manager.remove_pending(f"id{i}")
+            # The oldest are forgotten first.
+            for i in (0, 1):
+                await manager.check_can_add(f"id{i}", 0)
+            for i in (2, 3, 4):
+                with self.assertRaises(session_management.SessionAbandonedError):
+                    await manager.check_can_add(f"id{i}", 0)
+            # Abandoning an ID again makes it the newest.
+            await manager.remove_pending("id2")
+            await manager.remove_pending("id5")
+            await manager.check_can_add("id3", 0)
+            with self.assertRaises(session_management.SessionAbandonedError):
+                await manager.check_can_add("id2", 0)
 
 
 if __name__ == "__main__":

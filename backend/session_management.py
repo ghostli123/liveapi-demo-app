@@ -1,4 +1,6 @@
 import asyncio
+import collections
+import time
 from typing import Dict, Optional
 from websocket_handler import WebsocketHandler
 from absl import logging
@@ -40,8 +42,16 @@ class SessionBaseModel:
         self.fr_session = None
 
 
-class SessionLimitError(Exception):
+class SessionAddError(Exception):
+    """Raised when a session record can't be added."""
+
+
+class SessionLimitError(SessionAddError):
     """Raised when adding a session would exceed the manager's limit."""
+
+
+class SessionAbandonedError(SessionAddError):
+    """Raised when adding a session whose browser already gave up on it."""
 
 
 class SessionManager:
@@ -53,6 +63,12 @@ class SessionManager:
     in an asynchronous environment.
     """
 
+    # How long an abandoned session ID stays refused. It covers the
+    # frontend's connect retries (4 tries of up to 15 s, 6 s of backoff).
+    ABANDONED_ID_TTL_S = 120
+    # Most abandoned IDs remembered; the oldest are forgotten first.
+    MAX_ABANDONED_IDS = 10_000
+
     def __init__(self):
         """
         Initializes the SessionManager with an empty session dictionary
@@ -60,6 +76,8 @@ class SessionManager:
         """
         self._sessions: Dict[str, SessionBaseModel] = {}
         self._lock = asyncio.Lock()
+        # Session ID -> time.monotonic() when it may be added again.
+        self._abandoned: collections.OrderedDict[str, float] = collections.OrderedDict()
 
     async def add_unless_connected(
         self, session_id: str, data: SessionBaseModel, max_sessions: int = 0
@@ -78,28 +96,32 @@ class SessionManager:
 
         Raises:
             SessionLimitError: Storing a new record would exceed max_sessions.
+            SessionAbandonedError: remove_pending was called for session_id
+                within ABANDONED_ID_TTL_S.
         """
         async with self._lock:
             current = self._sessions.get(session_id)
             if current and current.websocket_handler:
                 return False
-            self._check_limit_locked(session_id, max_sessions)
+            self._check_can_add_locked(session_id, max_sessions)
             self._sessions[session_id] = data
         logging.info("Session %s added", session_id)
         if current:
             await current.del_session()
         return True
 
-    async def check_limit(self, session_id: str, max_sessions: int) -> None:
-        """Raises SessionLimitError if session_id couldn't be added right now.
+    async def check_can_add(self, session_id: str, max_sessions: int) -> None:
+        """Raises SessionAddError if session_id couldn't be added right now.
 
         A cheap early check, so a request that would be rejected skips costly
         setup; add_unless_connected checks again atomically.
         """
         async with self._lock:
-            self._check_limit_locked(session_id, max_sessions)
+            self._check_can_add_locked(session_id, max_sessions)
 
-    def _check_limit_locked(self, session_id: str, max_sessions: int) -> None:
+    def _check_can_add_locked(self, session_id: str, max_sessions: int) -> None:
+        if self._abandoned.get(session_id, 0) > time.monotonic():
+            raise SessionAbandonedError("The browser already gave up on this session")
         if session_id not in self._sessions and 0 < max_sessions <= len(self._sessions):
             raise SessionLimitError(f"Server is at its session limit ({max_sessions})")
 
@@ -139,17 +161,35 @@ class SessionManager:
         hold a max_sessions slot until it expires. A connected session ends
         when its WebSocket closes instead.
 
+        Unless session_id is connected, it is also refused for
+        ABANDONED_ID_TTL_S: a connect request still in progress (or retried)
+        would otherwise add a record nobody uses after this one returns.
+
         Returns:
             Whether a record was removed.
         """
         async with self._lock:
             record = self._sessions.get(session_id)
-            if record is None or record.websocket_handler:
+            if record and record.websocket_handler:
+                return False
+            self._note_abandoned_locked(session_id)
+            if record is None:
                 return False
             del self._sessions[session_id]
         logging.info("Removed session %s before it connected", session_id)
         await record.del_session()
         return True
+
+    def _note_abandoned_locked(self, session_id: str) -> None:
+        now = time.monotonic()
+        self._abandoned.pop(session_id, None)
+        self._abandoned[session_id] = now + self.ABANDONED_ID_TTL_S
+        # Entries share one TTL, so the oldest is first to expire.
+        while (
+            len(self._abandoned) > self.MAX_ABANDONED_IDS
+            or next(iter(self._abandoned.values())) <= now
+        ):
+            self._abandoned.popitem(last=False)
 
     async def delete_item(self, session_id: str, record: SessionBaseModel) -> None:
         """Removes record if it is still session_id's record, and ends it.
