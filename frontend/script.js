@@ -1754,13 +1754,15 @@ function endSession() {
     closeTranscriptLine("output");
     AppState.liveAudioOutputManager.clear();
     // The next Connect starts a new conversation unless the user pastes a
-    // handle back in, so keep the last one where they can find it.
+    // handle back in, so keep the last one where they can find it. Only a
+    // handle the server sent this session counts: after a Connect that failed
+    // or was cancelled, the field still holds what the user pasted.
+    const handle = AppState.geminiLiveApi.latestResumptionHandle;
     const handleInput = AppUI.getControl("handle");
-    if (handleInput && handleInput.value) {
-        newSystemMessage(
-            `To resume this conversation later, enter this handle in Advanced Settings: ${handleInput.value}`
-        );
+    if (handle && handleInput) {
+        newSystemMessage(`To resume this conversation later, enter this handle in Advanced Settings: ${handle}`);
         handleInput.value = "";
+        AppState.geminiLiveApi.latestResumptionHandle = ""; // Posted once.
     }
     // Before resetPlayer(), which discards the recorded video this saves.
     setAppStatus("disconnected");

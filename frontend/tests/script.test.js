@@ -711,6 +711,34 @@ test("a microphone prompt from the last session doesn't start a turn in the next
     assert.deepEqual(api.sent, [["activity", true]]);
 });
 
+test("a session's last handle moves from the field into the chat when it ends", () => {
+    const app = loadSession();
+    const chat = [];
+    app.element("text-chat").appendChild = (line) => chat.push(line.textContent);
+    app.api.latestResumptionHandle = "server-handle";
+    app.element("handle").value = "server-handle"; // RESUMPTION writes it there too.
+    reconnect(app);
+    assert.equal(app.element("handle").value, "");
+    assert.deepEqual(chat, [
+        "To resume this conversation later, enter this handle in Advanced Settings: server-handle",
+    ]);
+
+    reconnect(app); // Ending again (e.g. a late error) doesn't repeat it.
+    assert.equal(chat.length, 1);
+});
+
+test("a pasted handle stays in the field when Connect fails or is cancelled", () => {
+    const app = loadSession();
+    const chat = [];
+    app.element("text-chat").appendChild = (line) => chat.push(line.textContent);
+    // connect() clears the last session's handle; this one never got one.
+    app.api.latestResumptionHandle = "";
+    app.element("handle").value = "pasted-handle";
+    reconnect(app);
+    assert.equal(app.element("handle").value, "pasted-handle");
+    assert.deepEqual(chat, []);
+});
+
 test("a microphone that stops on its own ends the turn, turns the mic off and says why", async () => {
     const { context, element, api, mic, dialogText } = loadSession();
     api.isSetupComplete = true;
