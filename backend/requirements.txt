@@ -5,4 +5,4 @@ aiohttp~=3.14
 certifi
 google-auth~=2.62
 google-genai~=3.6
-websockets==14.2
+websockets==17.4

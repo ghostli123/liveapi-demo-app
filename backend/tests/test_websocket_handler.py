@@ -189,6 +189,28 @@ class UpstreamRedirectTest(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class UpstreamProxyTest(unittest.IsolatedAsyncioTestCase):
+    async def test_proxy_environment_variables_are_ignored(self):
+        async def close(connection):
+            await connection.close()
+
+        quiet = logging.getLogger("test.quiet_server")
+        quiet.setLevel(logging.INFO)
+        # Nothing listens on port 9, so a connection through the proxy fails.
+        proxies = {
+            name: "http://127.0.0.1:9"
+            for name in ("http_proxy", "https_proxy", "all_proxy")
+        }
+        async with websockets.serve(close, "127.0.0.1", 0, logger=quiet) as server:
+            port = next(iter(server.sockets)).getsockname()[1]
+            handler = websocket_handler.WebsocketHandler(
+                f"ws://127.0.0.1:{port}/ws", "s", None
+            )
+            with mock.patch.dict("os.environ", proxies):
+                async with handler._connect_upstream(None) as connection:
+                    await connection.wait_closed()
+
+
 class FakeConnection:
     def __init__(self, recv_error=None, messages=(), send_error=None):
         self.recv_error = recv_error

@@ -195,6 +195,10 @@ class WebsocketHandler:
             "open_timeout": UPSTREAM_OPEN_TIMEOUT_S,
             "close_timeout": UPSTREAM_CLOSE_TIMEOUT_S,
             "logger": _UPSTREAM_LOGGER,
+            # websockets 15+ connects through the proxy that http_proxy,
+            # https_proxy or all_proxy names; the local gateway (ws://localhost)
+            # must not go through one, and the upstream never has.
+            "proxy": None,
         }
         if token is not None:
             options["additional_headers"] = {

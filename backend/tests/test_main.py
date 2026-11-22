@@ -952,7 +952,7 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             msg = await asyncio.wait_for(ws.receive(), 5)
         self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
         self.assertEqual(msg.data, 1011)
-        self.assertIn("timed out during handshake", str(msg.extra))
+        self.assertIn("timed out during opening handshake", str(msg.extra))
 
     async def test_concurrent_websockets_for_one_session(self):
         # The /ws handler attached itself to the record only after
