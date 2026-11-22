@@ -411,31 +411,34 @@ async def handle_fr_post_request(request: web.Request):
     if query_object != "fr_generate":
         return _json_error(f"Unknown query objective type {query_object!r}", 400)
 
-    if not chat_session.fr_session:
-        return _json_error(
-            f"Function response simulator unavailable: {chat_session.fr_error or 'not initialized'}",
-            503,
+    # One request at a time per session (see SessionBaseModel.fr_lock). The
+    # checks run inside the lock: the session may end while a request waits.
+    async with chat_session.fr_lock:
+        if not chat_session.fr_session:
+            return _json_error(
+                f"Function response simulator unavailable: {chat_session.fr_error or 'not initialized'}",
+                503,
+            )
+        current_content = []
+        send_definitions = (
+            chat_session.fc_definitions and not chat_session.fc_definitions_sent
         )
-    current_content = []
-    send_definitions = (
-        chat_session.fc_definitions and not chat_session.fc_definitions_sent
-    )
-    if send_definitions:
+        if send_definitions:
+            current_content += [
+                genai.types.Part(text="The definition of the functions are:"),
+                genai.types.Part(text=chat_session.fc_definitions),
+            ]
         current_content += [
-            genai.types.Part(text="The definition of the functions are:"),
-            genai.types.Part(text=chat_session.fc_definitions),
+            genai.types.Part(text="Now generate function response this function call."),
+            genai.types.Part(text=query),
         ]
-    current_content += [
-        genai.types.Part(text="Now generate function response this function call."),
-        genai.types.Part(text=query),
-    ]
-    try:
-        response = await chat_session.fr_session.send_message(current_content)
-    except Exception as e:
-        logging.exception("Function response simulator request failed")
-        return _json_error(f"Function response simulator failed: {e}", 502)
-    if send_definitions:
-        chat_session.fc_definitions_sent = True
+        try:
+            response = await chat_session.fr_session.send_message(current_content)
+        except Exception as e:
+            logging.exception("Function response simulator request failed")
+            return _json_error(f"Function response simulator failed: {e}", 502)
+        if send_definitions:
+            chat_session.fc_definitions_sent = True
     logging.debug("Sending back frontend with response:\n%s", response.text)
     return web.json_response({"response": response.text})
 

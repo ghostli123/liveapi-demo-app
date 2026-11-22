@@ -486,6 +486,64 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(chat.messages[0]), 4)
         self.assertEqual(len(chat.messages[1]), 2)
 
+    async def test_fr_concurrent_calls_take_turns_on_the_chat(self):
+        # Two toolCall messages can have simulator requests in flight at once.
+        # The chat snapshots its history when a send starts, so overlapping
+        # sends both carried the declarations and missed each other's turn.
+        class SlowChat:
+            def __init__(self):
+                self.messages = []
+                self.in_flight = 0
+                self.max_in_flight = 0
+
+            async def send_message(self, parts):
+                self.in_flight += 1
+                self.max_in_flight = max(self.max_in_flight, self.in_flight)
+                self.messages.append([p.text for p in parts])
+                await asyncio.sleep(0.3)
+                self.in_flight -= 1
+                return mock.Mock(text='{"ok": true}')
+
+        chat = SlowChat()
+        with mock.patch.object(
+            main, "initialize_gemini_chat_session", return_value=chat
+        ):
+            await self.connect_session("s23")
+
+        async def post(body):
+            resp = await self.client.post(
+                "/api/post_endpoint", json={"session_id": "s23", **body}
+            )
+            return resp.status
+
+        await post(
+            {"objective": "fc_definition", "functionDefinition": [{"name": "f"}]}
+        )
+        statuses = await asyncio.gather(
+            *(
+                post(
+                    {"objective": "fr_generate", "functionName": n, "functionArgs": {}}
+                )
+                for n in ("f", "g")
+            )
+        )
+        self.assertEqual(statuses, [200, 200])
+        self.assertEqual(chat.max_in_flight, 1)
+        self.assertEqual([len(m) for m in chat.messages], [4, 2])
+
+        # A request still waiting when the session ends gets the 503.
+        record = await main.SESSION_MANAGER.search_item("s23")
+        assert record is not None
+        body = {"objective": "fr_generate", "functionName": "h", "functionArgs": {}}
+        first = asyncio.create_task(post(body))
+        while chat.in_flight == 0:
+            await asyncio.sleep(0.01)
+        second = asyncio.create_task(post(body))
+        await asyncio.sleep(0.1)
+        await record.del_session()
+        self.assertEqual(await asyncio.gather(first, second), [200, 503])
+        self.assertEqual(len(chat.messages), 3)
+
     async def test_fr_definitions_stored_without_simulator(self):
         await self.connect_session("s9")
         resp = await self.client.post(

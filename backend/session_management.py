@@ -27,6 +27,9 @@ class SessionBaseModel:
         # simulator's chat has been given them yet.
         self.fc_definitions: str = ""
         self.fc_definitions_sent: bool = False
+        # Simulator requests take turns: the chat snapshots its history when
+        # a send starts, so overlapping sends would miss each other's turn.
+        self.fr_lock: asyncio.Lock = asyncio.Lock()
 
     async def del_session(self):
         if self.expiry_task and self.expiry_task is not asyncio.current_task():
