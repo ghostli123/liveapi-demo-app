@@ -339,6 +339,40 @@ test("the branded-voice dialog takes focus, makes the page inert, and gives focu
     assert.equal(document.activeElement, element("text-message"));
 });
 
+test("a drag between the voice name and the backdrop doesn't close the dialog or stop the recording", async () => {
+    const devices = fakeRecordingDevices();
+    const { context, element } = loadApp(devices.globals);
+    context.initDOMEventListeners();
+    const modal = element("brandedVoiceModal");
+    const name = element("newVoiceName");
+    const fire = (type, target) => {
+        for (const listener of modal.listeners[type] || []) listener({ target });
+    };
+    // Chrome sends the click of a drag to the common ancestor, the backdrop.
+    const gesture = (pressOn, releaseOn, clickOn = modal) => {
+        fire("pointerdown", pressOn);
+        fire("pointerup", releaseOn);
+        fire("click", clickOn);
+    };
+
+    context.openModal();
+    name.value = "Kai";
+    const click = context.handleRecordClick();
+    devices.prompts[0].grant();
+    await click;
+
+    gesture(name, modal);
+    gesture(modal, name);
+    gesture(name, name, name);
+    assert.equal(modal.style.display, "flex");
+    assert.equal(devices.recorders[0].state, "recording");
+
+    // A plain click on the backdrop still closes it.
+    gesture(modal, modal);
+    assert.equal(modal.style.display, "none");
+    assert.equal(context.AppState.isRecording, false);
+});
+
 test("disabling a Material select also sets aria-disabled, so axe treats it as inactive", () => {
     const { context, element } = loadApp();
     const scheduling = element("fcScheduling");

@@ -430,10 +430,22 @@ function initDOMEventListeners() {
 
     const brandedVoiceModal = AppUI.getElement("brandedVoiceModal");
     if (brandedVoiceModal) {
-        window.addEventListener("click", (event) => {
-            if (event.target === brandedVoiceModal) {
-                closeModal();
-            }
+        // A click on the backdrop closes the dialog only if the press and the
+        // release were both on it: a drag between the dialog and the backdrop
+        // (selecting the voice name, say) sends its click to their common
+        // ancestor, the backdrop, and must not cancel a recording.
+        let pressOnBackdrop = false;
+        let releaseOnBackdrop = false;
+        brandedVoiceModal.addEventListener("pointerdown", (event) => {
+            pressOnBackdrop = event.target === brandedVoiceModal;
+        });
+        brandedVoiceModal.addEventListener("pointerup", (event) => {
+            releaseOnBackdrop = event.target === brandedVoiceModal;
+        });
+        brandedVoiceModal.addEventListener("click", (event) => {
+            const close = event.target === brandedVoiceModal && pressOnBackdrop && releaseOnBackdrop;
+            pressOnBackdrop = releaseOnBackdrop = false;
+            if (close) closeModal();
         });
         // Escape in the message dialog on top of it doesn't reach here.
         brandedVoiceModal.addEventListener("keydown", (event) => {
