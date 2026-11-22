@@ -1414,6 +1414,43 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(resp.status, 200)
 
+    async def test_allowed_host_port_limits_the_origin(self):
+        body = {
+            "command": "connect",
+            "session_id": "s18",
+            "endpoint": "autopush-common",
+            "location": "us-central1",
+        }
+        with flagsaver.flagsaver(
+            allowed_hosts=["demo.example:8443", "web.example:443", "any.example"]
+        ):
+            # Behind a proxy that rewrites Host: only the listed port, or the
+            # scheme's default when the Origin names none, is that page.
+            cases = [
+                ("https://demo.example:8443", 200),
+                ("https://Demo.Example.:8443", 200),
+                ("https://demo.example:6666", 403),
+                ("https://demo.example", 403),
+                ("http://demo.example:8443", 200),
+                ("https://web.example", 200),
+                ("https://web.example:443", 200),
+                ("http://web.example", 403),
+                ("https://web.example:8443", 403),
+                ("https://any.example:6666", 200),
+                ("https://demo.example:99999", 403),
+            ]
+            for i, (origin, status) in enumerate(cases):
+                resp = await self.client.post(
+                    "/api/control",
+                    json={**body, "session_id": f"s18-{i}"},
+                    headers={"Origin": origin},
+                )
+                self.assertEqual(resp.status, status, origin)
+                resp = await self.client.get(
+                    "/ws?session_id=none", headers={"Origin": origin}
+                )
+                self.assertEqual(resp.status == 403, status == 403, origin)
+
     def test_allowed_hosts_entries_are_normalized(self):
         with flagsaver.flagsaver(
             allowed_hosts=[" Demo.Example.com. ", "proxy.example:8443", ""]

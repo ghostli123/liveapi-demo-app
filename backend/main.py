@@ -102,7 +102,8 @@ ALLOWED_HOSTS = flags.DEFINE_list(
     "domain or the public host of a proxy that rewrites Host. Always allowed: "
     "localhost, IP addresses, this machine's names, and *.run.app on Cloud Run. "
     "'*' allows any Host header, which disables DNS-rebinding protection; "
-    "pages on other origins still need their host listed by name.",
+    "pages on other origins still need their host listed by name. A port in "
+    "an entry admits only pages on that port.",
 )
 FR_SIMULATOR_MODEL = flags.DEFINE_string(
     "fr_simulator_model",
@@ -637,17 +638,19 @@ def _normalize_hostname(hostname: str | None) -> str:
     return (hostname or "").strip().lower().rstrip(".")
 
 
-def _allowed_host_entry(entry: str) -> str:
-    """One --allowed_hosts entry as a bare host name; "" for a blank, "*" for any.
+def _allowed_host_entry(entry: str) -> tuple[str, int | None]:
+    """One --allowed_hosts entry as (bare host name, port or None).
+
+    The host is "" for a blank entry and "*" for any host.
 
     Raises:
       ValueError: the entry isn't a host name with an optional port.
     """
     entry = entry.strip()
     if entry in ("", "*"):
-        return entry
+        return entry, None
     parts = urllib.parse.urlsplit("//" + entry)  # Raises for e.g. "[".
-    _ = parts.port  # Raises for a non-numeric or out-of-range port.
+    port = parts.port  # Raises for a non-numeric or out-of-range port.
     # A scheme or path ("https://demo.example") would otherwise parse to a
     # different host ("https") and silently allow nothing useful.
     if (
@@ -657,7 +660,7 @@ def _allowed_host_entry(entry: str) -> str:
         or not parts.hostname
     ):
         raise ValueError("not a host name")
-    return _normalize_hostname(parts.hostname)
+    return _normalize_hostname(parts.hostname), port
 
 
 def _validate_allowed_hosts(entries: list[str]) -> bool:
@@ -678,14 +681,42 @@ flags.register_validator(ALLOWED_HOSTS, _validate_allowed_hosts)
 
 
 def explicitly_allowed_hosts() -> frozenset[str]:
-    """--allowed_hosts as bare host names, ignoring blanks and ports.
+    """--allowed_hosts as bare host names for the Host check, without ports.
 
-    Dropping blanks matters: a trailing comma would otherwise add "", which
-    matches the empty host of `Origin: null` (sent by sandboxed iframes).
+    Blank entries (a trailing comma leaves one) are dropped.
     """
-    hosts = {_allowed_host_entry(entry) for entry in ALLOWED_HOSTS.value}
+    hosts = {_allowed_host_entry(entry)[0] for entry in ALLOWED_HOSTS.value}
     hosts.discard("")
     return frozenset(hosts)
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def is_explicitly_allowed_origin(origin: str) -> bool:
+    """Whether an --allowed_hosts entry names the page origin `origin`.
+
+    An entry with a port admits only that port (an Origin without one has its
+    scheme's default port), since another port on the same host is another
+    origin, possibly another service. An entry without a port admits the host
+    on any port. "*" admits nothing here: as an Origin wildcard it would let
+    any website start sessions on the server's credentials.
+    """
+    try:
+        parts = urllib.parse.urlsplit(origin)
+        origin_host = _normalize_hostname(parts.hostname)
+        origin_port = parts.port or _DEFAULT_PORTS.get(parts.scheme.lower())
+    except ValueError:  # Unparsable, so it can't be a listed host.
+        return False
+    # "null" has no host, and a blank entry must not match it; "http://*"
+    # must not match the "*" entry.
+    if origin_host in ("", "*"):
+        return False
+    for entry in ALLOWED_HOSTS.value:
+        host, port = _allowed_host_entry(entry)
+        if host == origin_host and port in (None, origin_port):
+            return True
+    return False
 
 
 def is_allowed_host(hostname: str | None) -> bool:
@@ -735,19 +766,15 @@ async def reject_cross_origin(request: web.Request, handler):
         origin = request.headers.get("Origin")
         if origin is not None:
             try:
-                parts = urllib.parse.urlsplit(origin)
-                origin_netloc, origin_host = parts.netloc, parts.hostname
+                origin_netloc = urllib.parse.urlsplit(origin).netloc
             except ValueError:  # Unparsable, so it can't be this server.
-                origin_netloc, origin_host = None, None
+                origin_netloc = None
             # Only an exact match or an explicit --allowed_hosts entry: the
             # defaults above (e.g. any IP address) are fine for Host but not
-            # for the page making the request. "*" relaxes only the Host
-            # check; as an Origin wildcard it would let any website start
-            # sessions on the server's credentials.
-            extra = explicitly_allowed_hosts() - {"*"}
-            origin_host = _normalize_hostname(origin_host)
-            explicitly_allowed = bool(origin_host) and origin_host in extra
-            if origin_netloc != request.host and not explicitly_allowed:
+            # for the page making the request.
+            if origin_netloc != request.host and not is_explicitly_allowed_origin(
+                origin
+            ):
                 logging.warning(
                     "Rejected %s %s from origin %s",
                     request.method,
