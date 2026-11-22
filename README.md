@@ -138,7 +138,7 @@ The frontend files (except the `frontend/material.js` module) are classic script
 python scripts/smoke_test.py --environment=prod-us-rep --model=gemini-3.8-live --modality=VIDEO
 ```
 
-`scripts/browser_e2e.js` drives the app in headless Chrome (or Firefox, with `--browser=firefox`) against a running server and a real endpoint: an accessibility audit (axe-core's WCAG 2.1 A/AA and best-practice rules on the idle page, the open settings, the branded-voice dialog and a connected session, each at desktop and phone width so settings below the sidebar's fold are checked too), text turns over both transports, resumption, function calling, error reporting, and (with `--speech=file.wav`, Chrome only) a spoken turn through the fake microphone and one cut off by Mic off. Each scenario also fails on browser console errors or Content-Security-Policy violations, and an unknown flag stops the script rather than running with the defaults:
+`scripts/browser_e2e.js` drives the app in headless Chrome (or Firefox, with `--browser=firefox`) against a running server and a real endpoint: an accessibility audit (axe-core's WCAG 2.1 A/AA and best-practice rules on the idle page, the open settings, the branded-voice dialog and a connected session, each at desktop and phone width so settings below the sidebar's fold are checked too), status icons that stop pulsing when the OS asks for reduced motion, text turns over both transports, resumption, function calling, error reporting, and (with `--speech=file.wav`, Chrome only) a spoken turn through the fake microphone and one cut off by Mic off. Each scenario also fails on browser console errors or Content-Security-Policy violations, and an unknown flag stops the script rather than running with the defaults:
 
 ```sh
 npm install

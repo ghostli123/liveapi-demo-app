@@ -280,6 +280,23 @@ const scenarios = {
         await endSession(page);
     },
 
+    async "status icons hold still with reduced motion"(browser, run) {
+        const page = await run.newPage(browser);
+        // Counts running animations on the status labels, all shown at once.
+        const running = () =>
+            page.evaluate(() =>
+                [...document.querySelectorAll(".state")].reduce((count, el) => {
+                    el.hidden = false;
+                    return count + el.getAnimations({ subtree: true }).filter((a) => a.playState === "running").length;
+                }, 0)
+            );
+        const normal = await running();
+        check(normal > 0, "no status icon animates at the default motion setting");
+        await page.emulateMedia({ reducedMotion: "reduce" });
+        const reduced = await running();
+        check(reduced === 0, `${reduced} status animations still run with prefers-reduced-motion: reduce`);
+    },
+
     async "text turn over WebSocket with avatar video"(browser, run) {
         const page = await run.newPage(browser);
         await connect(page, { transport: "websocket" });

@@ -201,6 +201,11 @@ details .details-content {
   0%, 100% { opacity: 0.7; }
   50% { opacity: 1; }
 }
+/* The label text already says the state; endless motion bothers some users. */
+@media (prefers-reduced-motion: reduce) {
+  #connecting .material-symbols-outlined,
+  #speaking .material-symbols-outlined { animation: none; }
+}
 
 .state[hidden] {
   display: none;
