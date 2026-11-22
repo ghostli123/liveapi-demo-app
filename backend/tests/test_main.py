@@ -1249,6 +1249,53 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(resp.status, 403)
 
+    async def test_star_allowed_host_keeps_the_origin_check(self):
+        body = {
+            "command": "connect",
+            "session_id": "s15",
+            "endpoint": "autopush-common",
+            "location": "us-central1",
+        }
+        with flagsaver.flagsaver(allowed_hosts=["*"]):
+            # Any Host passes, but a page on another site still can't reach
+            # the server, at its own host or any other.
+            for host, origin in [
+                (None, "https://evil.example"),
+                (None, "http://*"),
+                (None, "http://203.0.113.7:8080"),
+                ("any.example", "http://evil.example"),
+                ("any.example", "http://any.example:6666"),
+            ]:
+                headers = {"Origin": origin} | ({"Host": host} if host else {})
+                resp = await self.client.post(
+                    "/api/control", json=body, headers=headers
+                )
+                self.assertEqual(resp.status, 403, (host, origin))
+                resp = await self.client.get("/ws?session_id=s15", headers=headers)
+                self.assertEqual(resp.status, 403, (host, origin))
+            self.assertIsNone(await main.SESSION_MANAGER.search_item("s15"))
+            # Any Host with its own page, or with no Origin (scripts), works.
+            resp = await self.client.post(
+                "/api/control",
+                json=body,
+                headers={"Host": "any.example", "Origin": "http://any.example"},
+            )
+            self.assertEqual(resp.status, 200)
+            resp = await self.client.post(
+                "/api/control",
+                json={**body, "session_id": "s16"},
+                headers={"Host": "any.example"},
+            )
+            self.assertEqual(resp.status, 200)
+        # A named entry next to "*" still admits that origin behind a proxy.
+        with flagsaver.flagsaver(allowed_hosts=["*", "demo.example.com"]):
+            resp = await self.client.post(
+                "/api/control",
+                json={**body, "session_id": "s17"},
+                headers={"Origin": "https://demo.example.com"},
+            )
+            self.assertEqual(resp.status, 200)
+
     def test_allowed_hosts_entries_are_normalized(self):
         with flagsaver.flagsaver(
             allowed_hosts=[" Demo.Example.com. ", "proxy.example:8443", ""]

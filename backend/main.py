@@ -100,7 +100,8 @@ ALLOWED_HOSTS = flags.DEFINE_list(
     "Extra host names browsers may use to reach this server, e.g. a custom "
     "domain or the public host of a proxy that rewrites Host. Always allowed: "
     "localhost, IP addresses, this machine's names, and *.run.app on Cloud Run. "
-    "'*' allows any host, which disables DNS-rebinding protection.",
+    "'*' allows any Host header, which disables DNS-rebinding protection; "
+    "pages on other origins still need their host listed by name.",
 )
 FR_SIMULATOR_MODEL = flags.DEFINE_string(
     "fr_simulator_model",
@@ -720,12 +721,12 @@ async def reject_cross_origin(request: web.Request, handler):
                 origin_netloc, origin_host = None, None
             # Only an exact match or an explicit --allowed_hosts entry: the
             # defaults above (e.g. any IP address) are fine for Host but not
-            # for the page making the request.
-            extra = explicitly_allowed_hosts()
+            # for the page making the request. "*" relaxes only the Host
+            # check; as an Origin wildcard it would let any website start
+            # sessions on the server's credentials.
+            extra = explicitly_allowed_hosts() - {"*"}
             origin_host = _normalize_hostname(origin_host)
-            explicitly_allowed = bool(origin_host) and (
-                "*" in extra or origin_host in extra
-            )
+            explicitly_allowed = bool(origin_host) and origin_host in extra
             if origin_netloc != request.host and not explicitly_allowed:
                 logging.warning(
                     "Rejected %s %s from origin %s",
