@@ -512,6 +512,17 @@ async function fireNextTimer(timers) {
     return timer.ms;
 }
 
+test("session setup errors keep the request's error as their cause", async () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    const original = Object.assign(new Error("HTTP 503: full"), { status: 503 });
+    api.postWithRetry = () => Promise.reject(original);
+    api.sendPostRequest = () => Promise.reject(original);
+    api.setFunctionCall([{ name: "f" }]);
+    for (const setup of [() => api.initBackendService("s1"), () => api.setupFuncDeclarationToService("s1")]) {
+        await assert.rejects(setup(), (error) => error.cause === original && error.message.endsWith("HTTP 503: full"));
+    }
+});
+
 test("a connect the server never answers times out, is retried once, and is reported", async () => {
     // E.g. a wedged backend, or a dead pooled connection: before, "Connecting"
     // stayed until the user clicked Disconnect.

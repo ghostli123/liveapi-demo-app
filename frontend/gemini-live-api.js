@@ -665,7 +665,7 @@ class GeminiLiveAPI {
                 // The server may still create the record after we gave up.
                 this.abandonSession(sessionId);
             }
-            throw new Error(`Could not start the session: ${error.message}`);
+            throw new Error(`Could not start the session: ${error.message}`, { cause: error });
         }
     }
 
@@ -686,7 +686,7 @@ class GeminiLiveAPI {
             await this.sendPostRequest(this.frUrl, funcDeclarationMessage, { timeoutMs: CONTROL_TIMEOUT_MS });
         } catch (error) {
             console.error("Error in setupFuncDeclarationToService:", error);
-            throw new Error(`Could not set up function declarations: ${error.message}`);
+            throw new Error(`Could not set up function declarations: ${error.message}`, { cause: error });
         }
     }
 
