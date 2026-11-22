@@ -334,6 +334,34 @@ test("WebSocket microphone audio is still sent when the browser throttles the se
     assert.equal(manager.pcmData.length, 0);
 });
 
+test("audio the old capture worklet queued doesn't reach the next microphone", async () => {
+    const { manager, requests, intervals } = audioInputWithPendingMic();
+    let connecting = manager.connectMicrophone();
+    requests[0].grant();
+    await connecting;
+    const sentSamples = [];
+    manager.onNewAudioRecordingChunk = (b64) => sentSamples.push(Buffer.from(b64, "base64").length / 2);
+    // A browser dispatches queued messages to whatever handler the port has then.
+    const deliverQueued = (port) => port.onmessage?.({ data: new Int16Array(128).fill(7) });
+
+    // A device switch: messages the old worklet posted before it was disconnected.
+    const oldPort = manager.processor.port;
+    connecting = manager.updateMicrophoneDevice("b");
+    deliverQueued(oldPort);
+    requests[1].grant();
+    await connecting;
+    deliverQueued(oldPort);
+    assert.equal(manager.pcmData.length, 0);
+    [...intervals][0].callback();
+    assert.deepEqual(sentSamples, []);
+
+    // Mic off: they'd otherwise wait in pcmData and go out at the next Mic on.
+    const lastPort = manager.processor.port;
+    manager.disconnectMicrophone();
+    deliverQueued(lastPort);
+    assert.equal(manager.pcmData.length, 0);
+});
+
 test("parseIntervalMs clamps typed intervals and falls back on unusable ones", () => {
     const context = loadScript("live-media-manager.js", ["parseIntervalMs", "AUDIO_INTERVAL_MS", "VIDEO_INTERVAL_MS"]);
     const audio = (value) => context.parseIntervalMs(value, context.AUDIO_INTERVAL_MS);

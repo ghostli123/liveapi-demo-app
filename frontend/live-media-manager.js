@@ -332,6 +332,9 @@ class LiveAudioInputManager {
                 });
             }
             if (this.processor) {
+                // Messages the worklet posted before this are still queued; without
+                // a handler they don't land in the next connection's pcmData.
+                this.processor.port.onmessage = null;
                 this.processor.disconnect();
             }
             if (this.audioContext && this.audioContext.state !== "closed") {
