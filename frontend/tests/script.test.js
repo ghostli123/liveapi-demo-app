@@ -559,9 +559,9 @@ function loadSession(globals = {}) {
     const app = loadApp({
         navigator: {},
         performance,
+        clearInterval, // Disconnect stops the connection timer.
         ...globals,
         requestAnimationFrame: () => 0, // Device lists refresh once the mic starts.
-        clearInterval, // Disconnect stops the connection timer.
         LiveAudioInputManager: class {
             updateAudioInterval() {
                 return new Promise((resolve, reject) => {
@@ -676,6 +676,47 @@ test("without voice activity frames, latency counts from the last input transcri
     at(1200, "INPUT_TRANSCRIPTION", " there");
     at(1500, "TEXT", "Hi.");
     assert.equal(latency(), "300 ms after last transcript");
+});
+
+test("connection age stops when a GoAway resume drops the connection and restarts with the new one", () => {
+    const clock = { now: 0 };
+    const intervals = new Map();
+    let nextId = 1;
+    const { context, element, api } = loadSession({
+        Date: { now: () => clock.now },
+        setInterval: (tick) => {
+            intervals.set(nextId, tick);
+            return nextId++;
+        },
+        clearInterval: (id) => intervals.delete(id),
+    });
+    const tick = (ms) => {
+        clock.now = ms;
+        for (const run of intervals.values()) run();
+    };
+    const age = () => element("connection-age").textContent;
+    const resumes = [];
+    api.goAwayAction = () => "resume";
+    api.resume = async (handle) => resumes.push(handle);
+    api.latestResumptionHandle = "handle-1";
+    context.AppState.liveVideoOutputManager.initMediaSource = () => {};
+
+    context.handleReceiveResponse({ type: "SETUP COMPLETE" });
+    tick(75000);
+    assert.equal(age(), "1:15");
+
+    context.handleReceiveResponse({ type: "GO_AWAY", data: "10s" });
+    assert.deepEqual(resumes, ["handle-1"]);
+    assert.equal(age(), "--");
+    assert.equal(intervals.size, 0);
+    tick(80000); // Still resuming: the old connection's age doesn't come back.
+    assert.equal(age(), "--");
+
+    context.handleReceiveResponse({ type: "SETUP COMPLETE" });
+    assert.equal(age(), "0:00");
+    tick(83000);
+    assert.equal(age(), "0:03");
+    assert.equal(intervals.size, 1);
 });
 
 test("Start speaking while the session resumes doesn't start a turn", async () => {

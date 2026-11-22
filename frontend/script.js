@@ -1077,6 +1077,10 @@ async function handleSessionResumptionReconnect() {
     if (!api) return;
 
     setAppStatus("connecting");
+    // The age is the old connection's, which is being dropped; the new one's
+    // starts at its SETUP COMPLETE.
+    stopConnectionTimer();
+    AppUI.setText("connection-age", "--");
     closeTranscriptLine("input");
     closeTranscriptLine("output");
     setUserTurnActive(false); // The new session never saw activity_start.
