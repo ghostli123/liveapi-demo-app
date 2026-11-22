@@ -1,12 +1,19 @@
 import asyncio
+import datetime
 import json
 import logging
+import os
+import ssl
+import tempfile
 import types
 import unittest
 from unittest import mock
 
 import aiohttp
 import websockets
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 import websocket_handler
 
@@ -189,8 +196,93 @@ class UpstreamRedirectTest(unittest.IsolatedAsyncioTestCase):
         )
 
 
+def _self_signed_cert(directory, host):
+    """Writes a certificate and key for host; returns (cert_path, key_path)."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, host)])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))
+        .not_valid_after(now + datetime.timedelta(hours=1))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(host)]), False)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), True)
+        .sign(key, hashes.SHA256())
+    )
+    cert_path = os.path.join(directory, "cert.pem")
+    key_path = os.path.join(directory, "key.pem")
+    with open(cert_path, "wb") as f:
+        f.write(cert.public_bytes(serialization.Encoding.PEM))
+    with open(key_path, "wb") as f:
+        f.write(
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+    return cert_path, key_path
+
+
+class ConnectProxy:
+    """An HTTP CONNECT proxy that tunnels every request to target_port.
+
+    Records each request's head, or answers with reject_status instead.
+    """
+
+    def __init__(self, target_port, reject_status=None):
+        self.target_port = target_port
+        self.reject_status = reject_status
+        self.requests = []
+        self.tunneled = bytearray()
+
+    async def handle(self, reader, writer):
+        head = await reader.readuntil(b"\r\n\r\n")
+        self.requests.append(head.decode())
+        if self.reject_status:
+            writer.write(f"HTTP/1.1 {self.reject_status} No\r\n\r\n".encode())
+            writer.close()
+            return
+        up_reader, up_writer = await asyncio.open_connection(
+            "127.0.0.1", self.target_port
+        )
+        writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+
+        async def pipe(src, dst, record=None):
+            try:
+                while data := await src.read(65536):
+                    if record is not None:
+                        record.extend(data)
+                    dst.write(data)
+                    await dst.drain()
+            except ConnectionError:
+                pass
+            finally:
+                dst.close()
+
+        await asyncio.gather(
+            pipe(reader, up_writer, self.tunneled), pipe(up_reader, writer)
+        )
+
+
 class UpstreamProxyTest(unittest.IsolatedAsyncioTestCase):
-    async def test_proxy_environment_variables_are_ignored(self):
+    HOST = "live.test"
+
+    def environ(self, **proxies):
+        """Patches os.environ to hold only these proxy variables."""
+        names = ("http", "https", "wss", "ws", "socks", "all", "no")
+        cleared = {
+            key: ""
+            for key in os.environ
+            if key.lower() in {f"{n}_proxy" for n in names}
+        }
+        return mock.patch.dict("os.environ", {**cleared, **proxies})
+
+    async def test_gateway_ignores_proxy_environment_variables(self):
         async def close(connection):
             await connection.close()
 
@@ -199,16 +291,107 @@ class UpstreamProxyTest(unittest.IsolatedAsyncioTestCase):
         # Nothing listens on port 9, so a connection through the proxy fails.
         proxies = {
             name: "http://127.0.0.1:9"
-            for name in ("http_proxy", "https_proxy", "all_proxy")
+            for name in ("http_proxy", "https_proxy", "ws_proxy", "all_proxy")
         }
         async with websockets.serve(close, "127.0.0.1", 0, logger=quiet) as server:
             port = next(iter(server.sockets)).getsockname()[1]
             handler = websocket_handler.WebsocketHandler(
                 f"ws://127.0.0.1:{port}/ws", "s", None
             )
-            with mock.patch.dict("os.environ", proxies):
+            with self.environ(**proxies):
                 async with handler._connect_upstream(None) as connection:
                     await connection.wait_closed()
+
+    def test_upstream_proxy_reads_the_environment(self):
+        url = f"wss://{self.HOST}/ws"
+        with self.environ():
+            self.assertIsNone(websocket_handler.upstream_proxy(url))
+        with self.environ(http_proxy="http://plain:1"):
+            # http_proxy is for http:// URLs; requests doesn't use it either.
+            self.assertIsNone(websocket_handler.upstream_proxy(url))
+        with self.environ(https_proxy="http://corp:3128"):
+            self.assertEqual(websocket_handler.upstream_proxy(url), "http://corp:3128")
+        with self.environ(all_proxy="http://all:8080"):
+            self.assertEqual(websocket_handler.upstream_proxy(url), "http://all:8080")
+        with self.environ(https_proxy="http://corp:3128", no_proxy=".test"):
+            self.assertIsNone(websocket_handler.upstream_proxy(url))
+        with self.environ(all_proxy="http://all:8080", no_proxy=self.HOST):
+            self.assertIsNone(websocket_handler.upstream_proxy(url))
+
+    async def serve_tls(self, directory, handler):
+        cert_path, key_path = _self_signed_cert(directory, self.HOST)
+        server_ssl = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ssl.load_cert_chain(cert_path, key_path)
+        quiet = logging.getLogger("test.quiet_server")
+        quiet.setLevel(logging.INFO)
+        server = await websockets.serve(
+            handler, "127.0.0.1", 0, ssl=server_ssl, logger=quiet
+        )
+        self.addAsyncCleanup(server.wait_closed)
+        self.addCleanup(server.close)
+        # The handler trusts certifi's bundle; trust the test's certificate.
+        self.enterContext(
+            mock.patch.object(websocket_handler.certifi, "where", lambda: cert_path)
+        )
+        return next(iter(server.sockets)).getsockname()[1]
+
+    async def start_proxy(self, proxy):
+        server = await asyncio.start_server(proxy.handle, "127.0.0.1", 0)
+        self.addAsyncCleanup(server.wait_closed)
+        self.addCleanup(server.close)
+        return server.sockets[0].getsockname()[1]
+
+    async def test_upstream_tunnels_through_https_proxy(self):
+        received = []
+
+        async def echo(connection):
+            received.append(connection.request.headers.get("Authorization"))
+            await connection.send(await connection.recv())
+
+        with tempfile.TemporaryDirectory() as directory:
+            server_port = await self.serve_tls(directory, echo)
+            proxy = ConnectProxy(server_port)
+            proxy_port = await self.start_proxy(proxy)
+            handler = websocket_handler.WebsocketHandler(
+                f"wss://{self.HOST}/ws/live", "s", None
+            )
+            # live.test doesn't resolve, so only the proxy can reach the server.
+            with self.environ(https_proxy=f"http://127.0.0.1:{proxy_port}"):
+                async with handler._connect_upstream("secret-token") as connection:
+                    await connection.send("hello")
+                    self.assertEqual(await connection.recv(), "hello")
+        self.assertEqual(len(proxy.requests), 1)
+        self.assertTrue(proxy.requests[0].startswith(f"CONNECT {self.HOST}:443 "))
+        self.assertEqual(received, ["Bearer secret-token"])
+        # The token went through the tunnel encrypted, never in the clear.
+        self.assertNotIn("secret-token", proxy.requests[0])
+        self.assertNotIn(b"secret-token", bytes(proxy.tunneled))
+
+    async def test_proxy_rejection_is_reported_as_the_proxys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            server_port = await self.serve_tls(directory, lambda connection: None)
+            proxy_port = await self.start_proxy(
+                ConnectProxy(server_port, reject_status=407)
+            )
+            handler = websocket_handler.WebsocketHandler(
+                f"wss://{self.HOST}/ws", "s", None
+            )
+            with self.environ(https_proxy=f"http://127.0.0.1:{proxy_port}"):
+                with self.assertRaises(websockets.ProxyError) as caught:
+                    await handler._connect_upstream("secret-token")
+        self.assertEqual(
+            websocket_handler.describe_connect_error(caught.exception),
+            "InvalidProxyStatus: proxy rejected connection: HTTP 407",
+        )
+
+    async def test_invalid_proxy_setting_hides_its_credentials(self):
+        handler = websocket_handler.WebsocketHandler(f"wss://{self.HOST}/ws", "s", None)
+        with self.environ(https_proxy="ftp://user:hunter2@corp:21"):
+            with self.assertRaises(websockets.InvalidProxy) as caught:
+                await handler._connect_upstream("secret-token")
+        reason = websocket_handler.describe_connect_error(caught.exception)
+        self.assertEqual(reason, "Invalid proxy setting: scheme ftp isn't supported")
+        self.assertNotIn("hunter2", reason)
 
 
 class FakeConnection:

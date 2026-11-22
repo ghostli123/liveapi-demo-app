@@ -5,10 +5,13 @@ import json
 import logging as std_logging
 import ssl
 import time
+import urllib.request
 from collections.abc import Awaitable, Callable
 
 import certifi
 import websockets
+import websockets.proxy
+import websockets.uri
 from absl import logging
 
 import get_credentials
@@ -77,6 +80,12 @@ def _one_line(text: str) -> str:
 
 def describe_connect_error(error: Exception) -> str:
     """Turns an upstream handshake failure into a one-line, user-facing reason."""
+    if isinstance(error, websockets.InvalidProxy):
+        # Its text repeats the proxy URL, which can hold a user and password.
+        return _one_line(f"Invalid proxy setting: {error.msg}")
+    if isinstance(error, websockets.ProxyError):
+        # InvalidProxyStatus carries the proxy's response, not the Live API's.
+        return _one_line(f"{type(error).__name__}: {error}")
     response = getattr(error, "response", None)
     status = getattr(response, "status_code", None)
     if status is None:
@@ -90,6 +99,21 @@ def describe_connect_error(error: Exception) -> str:
         pass
     detail = _one_line(detail)
     return f"Upstream HTTP {status}: {detail}" if detail else f"Upstream HTTP {status}"
+
+
+def upstream_proxy(url: str) -> str | None:
+    """The proxy for a wss:// URL from the environment, as the token fetch uses.
+
+    websockets reads wss_proxy, socks_proxy and https_proxy and honors
+    no_proxy; requests (google-auth) also falls back to all_proxy, so this
+    does too. An HTTP proxy gets a CONNECT tunnel, so the token stays inside
+    TLS; a SOCKS one needs the python-socks package.
+    """
+    uri = websockets.uri.parse_uri(url)
+    proxy = websockets.proxy.get_proxy(uri)
+    if proxy is None and not urllib.request.proxy_bypass(f"{uri.host}:{uri.port}"):
+        proxy = urllib.request.getproxies().get("all")
+    return proxy
 
 
 class WebsocketHandler:
@@ -195,9 +219,7 @@ class WebsocketHandler:
             "open_timeout": UPSTREAM_OPEN_TIMEOUT_S,
             "close_timeout": UPSTREAM_CLOSE_TIMEOUT_S,
             "logger": _UPSTREAM_LOGGER,
-            # websockets 15+ connects through the proxy that http_proxy,
-            # https_proxy or all_proxy names; the local gateway (ws://localhost)
-            # must not go through one, and the upstream never has.
+            # The local gateway (ws://127.0.0.1) never goes through a proxy.
             "proxy": None,
         }
         if token is not None:
@@ -207,6 +229,7 @@ class WebsocketHandler:
             }
         if self.liveapi_service_url.startswith("wss://"):
             options["ssl"] = ssl.create_default_context(cafile=certifi.where())
+            options["proxy"] = upstream_proxy(self.liveapi_service_url)
         return _NoRedirectConnect(self.liveapi_service_url, **options)
 
     async def _open_upstream(self):
