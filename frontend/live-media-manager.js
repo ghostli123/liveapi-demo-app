@@ -15,6 +15,14 @@ class LiveAudioOutputManager {
         this.failed = null;
         this.retryAt = 0;
         this.retryDelayMs = 0;
+        // The wait after the worklet crashes, doubling per crash until the
+        // next Connect; see processorFailed().
+        this.crashDelayMs = 0;
+        this.crashReported = false;
+        // Called with a message for the user the first time the player
+        // crashes after a Connect.
+        /** @type {(message: string) => void} */
+        this.onPlayerError = () => {};
     }
 
     /**
@@ -61,6 +69,8 @@ class LiveAudioOutputManager {
         // A new Connect retries a player that failed to start right away.
         this.failed = null;
         this.retryDelayMs = 0;
+        this.crashDelayMs = 0;
+        this.crashReported = false;
         this.resumeContext();
     }
 
@@ -105,6 +115,7 @@ class LiveAudioOutputManager {
                 const workletNode = new AudioWorkletNode(audioContext, "pcm-processor", {
                     outputChannelCount: [1],
                 });
+                workletNode.onprocessorerror = (event) => this.processorFailed(workletNode, event);
                 workletNode.connect(audioContext.destination);
                 this.workletNode = workletNode;
                 this.failed = null;
@@ -124,6 +135,37 @@ class LiveAudioOutputManager {
         this.audioContext = audioContext;
         this.ready = ready;
         return ready;
+    }
+
+    /**
+     * The worklet threw (in its constructor or process()), so the browser
+     * stopped it and the node plays nothing from now on. Drops the context so
+     * a later chunk builds a new one, after 1 s, doubling to 30 s across
+     * crashes (so a worklet that throws on every chunk isn't rebuilt per
+     * chunk), and reports the first crash since Connect.
+     * @param {AudioWorkletNode} workletNode
+     * @param {Event} event
+     */
+    processorFailed(workletNode, event) {
+        if (this.workletNode !== workletNode) return; // Already replaced.
+        console.error("The audio player stopped:", event);
+        const audioContext = this.audioContext;
+        this.audioContext = null;
+        this.ready = null;
+        this.workletNode = null;
+        audioContext?.close().catch(() => {});
+        this.crashDelayMs = Math.min(30000, this.crashDelayMs * 2 || 1000);
+        const failed = Promise.reject(new Error("The audio player stopped"));
+        failed.catch(() => {});
+        this.failed = failed;
+        this.retryAt = Date.now() + this.crashDelayMs;
+        if (!this.crashReported) {
+            this.crashReported = true;
+            this.onPlayerError(
+                "The audio player stopped, so some of the model's speech wasn't played. It restarts on its own; " +
+                    "if the model stays silent, disconnect and connect again."
+            );
+        }
     }
 
     /** @param {Promise<AudioWorkletNode>} failed */
@@ -207,6 +249,8 @@ class LiveAudioInputManager {
         };
         // Called when the microphone stops on its own (unplugged, access revoked).
         this.onMicrophoneEnded = () => {};
+        // Called when the capture worklet throws and stops sending audio.
+        this.onMicrophoneFailed = () => {};
     }
 
     // Update the audio interval in milliseconds (based on user input)
@@ -269,10 +313,15 @@ class LiveAudioInputManager {
         const source = this.audioContext.createMediaStreamSource(this.stream);
 
         // Create an AudioWorkletNode.
-        this.processor = new AudioWorkletNode(
-            this.audioContext,
-            "input-processor"
-        );
+        const processor = new AudioWorkletNode(this.audioContext, "input-processor");
+        this.processor = processor;
+        // A worklet that throws is stopped by the browser and sends nothing
+        // more, with the mic still on.
+        processor.onprocessorerror = (event) => {
+            if (this.processor !== processor) return;
+            console.error("The microphone's audio processor stopped:", event);
+            this.onMicrophoneFailed();
+        };
 
         // Listen for messages (the PCM data) from the worklet. These keep
         // arriving in a hidden tab, where the browser throttles the timer below

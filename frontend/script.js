@@ -189,6 +189,7 @@ function initApplicationManagers() {
     };
     AppState.liveVideoOutputManager.onAutoplayBlocked = showAutoplayBlocked;
     AppState.liveVideoOutputManager.onPlaybackError = (message) => newErrorMessage(message);
+    AppState.liveAudioOutputManager.onPlayerError = (message) => newErrorMessage(message);
     if (AppState.geminiLiveApi.webRtcManager) {
         AppState.geminiLiveApi.webRtcManager.onAutoplayBlocked = showAutoplayBlocked;
     }
@@ -215,9 +216,10 @@ function initApplicationManagers() {
         AppState.geminiLiveApi.sendImageMessage(b64Image);
     };
 
-    AppState.liveAudioInputManager.onMicrophoneEnded = microphoneEnded;
+    AppState.liveAudioInputManager.onMicrophoneEnded = () => microphoneEnded();
+    AppState.liveAudioInputManager.onMicrophoneFailed = () => microphoneEnded(MIC_FAILED_MESSAGE);
     if (AppState.geminiLiveApi.webRtcManager) {
-        AppState.geminiLiveApi.webRtcManager.onMicrophoneEnded = microphoneEnded;
+        AppState.geminiLiveApi.webRtcManager.onMicrophoneEnded = () => microphoneEnded();
     }
     AppState.liveVideoManager.onEnded = (track) => {
         stopSendingVideoTrack(track);
@@ -1387,15 +1389,18 @@ function micOffBtnClick() {
 const MIC_ENDED_MESSAGE =
     "The microphone stopped: it was unplugged or the browser's access to it was turned off. " +
     "Turn the mic back on to keep talking.";
+const MIC_FAILED_MESSAGE =
+    "The microphone stopped: the browser's audio processing for it failed. Turn the mic back on to keep talking.";
 const CAMERA_ENDED_MESSAGE =
     "The camera stopped: it was unplugged or the browser's access to it was turned off. " +
     "Turn the camera back on to keep sharing video.";
 
-// The microphone's track ended without the app stopping it.
-function microphoneEnded() {
+// The microphone's track ended, or its capture worklet failed, without the app
+// stopping it: turn the mic off and say why.
+function microphoneEnded(message = MIC_ENDED_MESSAGE) {
     if (!isMicOn()) return;
     micBtnClick();
-    AppUI.showModal(MIC_ENDED_MESSAGE);
+    AppUI.showModal(message);
 }
 
 // With automatic activity detection disabled, the server only knows where a

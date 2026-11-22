@@ -722,6 +722,24 @@ test("a microphone that stops on its own ends the turn, turns the mic off and sa
     assert.match(dialogText(), /^The microphone stopped: it was unplugged/);
 });
 
+test("a failed capture worklet turns the mic off and says why; a failed player is reported in the chat", () => {
+    const { context, element, mic, dialogText } = loadSession();
+    const chat = [];
+    element("text-chat").appendChild = (line) => chat.push(line.textContent);
+    element("micBtn").hidden = false;
+    element("micOffBtn").hidden = true;
+    mic.stops = 0;
+
+    context.AppState.liveAudioInputManager.onMicrophoneFailed();
+    assert.equal(element("micBtn").hidden, true);
+    assert.equal(element("micOffBtn").hidden, false);
+    assert.equal(mic.stops, 1);
+    assert.match(dialogText(), /^The microphone stopped: the browser's audio processing for it failed/);
+
+    context.AppState.liveAudioOutputManager.onPlayerError("The audio player stopped.");
+    assert.deepEqual(chat, ["The audio player stopped."]);
+});
+
 test("switching to a microphone that fails mid-turn ends the turn and turns the mic off", async () => {
     const { context, element, api, mic, dialogText } = loadSession();
     api.isSetupComplete = true;

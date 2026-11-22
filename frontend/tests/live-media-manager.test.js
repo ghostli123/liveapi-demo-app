@@ -362,6 +362,29 @@ test("audio the old capture worklet queued doesn't reach the next microphone", a
     assert.equal(manager.pcmData.length, 0);
 });
 
+test("a WebSocket microphone whose capture worklet throws is reported once; an old one isn't", async () => {
+    const { manager, requests } = audioInputWithPendingMic();
+    let failed = 0;
+    manager.onMicrophoneFailed = () => failed++;
+    let connecting = manager.connectMicrophone();
+    requests[0].grant();
+    await connecting;
+    // The browser stopped the processor; before, nothing noticed and no audio was sent.
+    manager.processor.onprocessorerror(new Event("processorerror"));
+    assert.equal(failed, 1);
+
+    // A processor from before a device switch or Mic off doesn't touch the current one.
+    const oldProcessor = manager.processor;
+    connecting = manager.updateMicrophoneDevice("b");
+    requests[1].grant();
+    await connecting;
+    oldProcessor.onprocessorerror(new Event("processorerror"));
+    const lastProcessor = manager.processor;
+    manager.disconnectMicrophone();
+    lastProcessor.onprocessorerror(new Event("processorerror"));
+    assert.equal(failed, 1);
+});
+
 test("parseIntervalMs clamps typed intervals and falls back on unusable ones", () => {
     const context = loadScript("live-media-manager.js", ["parseIntervalMs", "AUDIO_INTERVAL_MS", "VIDEO_INTERVAL_MS"]);
     const audio = (value) => context.parseIntervalMs(value, context.AUDIO_INTERVAL_MS);
@@ -1116,6 +1139,56 @@ test("audio chunks share one context and worklet", async () => {
     assert.equal(fake.contexts.length, 1);
     assert.equal(manager.workletNode.posted.length, 3);
     assert.equal(manager.workletNode.posted[2], "clear");
+});
+
+test("a playback worklet that throws is rebuilt after a growing delay and reported once per Connect", async () => {
+    const { manager, fake } = audioOutputWithFakeContexts();
+    const reports = [];
+    manager.onPlayerError = (message) => reports.push(message);
+    const crash = (node) => node.onprocessorerror(new Event("processorerror"));
+    manager.resume(); // The Connect click.
+    await settle();
+    const first = manager.workletNode;
+    crash(first);
+    assert.equal(fake.contexts[0].state, "closed");
+    assert.equal(manager.workletNode, null);
+    assert.equal(reports.length, 1);
+    assert.match(reports[0], /audio player stopped/);
+    assert.ok(fake.errors.includes("The audio player stopped:"));
+
+    manager.playAudioChunk(AUDIO_CHUNK); // Within 1 s: dropped.
+    await settle();
+    assert.equal(fake.contexts.length, 1);
+    fake.now = 1000;
+    manager.playAudioChunk(AUDIO_CHUNK);
+    await settle();
+    assert.equal(fake.contexts.length, 2);
+    assert.equal(manager.workletNode.posted.length, 1);
+
+    // A late event from the old node doesn't drop the new player.
+    crash(first);
+    assert.equal(manager.workletNode.context, fake.contexts[1]);
+
+    // A worklet that throws on every chunk isn't rebuilt per chunk.
+    crash(manager.workletNode);
+    fake.now = 2999;
+    manager.playAudioChunk(AUDIO_CHUNK);
+    await settle();
+    assert.equal(fake.contexts.length, 2);
+    fake.now = 3000;
+    manager.playAudioChunk(AUDIO_CHUNK);
+    await settle();
+    assert.equal(fake.contexts.length, 3);
+    assert.equal(reports.length, 1);
+
+    // The next Connect rebuilds at once and reports again.
+    crash(manager.workletNode);
+    manager.resume();
+    await settle();
+    assert.equal(fake.contexts.length, 4);
+    crash(manager.workletNode);
+    assert.equal(reports.length, 2);
+    assert.equal(manager.crashDelayMs, 1000);
 });
 
 test("a mic level meter the browser refuses throws and leaves nothing running", () => {
