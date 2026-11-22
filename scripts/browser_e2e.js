@@ -547,6 +547,30 @@ const scenarios = {
             await voiceBrowser.close();
         }
     },
+
+    // With automatic activity detection the server waits for quiet audio to end
+    // the turn; Mic off mid-sentence must tell it the audio stopped
+    // (audio_stream_end), or the words before it get no answer.
+    async "Mic off mid-sentence over WebSocket still gets an answer"(browser, run) {
+        if (MOCK) skip("the mock ignores audio");
+        if (!args.speech) skip("pass --speech=file.wav");
+        if (BROWSER !== "chromium") skip("--speech needs Chrome");
+        const voiceBrowser = await launch([`--use-file-for-fake-audio-capture=${path.resolve(args.speech)}%noloop`]);
+        try {
+            const page = await run.newPage(voiceBrowser);
+            await connect(page, { transport: "websocket", modality: "AUDIO" });
+            await waitConnected(page);
+            await page.click("#micOffBtn md-filled-icon-button");
+            await page.waitForTimeout(4000);
+            await page.click("#micBtn md-filled-icon-button");
+            await page.waitForTimeout(15000);
+            const lines = await chat(page);
+            check(lines.some((l) => l.kind.includes("chat-user")), "no input transcript");
+            check(lines.some((l) => l.kind.includes("chat-model")), "no model reply");
+        } finally {
+            await voiceBrowser.close();
+        }
+    },
 };
 
 (async () => {

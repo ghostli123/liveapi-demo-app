@@ -1331,6 +1331,8 @@ async function startAudioInput() {
         if (webRtcManager) {
             await webRtcManager.startMicrophone(deviceId);
         } else {
+            // Switching mics: send what the old one captured before it's dropped.
+            AppState.liveAudioInputManager.recordChunk();
             AppState.liveAudioInputManager.deviceId = deviceId;
             await AppState.liveAudioInputManager.updateAudioInterval(AppUI.getValue("audioInterval"));
         }
@@ -1361,7 +1363,20 @@ function startMicLevelMeter(stream) {
     AppUI.setHidden("micLevel", false);
 }
 
+// With automatic activity detection the server ends a spoken turn after a
+// stretch of quiet audio, so when WebSocket media stops mid-sentence it keeps
+// waiting and the last words get no answer. audio_stream_end tells it the audio
+// stopped; the buffered audio goes first. Over WebRTC the server sees the
+// track stop, and with detection off endUserTurn()'s activity_end does this.
+function endAudioStream() {
+    const api = AppState.geminiLiveApi;
+    if (!api || !api.isSetupComplete || api.disableDetection || isWebRtcTransport() || !isMicOn()) return;
+    AppState.liveAudioInputManager.recordChunk();
+    api.sendAudioStreamEnd();
+}
+
 function stopAudioInput() {
+    endAudioStream();
     AppState.micLevelMeter.stop();
     AppUI.setHidden("micLevel", true);
     if (

@@ -241,6 +241,18 @@ test("text and push-to-talk aren't sent until the server confirms setup", () => 
     assert.equal(api.sendVoiceActivityMessage(false), false);
 });
 
+test("audio_stream_end is sent as realtime input once set up", () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    api.webSocket = new FakeWebSocket();
+    assert.equal(api.sendAudioStreamEnd(), false);
+    assert.equal(api.webSocket.sent.length, 0);
+
+    api.onReceiveResponse = () => {};
+    api.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) });
+    assert.equal(api.sendAudioStreamEnd(), true);
+    assert.deepEqual(plain(api.webSocket.sent), [{ realtime_input: { audio_stream_end: true } }]);
+});
+
 test("onConnectionStarted runs on setupComplete", () => {
     const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
     let started = 0;

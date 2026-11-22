@@ -34,6 +34,11 @@ class FakeGeminiLiveAPI {
         this.sent.push(["activity", start]);
         return true;
     }
+    sendAudioStreamEnd() {
+        if (!this.isSetupComplete) return false;
+        this.sent.push(["audio_stream_end"]);
+        return true;
+    }
     noteActivity() {}
 }
 class FakeManager {}
@@ -640,7 +645,9 @@ test("a resume during the microphone prompt doesn't start a turn", async () => {
 
 /** Disconnect, then Connect again, in a `loadSession()` app; the new session is set up. */
 function reconnect({ context, element, api }) {
-    api.disconnect = () => {};
+    api.disconnect = () => {
+        api.isSetupComplete = false;
+    };
     const { AppState } = context;
     AppState.micLevelMeter.stop = () => {};
     AppState.liveVideoManager.stopWebcam = () => {};
@@ -707,6 +714,7 @@ test("a microphone prompt from the last session doesn't start a turn in the next
 test("a microphone that stops on its own ends the turn, turns the mic off and says why", async () => {
     const { context, element, api, mic, dialogText } = loadSession();
     api.isSetupComplete = true;
+    api.disableDetection = true; // "Start speaking" is only shown then.
     element("micBtn").hidden = false;
     element("micOffBtn").hidden = true;
     await context.turnBtnClick();
@@ -743,6 +751,7 @@ test("a failed capture worklet turns the mic off and says why; a failed player i
 test("switching to a microphone that fails mid-turn ends the turn and turns the mic off", async () => {
     const { context, element, api, mic, dialogText } = loadSession();
     api.isSetupComplete = true;
+    api.disableDetection = true; // "Start speaking" is only shown then.
     element("micBtn").hidden = false;
     element("micOffBtn").hidden = true;
     await context.turnBtnClick();
@@ -756,6 +765,70 @@ test("switching to a microphone that fails mid-turn ends the turn and turns the 
     assert.equal(element("turnBtn").textContent, "Start speaking");
     assert.equal(element("micBtn").hidden, true);
     assert.equal(dialogText(), "Could not start the microphone: Constraints could not be satisfied.");
+});
+
+/** A `loadSession()` app whose mic has `buffered` audio waiting for the next send. */
+function sessionWithBufferedAudio() {
+    const app = loadSession();
+    const { context, element, api } = app;
+    api.isSetupComplete = true;
+    element("micBtn").hidden = false; // The mic is on.
+    element("micOffBtn").hidden = true;
+    const input = context.AppState.liveAudioInputManager;
+    input.buffered = true;
+    input.recordChunk = () => {
+        if (input.buffered) api.sent.push(["audio", "buffered"]);
+        input.buffered = false;
+    };
+    return app;
+}
+
+test("Mic off sends the buffered audio and then audio_stream_end, so the last words get an answer", () => {
+    const { context, element, api } = sessionWithBufferedAudio();
+    context.micBtnClick();
+    assert.deepEqual(api.sent, [["audio", "buffered"], ["audio_stream_end"]]);
+    assert.equal(element("micBtn").hidden, true);
+
+    // Already off (e.g. Disconnect after Mic off): nothing more is sent.
+    context.micBtnClick();
+    assert.equal(api.sent.length, 2);
+});
+
+test("a microphone that stops on its own ends the audio stream too", () => {
+    const { context, api, dialogText } = sessionWithBufferedAudio();
+    context.AppState.liveAudioInputManager.onMicrophoneEnded();
+    assert.deepEqual(api.sent, [["audio", "buffered"], ["audio_stream_end"]]);
+    assert.match(dialogText(), /^The microphone stopped: it was unplugged/);
+});
+
+test("audio_stream_end is only sent for WebSocket media with automatic activity detection", () => {
+    // Manual activity: activity_end ends the turn instead.
+    let app = sessionWithBufferedAudio();
+    app.api.disableDetection = true;
+    app.context.micBtnClick();
+    assert.deepEqual(app.api.sent, []);
+
+    // WebRTC: the audio is on the peer connection, whose track stopping ends it.
+    app = sessionWithBufferedAudio();
+    app.api.transportMode = "webrtc";
+    app.api.webRtcManager = { stopMicrophone() {} };
+    app.context.micBtnClick();
+    assert.deepEqual(app.api.sent, []);
+
+    // During a resume nothing can be sent; the new connection starts a new stream.
+    app = sessionWithBufferedAudio();
+    app.api.isSetupComplete = false;
+    app.context.micBtnClick();
+    assert.deepEqual(app.api.sent, []);
+});
+
+test("switching microphones sends the old one's buffered audio first", async () => {
+    const { context, api, mic } = sessionWithBufferedAudio();
+    context.newMicSelected();
+    assert.deepEqual(api.sent, [["audio", "buffered"]]);
+    mic.starts[0]();
+    await flush();
+    assert.deepEqual(api.sent, [["audio", "buffered"]], "the stream continues on the new mic");
 });
 
 /** A media error as Chrome throws it: a name and an empty message. */
@@ -833,6 +906,7 @@ test("a mic level meter that fails to start leaves the microphone on without it"
         LiveAudioInputManager: class {
             stream = stream;
             async updateAudioInterval() {}
+            recordChunk() {}
             disconnectMicrophone() {
                 micStops++;
             }
@@ -884,6 +958,7 @@ function loadWithWebRtcManager(globals = {}) {
             stop() {}
         },
         LiveAudioInputManager: class {
+            recordChunk() {}
             disconnectMicrophone() {}
         },
         ...globals,

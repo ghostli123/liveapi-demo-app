@@ -79,7 +79,7 @@ The backend tries, in order: Application Default Credentials through google-auth
 
 - **Connection**: pick the transport, location, environment (endpoint), and model, then **Connect**. Changing the environment adjusts the model to one it serves.
 - **Text**: type in the message box and press Enter.
-- **Voice**: click the microphone button to start or stop sending audio. Turn on input and output transcripts in **Advanced Settings** to see what was heard and said.
+- **Voice**: click the microphone button to start or stop sending audio. Turning the mic off mid-sentence ends your turn, so the model answers what it heard rather than waiting for more. Turn on input and output transcripts in **Advanced Settings** to see what was heard and said.
 - **Camera and screen**: the camera button sends your camera; the screen button shares a screen or window. Only one runs at a time. If the microphone or camera stops on its own (unplugged, the browser's access to it turned off, or the mic's audio processing failing), the app turns its button off and says so. If the audio player fails, the chat says so and the player restarts.
 - **Sampling rate** (in **Advanced Settings**, WebSocket transport only): how often buffered microphone audio (20-1000 ms, default 200) and camera or screen frames (100-60000 ms, default 400) are sent. Values outside the range are clamped to it and blank, zero or negative values use the default; the field then shows the value in use. WebRTC streams media continuously and ignores these.
 - **Response type** (in **Model Behavior**): Video (avatar), Audio, or Text.
@@ -134,7 +134,7 @@ The frontend files (except the `frontend/material.js` module) are classic script
 python scripts/smoke_test.py --environment=prod-us-rep --model=gemini-3.8-live --modality=VIDEO
 ```
 
-`scripts/browser_e2e.js` drives the app in headless Chrome (or Firefox, with `--browser=firefox`) against a running server and a real endpoint: an accessibility audit (axe-core's WCAG 2.1 A/AA and best-practice rules on the idle page, the open settings, the branded-voice dialog and a connected session, each at desktop and phone width so settings below the sidebar's fold are checked too), text turns over both transports, resumption, function calling, error reporting, and (with `--speech=file.wav`, Chrome only) a spoken turn through the fake microphone. Each scenario also fails on browser console errors or Content-Security-Policy violations, and an unknown flag stops the script rather than running with the defaults:
+`scripts/browser_e2e.js` drives the app in headless Chrome (or Firefox, with `--browser=firefox`) against a running server and a real endpoint: an accessibility audit (axe-core's WCAG 2.1 A/AA and best-practice rules on the idle page, the open settings, the branded-voice dialog and a connected session, each at desktop and phone width so settings below the sidebar's fold are checked too), text turns over both transports, resumption, function calling, error reporting, and (with `--speech=file.wav`, Chrome only) a spoken turn through the fake microphone and one cut off by Mic off. Each scenario also fails on browser console errors or Content-Security-Policy violations, and an unknown flag stops the script rather than running with the defaults:
 
 ```sh
 npm install

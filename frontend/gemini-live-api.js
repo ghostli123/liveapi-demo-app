@@ -1317,6 +1317,18 @@ class GeminiLiveAPI {
     }
 
     /**
+     * Tells the server the microphone stopped (mic off, unplugged, another
+     * device picked). With automatic activity detection the server otherwise
+     * waits for more audio to decide the user finished speaking, and the last
+     * words get no answer. Audio sent later starts a new stream.
+     * @returns {boolean} Whether it was sent; see sendVoiceActivityMessage().
+     */
+    sendAudioStreamEnd() {
+        if (!this.isSetupComplete) return false;
+        return this.sendMessage({ realtime_input: { audio_stream_end: true } });
+    }
+
+    /**
      * Helper to send real-time input media chunks (audio or images).
      * @param {string} data - Base64 encoded media payload.
      * @param {string} mimeType - Media MIME type.
