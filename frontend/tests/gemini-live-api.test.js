@@ -835,6 +835,27 @@ test("1001 before setup completed is an error, not a resume", () => {
     assert.equal(api.errors.length, 1);
 });
 
+test("a session's end marks WebRTC closed only when its media used WebRTC", () => {
+    const closes = [];
+    const end = (transportMode, how) => {
+        const api = connectedApi();
+        api.transportMode = transportMode; // "websocket" also after a fallback.
+        api.webRtcManager = { close: (options) => closes.push([transportMode, how, options.markClosed]) };
+        api.webSocket.close = () => {};
+        if (how === "disconnect") api.disconnect();
+        else api.webSocket.onclose({ code: 1011, reason: "Internal error" });
+    };
+    for (const transportMode of ["webrtc", "websocket"]) {
+        for (const how of ["disconnect", "server close"]) end(transportMode, how);
+    }
+    assert.deepEqual(plain(closes), [
+        ["webrtc", "disconnect", true],
+        ["webrtc", "server close", true],
+        ["websocket", "disconnect", false],
+        ["websocket", "server close", false],
+    ]);
+});
+
 test("Disconnect during WebRTC ICE gathering neither sends setup nor reports an error", async () => {
     const api = connectedApi();
     api.transportMode = "webrtc";

@@ -1390,6 +1390,20 @@ test("the WebRTC state reads negotiating while a session is set up, not closed",
     assert.equal(stateEl.textContent, "closed");
 });
 
+test("close() of a session whose media used the WebSocket leaves the WebRTC state alone", () => {
+    const stateEl = { textContent: "n/a" }; // What connectBtnClick and the fallback show.
+    const context = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
+        document: { getElementById: (id) => (id === "webrtc-state" ? stateEl : null) },
+        clearTimeout,
+        clearInterval,
+    });
+    const manager = new context.G3RtcWebRtcManager(null);
+    manager.close({ markClosed: false });
+    assert.equal(stateEl.textContent, "n/a");
+    manager.close();
+    assert.equal(stateEl.textContent, "closed");
+});
+
 // A WebRTC manager whose peer connections hold every replaceTrack() until the
 // test releases it. Chrome resolves a held one even after pc.close().
 function webRtcManagerWithHeldReplaceTrack() {

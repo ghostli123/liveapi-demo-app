@@ -1364,10 +1364,13 @@ class G3RtcWebRtcManager {
 
     /**
      * Closes the peer connection.
-     * @param {{keepLocalMedia?: boolean}} [options] - keepLocalMedia: keep the
-     *     microphone and camera tracks for the next initiateSession().
+     * @param {{keepLocalMedia?: boolean, markClosed?: boolean}} [options] -
+     *     keepLocalMedia: keep the microphone and camera tracks for the next
+     *     initiateSession(). markClosed: show "closed" in the metrics panel;
+     *     false for a session whose media went over the WebSocket, which
+     *     shows "n/a" there.
      */
-    close({ keepLocalMedia = false } = {}) {
+    close({ keepLocalMedia = false, markClosed = true } = {}) {
         this.stopStatsPolling();
         clearTimeout(this.connectTimer);
         if (!keepLocalMedia) {
@@ -1398,7 +1401,7 @@ class G3RtcWebRtcManager {
         if (videoEl && videoEl.srcObject) {
             videoEl.srcObject = null;
         }
-        G3RtcWebRtcManager.showState("closed");
+        if (markClosed) G3RtcWebRtcManager.showState("closed");
     }
 
     /** Shows the connection state in the metrics panel. */

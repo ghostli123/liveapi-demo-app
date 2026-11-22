@@ -336,6 +336,8 @@ const scenarios = {
             check(video.width > 0 && video.time > 0, `avatar video not playing: ${JSON.stringify(video)}`);
         }
         await endSession(page);
+        const ended = await page.evaluate(() => document.getElementById("webrtc-state").textContent);
+        check(ended === "n/a", `WebRTC state after a WebSocket session: ${ended}`);
     },
 
     async "text turn over WebRTC"(browser, run) {
@@ -361,6 +363,10 @@ const scenarios = {
             check(state.webrtc === "connected", `WebRTC state ${state.webrtc}`);
         }
         await endSession(page);
+        // Media that fell back to the WebSocket never had a peer connection to close.
+        const ended = await page.evaluate(() => document.getElementById("webrtc-state").textContent);
+        const expected = MOCK ? "n/a" : "closed";
+        check(ended === expected, `WebRTC state after Disconnect: ${ended}, expected ${expected}`);
     },
 
     async "resumption keeps the conversation"(browser, run) {

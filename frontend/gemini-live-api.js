@@ -715,7 +715,7 @@ class GeminiLiveAPI {
         clearTimeout(this.idleTimer);
         this.idleTimer = null;
         if (this.webRtcManager) {
-            this.webRtcManager.close();
+            this.webRtcManager.close({ markClosed: this.transportMode === "webrtc" });
         }
         const webSocket = this.webSocket;
         this.webSocket = null;
@@ -936,7 +936,10 @@ class GeminiLiveAPI {
             const resumable =
                 event.code === 1001 && wasSetUp && this.canResume() && this.takeAutoResume();
             if (this.webRtcManager) {
-                this.webRtcManager.close({ keepLocalMedia: resumable });
+                this.webRtcManager.close({
+                    keepLocalMedia: resumable,
+                    markClosed: this.transportMode === "webrtc",
+                });
             }
             if (resumable) {
                 this.onReconnectNeeded();
