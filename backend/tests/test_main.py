@@ -452,6 +452,11 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(resp.status, status, headers)
             resp = await self.client.get("/ws?session_id=s22", headers=headers)
             self.assertEqual(resp.status, status, headers)
+        # aiohttp decodes a non-ASCII Host byte to a surrogate, which the 403
+        # reply couldn't encode (a 500).
+        for method, path in (("POST", "/api/control"), ("GET", "/ws?session_id=s22")):
+            status = await self._raw_request(method, path, "Host: evil\xe9.example")
+            self.assertEqual(status, 400, method)
         self.assertIsNone(await main.SESSION_MANAGER.search_item("s22"))
 
     async def test_fr_endpoint_reports_unavailable_simulator(self):
@@ -1310,6 +1315,47 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             "/api/control", json=body, headers={"Origin": own_origin}
         )
         self.assertEqual(resp.status, 200)
+
+    async def test_rejection_logs_escape_client_text(self):
+        # The path is percent-decoded, so a client can put a newline in it, and
+        # header values may hold bytes 0x80-0xFF (NEL, 0x85, is a line break to
+        # str.splitlines). Neither may forge or hide a log line. (Both HTTP
+        # parsers refuse ASCII control characters in headers with a 400.)
+        forged = "W1122 09:00:00.000000 1 main.py:1] forged"
+        paths = [
+            "/api/control" + urllib.parse.quote(sep + forged)
+            for sep in ("\n", "\r", "\u2028", "\x85")
+        ]
+        requests = [(path, "Host: evil.example") for path in paths]
+        requests += [(path, "Origin: https://evil.example") for path in paths]
+        requests.append(("/api/control", "Origin: https://evil.example\x85" + forged))
+        for path, header in requests:
+            with self.assertLogs("absl", level="WARNING") as logs:
+                status = await self._raw_request("POST", path, header)
+            self.assertEqual(status, 403, (path, header))
+            [message] = [record.getMessage() for record in logs.records]
+            self.assertTrue(message.startswith("Rejected POST "), message)
+            self.assertTrue(message.isprintable(), repr(message))
+            self.assertIn("forged", message)
+
+    async def _raw_request(self, method: str, path: str, header: str) -> int:
+        """Sends a header aiohttp's client won't send; returns the status."""
+        reader, writer = await asyncio.open_connection(
+            self.client.host, self.client.port
+        )
+        try:
+            host = f"Host: {self.client.host}:{self.client.port}\r\n"
+            if header.startswith("Host:"):
+                host = ""
+            writer.write(
+                f"{method} {path} HTTP/1.1\r\n{host}{header}\r\n"
+                "Content-Length: 0\r\nConnection: close\r\n\r\n".encode("latin-1")
+            )
+            status_line = await reader.readline()
+            return int(status_line.split()[1])
+        finally:
+            writer.close()
+            await writer.wait_closed()
 
     async def test_rejects_dns_rebinding_and_foreign_ip_origins(self):
         body = {

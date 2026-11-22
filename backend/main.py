@@ -752,12 +752,18 @@ async def reject_cross_origin(request: web.Request, handler):
     """
     if request.method != "GET" or request.path == "/ws":
         try:
+            # Host names are ASCII on the wire (IDNs as punycode); aiohttp
+            # decodes other bytes to surrogates, which the reply can't encode.
+            if not request.host.isascii():
+                raise ValueError("non-ASCII Host")
             host = urllib.parse.urlsplit("//" + request.host).hostname
         except ValueError:  # e.g. an unclosed IPv6 bracket
             return web.Response(text="Invalid Host header", status=400)
         if not is_allowed_host(host):
+            # %r: the path (percent-decoded) and headers come from the client,
+            # and a newline or terminal escape in them could forge log lines.
             logging.warning(
-                "Rejected %s %s for host %s", request.method, request.path, host
+                "Rejected %s %r for host %r", request.method, request.path, host
             )
             return web.Response(
                 text=f"Host {host!r} is not allowed; start the server with --allowed_hosts={host}",
@@ -776,7 +782,7 @@ async def reject_cross_origin(request: web.Request, handler):
                 origin
             ):
                 logging.warning(
-                    "Rejected %s %s from origin %s",
+                    "Rejected %s %r from origin %r",
                     request.method,
                     request.path,
                     origin,
