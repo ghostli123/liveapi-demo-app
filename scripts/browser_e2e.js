@@ -243,6 +243,27 @@ const scenarios = {
         };
         await page.waitForTimeout(1000); // Let the Material components render.
         await audit("idle");
+        // One status label shows at a time, and "connecting" and "model
+        // speaking" don't stay up for an audit (the mock never speaks), so show
+        // them all, with any animation at its first frame.
+        const shown = await page.evaluate(() =>
+            [...document.querySelectorAll(".state")].map((el) => {
+                const wasHidden = el.hidden;
+                el.hidden = false;
+                el.getAnimations({ subtree: true }).forEach((a) => {
+                    a.pause();
+                    a.currentTime = 0;
+                });
+                return wasHidden;
+            })
+        );
+        await audit("every status label");
+        await page.evaluate((wasHidden) => {
+            document.querySelectorAll(".state").forEach((el, i) => {
+                el.hidden = wasHidden[i];
+                el.getAnimations({ subtree: true }).forEach((a) => a.play());
+            });
+        }, shown);
         await page.evaluate(() => document.querySelectorAll("details").forEach((d) => (d.open = true)));
         await audit("settings open");
         await page.click("#createVoiceBtn");

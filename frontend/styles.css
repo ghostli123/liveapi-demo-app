@@ -191,9 +191,12 @@ details .details-content {
 
 /* Status Styles */
 #disconnected { background-color: #ffebee; color: #b71c1c; }
-#connecting { background-color: #fffde7; color: #f57f17; animation: throb 1.5s infinite ease-in-out; }
+#connecting { background-color: #fffde7; color: #a15c00; }
 #connected { background-color: #e8f5e9; color: #2e7d32; }
-#speaking { background-color: #e3f2fd; color: #1565c0; animation: throb 1.5s infinite ease-in-out; }
+#speaking { background-color: #e3f2fd; color: #1565c0; }
+/* Only the icon pulses: faded text would fall below 4.5:1 contrast. */
+#connecting .material-symbols-outlined,
+#speaking .material-symbols-outlined { animation: throb 1.5s infinite ease-in-out; }
 @keyframes throb {
   0%, 100% { opacity: 0.7; }
   50% { opacity: 1; }
