@@ -493,8 +493,9 @@ test("a control request that fails releases nothing", async () => {
 });
 
 // GeminiLiveAPI whose fetch() answers every POST with `reply(body)`:
-// {status, type, text}, or never if it returns "hang" (until the request is
-// aborted, like a real fetch). `posts` records the parsed request bodies;
+// {status, type, text}, never if it returns "hang" (until the request is
+// aborted, like a real fetch), or a TypeError (unreachable server) for
+// "network". `posts` records the parsed request bodies;
 // `timers` records timeouts, which run only when a test fires them.
 function apiWithFetch(reply) {
     const posts = [];
@@ -510,6 +511,9 @@ function apiWithFetch(reply) {
                 init.signal?.addEventListener("abort", abort);
             });
         }
+        if (answer === "network") {
+            throw new TypeError("Failed to fetch");
+        }
         const { status = 200, type = null, text = "" } = answer;
         return {
             ok: status >= 200 && status < 300,
@@ -523,6 +527,7 @@ function apiWithFetch(reply) {
         WebSocket: FakeWebSocket,
         fetch,
         AbortController,
+        TypeError, // So the script's instanceof check sees the fetch's errors.
         setInterval: () => 1,
         clearInterval: () => {},
         setTimeout: (fn, ms) => timers.push({ fn, ms, cleared: false, fired: false }),
@@ -595,6 +600,60 @@ test("a connect that times out once succeeds on the retry", async () => {
     assert.deepEqual(plain(posts.map((b) => b.command)), ["connect", "connect"]);
     // The answered attempt's timeout was cleared.
     assert.ok(timers.every((t) => t.cleared || t.fired));
+});
+
+test("disconnect() during a connect retry's backoff stops the retries", async () => {
+    for (const [first, expected] of [
+        // A timed-out attempt may still create the record, so it's released.
+        ["hang", ["connect", "disconnect"]],
+        ["network", ["connect"]],
+    ]) {
+        let connects = 0;
+        const { api, posts, timers } = apiWithFetch((body) =>
+            body.command === "disconnect" ? { type: "application/json", text: "{}" } : ++connects === 1 ? first : "hang"
+        );
+        const errors = [];
+        api.onErrorMessage = (message) => errors.push(message);
+        let opened = 0;
+        api.setupWebSocketToService = () => opened++;
+        const connecting = api.connect();
+        if (first === "hang") await fireNextTimer(timers); // The first attempt's timeout.
+        await new Promise((resolve) => setImmediate(resolve)); // Into the backoff.
+        api.disconnect();
+        await fireNextTimer(timers); // The backoff.
+        await connecting;
+        assert.equal(opened, 0);
+        assert.deepEqual(errors, []);
+        assert.deepEqual(plain(posts.map((b) => b.command)), expected, first);
+        await new Promise((resolve) => setImmediate(resolve)); // The release's reply.
+        assert.ok(timers.every((t) => t.cleared || t.fired), first);
+    }
+});
+
+test("a connect that timed out once and then failed otherwise is still released", async () => {
+    // The server may create the record for the timed-out attempt late.
+    let connects = 0;
+    const { api, posts, timers } = apiWithFetch((body) =>
+        body.command === "disconnect" ? { type: "application/json", text: "{}" } : ++connects === 1 ? "hang" : "network"
+    );
+    const errors = [];
+    api.onErrorMessage = (message) => errors.push(message);
+    const connecting = api.connect();
+    const fired = [];
+    for (let i = 0; i < 4; i++) fired.push(await fireNextTimer(timers));
+    await connecting;
+    // 15 s attempt, then backoffs around three network errors.
+    assert.deepEqual(fired, [15000, 1000, 2000, 3000]);
+    assert.deepEqual(errors, ["Could not start the session: Failed to fetch"]);
+    assert.deepEqual(plain(posts.map((b) => b.command)), ["connect", "connect", "connect", "connect", "disconnect"]);
+});
+
+test("a connect that fails without a timeout isn't released", async () => {
+    const { api, posts, timers } = apiWithFetch(() => "network");
+    const connecting = api.connect();
+    for (let i = 0; i < 3; i++) await fireNextTimer(timers);
+    await connecting;
+    assert.deepEqual(plain(posts.map((b) => b.command)), ["connect", "connect", "connect", "connect"]);
 });
 
 test("function declarations the server never takes fail the connect after the timeout", async () => {

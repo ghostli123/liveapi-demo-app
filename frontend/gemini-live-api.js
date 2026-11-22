@@ -495,7 +495,7 @@ class GeminiLiveAPI {
         let created = false;
         try {
             console.log("prepare(): Initializing backend service...");
-            const control = await this.initBackendService(sessionId);
+            const control = await this.initBackendService(sessionId, isCurrent);
             created = true;
             if (!isCurrent()) {
                 this.abandonSession(sessionId);
@@ -642,9 +642,11 @@ class GeminiLiveAPI {
 
     /**
      * Creates the backend's record for a session.
+     * @param {string} [sessionId]
+     * @param {() => boolean} [isCurrent] - Stops retrying once false.
      * @returns {Promise<Object>} The server's reply: project_id, idle_timeout_s.
      */
-    async initBackendService(sessionId = this.sessionId) {
+    async initBackendService(sessionId = this.sessionId, isCurrent = () => true) {
         if (this.model === "gemini-3.5-live-early-exp") {
             this.location = "us-central1";
             if (
@@ -670,11 +672,12 @@ class GeminiLiveAPI {
             location: this.location,
         };
         try {
-            return await this.postWithRetry(this.controlUrl, postRequestBody);
+            return await this.postWithRetry(this.controlUrl, postRequestBody, { isCurrent });
         } catch (error) {
             console.error("Error in initBackendService:", error);
-            if (error.timeout) {
-                // The server may still create the record after we gave up.
+            if (error.timeouts > 0) {
+                // The server may still create the record for an attempt we
+                // gave up on, even if a later one failed another way.
                 this.abandonSession(sessionId);
             }
             throw new Error(`Could not start the session: ${error.message}`, { cause: error });
@@ -1471,15 +1474,25 @@ class GeminiLiveAPI {
      * request must be safe to repeat.
      * @param {string} url
      * @param {Object} data
-     * @param {number} [attempts=4]
-     * @returns {Promise<Object>}
+     * @param {{attempts?: number, isCurrent?: () => boolean}} [options] -
+     *     `isCurrent` returning false (e.g. after disconnect()) stops the
+     *     retries; the error then has `cancelled` set.
+     * @returns {Promise<Object>} Rejects with the last error, whose `timeouts`
+     *     counts the attempts that timed out (the server may still act on
+     *     those).
      */
-    async postWithRetry(url, data, attempts = 4) {
+    async postWithRetry(url, data, { attempts = 4, isCurrent = () => true } = {}) {
         let timeouts = 0;
         for (let attempt = 1; ; attempt++) {
             try {
+                if (!isCurrent()) {
+                    throw Object.assign(new Error("cancelled"), { cancelled: true });
+                }
                 return await this.sendPostRequest(url, data, { timeoutMs: CONTROL_TIMEOUT_MS });
             } catch (error) {
+                if (error.cancelled) {
+                    throw Object.assign(error, { timeouts });
+                }
                 // fetch() rejects with a TypeError when the server is
                 // unreachable; a proxy in front of it answers 502-504. A
                 // timeout is retried once, since a new connection can get past
@@ -1491,7 +1504,7 @@ class GeminiLiveAPI {
                     [502, 503, 504].includes(error.status) ||
                     (error.timeout && timeouts < 2);
                 if (!transient || attempt >= attempts) {
-                    throw error;
+                    throw Object.assign(error, { timeouts });
                 }
                 console.warn(`POST ${url} failed (${error.message}); retrying...`);
                 await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
