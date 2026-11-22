@@ -100,6 +100,26 @@ test("parseAll handles the remaining server message types", () => {
     assert.equal(events[5].data, "h1");
 });
 
+test("parseAll reads the server's voice activity frames", () => {
+    // As the real endpoint sends them (cycle 107 probe), in either case.
+    const start = GeminiLiveResponseMessage.parseAll({
+        voiceActivity: { type: "ACTIVITY_START", audioOffset: "0.200s" },
+    });
+    assert.deepEqual(types(start), ["VOICE_ACTIVITY"]);
+    assert.equal(start[0].data, "ACTIVITY_START");
+    assert.equal(start[0].audioOffset, "0.200s");
+
+    const end = GeminiLiveResponseMessage.parseAll({ voice_activity: { type: "ACTIVITY_END", audio_offset: "20.640s" } });
+    assert.deepEqual(types(end), ["VOICE_ACTIVITY"]);
+    assert.equal(end[0].data, "ACTIVITY_END");
+    assert.equal(end[0].audioOffset, "20.640s");
+
+    // A frame without a type, or with a malformed one, is skipped.
+    for (const voiceActivity of [{}, { type: 3 }, null, "ACTIVITY_END"]) {
+        assert.deepEqual(types(GeminiLiveResponseMessage.parseAll({ voiceActivity })), []);
+    }
+});
+
 test("parseAll ignores resumption updates without a handle", () => {
     const events = GeminiLiveResponseMessage.parseAll({
         sessionResumptionUpdate: { resumable: false },
@@ -933,6 +953,8 @@ test("conversation events and user input postpone the idle timeout", async () =>
         "output transcript": { serverContent: { outputTranscription: { text: "hello" } } },
         "model text": { serverContent: { modelTurn: { parts: [{ text: "hello" }] } } },
         "turn end": { serverContent: { turnComplete: true } },
+        // Speech the server detects counts even with input transcription off.
+        "voice activity": { voiceActivity: { type: "ACTIVITY_START", audioOffset: "0.200s" } },
         interruption: { serverContent: { interrupted: true } },
         "function call": { toolCall: { functionCalls: [{ id: "1", name: "f", args: {} }] } },
     };

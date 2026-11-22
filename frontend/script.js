@@ -966,6 +966,10 @@ function handleReceiveResponse(messageResponse) {
         case "VAD_SIGNAL":
             console.log("VAD signal");
             break;
+        case "VOICE_ACTIVITY":
+            if (messageResponse.data === "ACTIVITY_START") markUserSpeechStart();
+            else if (messageResponse.data === "ACTIVITY_END") markUserTurnEnd("end of speech");
+            break;
         case "FUNCTION_CALL":
             closeTranscriptLine("input");
             handleFunctionCallRequest(messageResponse.data);
@@ -984,7 +988,8 @@ function handleReceiveResponse(messageResponse) {
 
 // --- Response latency ---
 // Time from the end of the user's turn to the model's first audio or text.
-// For speech, the end is approximated by the last input transcript.
+// For speech, the end is the server's end-of-speech signal (voice activity
+// detection), or else the last input transcript.
 const LatencyState = {
     /** @type {number | null} */
     turnEndedAt: null,
@@ -992,15 +997,28 @@ const LatencyState = {
     responding: false,
 };
 
+// How exact each turn end is. A less exact one doesn't move a turn end already
+// recorded: transcripts trail the end of speech, and with manual activity the
+// server echoes ACTIVITY_END ~200 ms after the Done speaking click.
+const TURN_END_RANK = { speech: 0, "end of speech": 1, "end of turn": 2, text: 2 };
+
 /**
  * Records (or moves) the end of the user's turn. Input transcripts trail the
  * speech, so ones that arrive once the model is answering are ignored.
  */
 function markUserTurnEnd(source, { force = false } = {}) {
     if (LatencyState.responding && !force) return;
+    if (!force && LatencyState.turnEndedAt !== null && TURN_END_RANK[source] < TURN_END_RANK[LatencyState.source]) {
+        return;
+    }
     if (force) LatencyState.responding = false;
     LatencyState.turnEndedAt = performance.now();
     LatencyState.source = source;
+}
+
+/** The user (re)started speaking, so their turn hasn't ended yet. */
+function markUserSpeechStart() {
+    if (!LatencyState.responding) LatencyState.turnEndedAt = null;
 }
 
 /** The model's first response in a turn; `what` names it if not audio/text. */
@@ -1012,6 +1030,7 @@ function markModelResponse(what = "") {
     const after = {
         text: "after text",
         speech: "after last transcript",
+        "end of speech": "after end of speech",
         "end of turn": "after Done speaking",
     }[LatencyState.source];
     AppUI.setText("response-latency", `${ms.toLocaleString()} ms ${after}${what ? ` (to ${what})` : ""}`);

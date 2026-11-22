@@ -583,6 +583,9 @@ const scenarios = {
             const lines = await chat(page);
             check(lines.some((l) => l.kind.includes("chat-user")), "no input transcript");
             check(lines.some((l) => l.kind.includes("chat-model")), "no model reply");
+            // Timed from the server's voiceActivity ACTIVITY_END, not a transcript.
+            const latency = await page.evaluate(() => document.getElementById("response-latency").textContent);
+            check(/^[\d,]+ ms after end of speech/.test(latency), `response latency: ${latency}`);
         } finally {
             await voiceBrowser.close();
         }

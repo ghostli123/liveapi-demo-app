@@ -59,6 +59,16 @@ class GeminiLiveResponseMessage {
         if (field(raw, "voiceActivityDetectionSignal", "voice_activity_detection_signal")) {
             add("VAD_SIGNAL");
         }
+        // The server's voice activity detection: {type: "ACTIVITY_START" or
+        // "ACTIVITY_END", audioOffset: "20.640s"}, also echoed for the client's
+        // own activity_start/activity_end when automatic detection is off.
+        const voiceActivity = field(raw, "voiceActivity", "voice_activity");
+        const activityType = str(voiceActivity?.type);
+        if (activityType) {
+            add("VOICE_ACTIVITY", activityType, {
+                audioOffset: str(field(voiceActivity, "audioOffset", "audio_offset")),
+            });
+        }
 
         const content = field(raw, "serverContent", "server_content");
         if (content) {
@@ -137,6 +147,8 @@ const ACTIVITY_EVENTS = new Set([
     "END_OF_TURN",
     "INTERRUPT",
     "FUNCTION_CALL",
+    // The user speaking, even with input transcription off.
+    "VOICE_ACTIVITY",
 ]);
 
 /**

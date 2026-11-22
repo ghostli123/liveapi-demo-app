@@ -554,11 +554,12 @@ test("a malformed old settings cookie is skipped and deleted; restore goes on", 
 });
 
 /** The "Start speaking" / text input path, with a microphone that starts when the test says. */
-function loadSession() {
+function loadSession(globals = {}) {
     const mic = { starts: [], fails: [] };
     const app = loadApp({
         navigator: {},
         performance,
+        ...globals,
         requestAnimationFrame: () => 0, // Device lists refresh once the mic starts.
         clearInterval, // Disconnect stops the connection timer.
         LiveAudioInputManager: class {
@@ -610,6 +611,71 @@ test("text with no session asks the user to connect", () => {
     context.newUserMessage();
     assert.deepEqual(api.sent, []);
     assert.equal(dialogText(), "Connect before sending a message.");
+});
+
+/** A session whose clock the test sets, and a way to deliver server events at a time. */
+function loadLatencySession() {
+    const clock = { now: 0 };
+    const session = loadSession({ performance: { now: () => clock.now } });
+    session.api.isSetupComplete = true;
+    const at = (ms, type, data = "", extra = {}) => {
+        clock.now = ms;
+        session.context.handleReceiveResponse({ type, data, ...extra });
+    };
+    return { ...session, clock, at, latency: () => session.element("response-latency").textContent };
+}
+
+test("response latency counts from the server's end of speech; transcripts around it don't move it", () => {
+    const { at, latency } = loadLatencySession();
+    // As the real endpoint sends them: the transcript just before ACTIVITY_END.
+    at(0, "VOICE_ACTIVITY", "ACTIVITY_START");
+    at(1000, "INPUT_TRANSCRIPTION", "How much wood");
+    at(1010, "VOICE_ACTIVITY", "ACTIVITY_END");
+    at(1300, "INPUT_TRANSCRIPTION", " would a woodchuck chuck?"); // A trailing transcript.
+    at(1560, "TEXT", "A lot.");
+    assert.equal(latency(), "550 ms after end of speech");
+});
+
+test("speech that starts again before the model answers moves the end of the turn", () => {
+    const { context, element, at, clock, latency } = loadLatencySession();
+    at(0, "VOICE_ACTIVITY", "ACTIVITY_START");
+    at(1000, "VOICE_ACTIVITY", "ACTIVITY_END");
+    at(1500, "VOICE_ACTIVITY", "ACTIVITY_START"); // A pause, not the end.
+    at(1600, "INPUT_TRANSCRIPTION", "and then");
+    at(3000, "VOICE_ACTIVITY", "ACTIVITY_END");
+    at(3400, "TEXT", "So?");
+    assert.equal(latency(), "400 ms after end of speech");
+
+    // A typed message the model never answered doesn't count for the speech after it.
+    at(4000, "END_OF_TURN");
+    clock.now = 4500;
+    element("text-message").value = "hello?";
+    context.newUserMessage();
+    at(5000, "VOICE_ACTIVITY", "ACTIVITY_START");
+    at(6000, "VOICE_ACTIVITY", "ACTIVITY_END");
+    at(6250, "TEXT", "ok");
+    assert.equal(latency(), "250 ms after end of speech");
+});
+
+test("with Start speaking, latency counts from Done speaking, not the server's echoed end of speech", async () => {
+    const { context, element, at, clock, latency } = loadLatencySession();
+    element("micBtn").hidden = false; // The mic is already on.
+    await context.turnBtnClick();
+    at(100, "VOICE_ACTIVITY", "ACTIVITY_START");
+    clock.now = 2000;
+    await context.turnBtnClick(); // Done speaking.
+    at(2150, "INPUT_TRANSCRIPTION", "hello");
+    at(2200, "VOICE_ACTIVITY", "ACTIVITY_END");
+    at(2600, "TEXT", "Hi.");
+    assert.equal(latency(), "600 ms after Done speaking");
+});
+
+test("without voice activity frames, latency counts from the last input transcript", () => {
+    const { at, latency } = loadLatencySession();
+    at(1000, "INPUT_TRANSCRIPTION", "hello");
+    at(1200, "INPUT_TRANSCRIPTION", " there");
+    at(1500, "TEXT", "Hi.");
+    assert.equal(latency(), "300 ms after last transcript");
 });
 
 test("Start speaking while the session resumes doesn't start a turn", async () => {
