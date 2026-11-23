@@ -26,8 +26,9 @@ class LiveAudioOutputManager {
         this.crashDelayMs = 0;
         this.startedAt = 0;
         this.crashReported = false;
-        // Called with a message for the user the first time the player
-        // crashes after a Connect.
+        // Called with a message for the user the first time after a Connect
+        // that the player crashes or a chunk is dropped because it couldn't
+        // start; see reportFailure().
         /** @type {(message: string) => void} */
         this.onPlayerError = () => {};
     }
@@ -51,7 +52,11 @@ class LiveAudioOutputManager {
                 (workletNode) => {
                     workletNode.port.postMessage(float32Data, [float32Data.buffer]);
                 },
-                () => {} // Logged once per attempt by initializeAudioContext(); the chunk is dropped.
+                // Logged once per attempt by initializeAudioContext(); the
+                // chunk is dropped. Reported here rather than there because
+                // WebRTC sessions also start this player (on Connect) but
+                // get their audio from the peer connection.
+                () => this.reportFailure()
             )
             .catch((error) => console.error("Error playing audio chunk:", error));
         this.resumeContext();
@@ -170,13 +175,18 @@ class LiveAudioOutputManager {
         failed.catch(() => {});
         this.failed = failed;
         this.retryAt = Date.now() + this.crashDelayMs;
-        if (!this.crashReported) {
-            this.crashReported = true;
-            this.onPlayerError(
-                "The audio player stopped, so some of the model's speech wasn't played. It restarts on its own; " +
-                    "if the model stays silent, disconnect and connect again."
-            );
-        }
+        this.reportFailure("The audio player stopped, so some of the model's speech wasn't played.");
+    }
+
+    /**
+     * Tells the user, once per Connect, that the player crashed or couldn't
+     * start (e.g. its worklet failed to load during a deploy), so the model's
+     * speech is being dropped while its transcript goes on.
+     */
+    reportFailure(reason = "The audio player couldn't start, so the model's speech isn't playing.") {
+        if (this.crashReported) return;
+        this.crashReported = true;
+        this.onPlayerError(`${reason} It restarts on its own; if the model stays silent, disconnect and connect again.`);
     }
 
     /** @param {Promise<AudioWorkletNode>} failed */

@@ -1144,6 +1144,41 @@ test("a worklet that keeps failing is retried with a growing delay, and at once 
     assert.equal(manager.retryDelayMs, 0);
 });
 
+test("a player that can't start is reported once per Connect, when a chunk is dropped", async () => {
+    const { manager, fake } = audioOutputWithFakeContexts();
+    const reports = [];
+    manager.onPlayerError = (message) => reports.push(message);
+    fake.failAllLoads = true;
+    manager.resume(); // The Connect click. WebRTC sessions stop here: no chunk, no report.
+    await settle();
+    assert.deepEqual(reports, []);
+
+    manager.playAudioChunk(AUDIO_CHUNK); // Within the retry delay: dropped.
+    manager.playAudioChunk(AUDIO_CHUNK);
+    fake.now = 1000;
+    manager.playAudioChunk(AUDIO_CHUNK); // A new attempt that fails too.
+    await settle();
+    assert.equal(fake.loads, 2);
+    assert.equal(reports.length, 1);
+    assert.match(reports[0], /couldn't start, so the model's speech isn't playing/);
+
+    // A refused context is reported the same way.
+    fake.refuseContexts = true;
+    manager.resume(); // The next Connect.
+    manager.playAudioChunk(AUDIO_CHUNK);
+    await settle();
+    assert.equal(reports.length, 2);
+
+    // A crash after a failed start in the same Connect isn't reported again.
+    fake.refuseContexts = false;
+    fake.failAllLoads = false;
+    fake.now = 2000;
+    manager.playAudioChunk(AUDIO_CHUNK);
+    await settle();
+    manager.workletNode.onprocessorerror(new Event("processorerror"));
+    assert.equal(reports.length, 2);
+});
+
 test("audio chunks share one context and worklet", async () => {
     const { manager, fake } = audioOutputWithFakeContexts();
     manager.playAudioChunk(AUDIO_CHUNK);
