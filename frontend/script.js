@@ -131,6 +131,7 @@ const AppState = {
     audioChunks: [],
     isRecording: false,
     userTurnActive: false, // Between "Start speaking" and "Done speaking"
+    wsAudioStreamActive: false, // WebSocket mic capture started on the current connection
     /** @type {(() => void) | null} */
     cancelRecording: null, // Stops the voice recording in progress, if any
     recordingAttempt: 0, // Advanced by each Record click and by closing the dialog
@@ -207,6 +208,9 @@ function initApplicationManagers() {
     };
 
     AppState.liveAudioInputManager.onNewAudioRecordingChunk = (audioData) => {
+        if (AppState.geminiLiveApi.isSetupComplete && !isWebRtcTransport()) {
+            AppState.wsAudioStreamActive = true;
+        }
         AppState.geminiLiveApi.sendAudioMessage(audioData);
     };
 
@@ -1128,6 +1132,7 @@ async function handleSessionResumptionReconnect() {
     closeTranscriptLine("input");
     closeTranscriptLine("output");
     setUserTurnActive(false); // The new session never saw activity_start.
+    AppState.wsAudioStreamActive = false; // The new connection has no audio stream yet.
     showHearingUser(false); // Nor the speech: its ACTIVITY_END won't come.
     resetLatencyTurn();
     if (api.transportMode !== "webrtc" && AppState.liveVideoOutputManager) {
@@ -1430,18 +1435,22 @@ function deviceErrorReason(err) {
 
 async function startAudioInput() {
     const deviceId = AppUI.getValue("audioSource") || null;
-    // Over WebSocket, a connected capture node means audio is being sent (a
-    // device switch); a first start that fails has sent none.
-    const wasSendingAudio = !!AppState.liveAudioInputManager.processor;
     try {
         const webRtcManager = webRtcManagerIfActive();
         if (webRtcManager) {
             await webRtcManager.startMicrophone(deviceId);
         } else {
-            // Switching mics: send what the old one captured before it's dropped.
+            // Switching mics: keep the open WebSocket stream marked active
+            // across disconnectMicrophone() and send what the old mic captured.
+            if (AppState.liveAudioInputManager.processor && AppState.geminiLiveApi.isSetupComplete) {
+                AppState.wsAudioStreamActive = true;
+            }
             AppState.liveAudioInputManager.recordChunk();
             AppState.liveAudioInputManager.deviceId = deviceId;
             await AppState.liveAudioInputManager.updateAudioInterval(AppUI.getValue("audioInterval"));
+            if (AppState.liveAudioInputManager.processor && AppState.geminiLiveApi.isSetupComplete) {
+                AppState.wsAudioStreamActive = true;
+            }
         }
         if (isMicOn()) {
             startMicLevelMeter(webRtcManager ? webRtcManager.micStream : AppState.liveAudioInputManager.stream);
@@ -1454,7 +1463,7 @@ async function startAudioInput() {
         // E.g. switching to another mic mid-turn: like turning the mic off,
         // this ends the turn, or it stays open with nothing being sent.
         endUserTurn();
-        stopAudioInput({ endStream: wasSendingAudio });
+        stopAudioInput();
         showMicState(false);
     }
 }
@@ -1481,13 +1490,15 @@ function startMicLevelMeter(stream) {
 function endAudioStream() {
     const api = AppState.geminiLiveApi;
     if (!api || !api.isSetupComplete || api.disableDetection || isWebRtcTransport() || !isMicOn()) return;
+    if (!AppState.wsAudioStreamActive && !AppState.liveAudioInputManager.processor) return;
     AppState.liveAudioInputManager.recordChunk();
     api.sendAudioStreamEnd();
+    AppState.wsAudioStreamActive = false;
 }
 
-/** `endStream: false` when no audio was sent, so there is no stream to end. */
-function stopAudioInput({ endStream = true } = {}) {
-    if (endStream) endAudioStream();
+function stopAudioInput() {
+    endAudioStream();
+    AppState.wsAudioStreamActive = false;
     AppState.micLevelMeter.stop();
     AppUI.setHidden("micLevel", true);
     // Over WebRTC a stopped track sends nothing, so ACTIVITY_END may never come.

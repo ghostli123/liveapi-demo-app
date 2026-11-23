@@ -1164,6 +1164,104 @@ test("a microphone that fails to start sends no audio_stream_end: no audio was s
     assert.deepEqual(api.sent, []);
 });
 
+test("overlapped WebSocket mic switches still send audio_stream_end when the replacement fails", async () => {
+    const { context, element, api, mic, dialogText } = sessionWithBufferedAudio();
+    const input = context.AppState.liveAudioInputManager;
+    // Like the real LiveAudioInputManager: updateAudioInterval() disconnects the
+    // old capture node (clearing processor) before awaiting the replacement mic.
+    let gen = 0;
+    input.disconnectMicrophone = () => {
+        gen++;
+        input.processor = null;
+        mic.stops = (mic.stops || 0) + 1;
+    };
+    input.updateAudioInterval = () => {
+        input.disconnectMicrophone();
+        const myGen = gen;
+        return new Promise((resolve, reject) => {
+            mic.starts.push(() => {
+                if (myGen === gen) input.processor = {};
+                resolve();
+            });
+            mic.fails.push((err) => {
+                if (myGen !== gen) return resolve();
+                reject(err);
+            });
+        });
+    };
+
+    // Switch A -> B: disconnects A (processor becomes null) without ending the stream.
+    context.newMicSelected();
+    assert.equal(input.processor, null);
+    assert.deepEqual(api.sent, [["audio", "buffered"]]);
+
+    // While B is pending, switch to C which fails: A's open stream must still end.
+    context.newMicSelected();
+    mic.fails[1](namedError("OverconstrainedError"));
+    await flush();
+    assert.deepEqual(api.sent, [["audio", "buffered"], ["audio_stream_end"]]);
+    assert.equal(element("micBtn").hidden, true);
+    assert.equal(dialogText(), "Could not start the microphone: the selected device isn't available");
+
+    // Superseded B settling later leaves no active stream, so a new failed start sends none.
+    mic.starts[0]();
+    await flush();
+    assert.equal(input.processor, null);
+    context.micOffBtnClick();
+    mic.fails[2](new Error("Permission denied"));
+    await flush();
+    assert.deepEqual(api.sent, [["audio", "buffered"], ["audio_stream_end"]]);
+});
+
+test("Mic off during a pending switch ends the active stream, not a pending initial start", async () => {
+    // Pending initial start cancelled with Mic off: no audio was sent.
+    let app = loadSession();
+    app.api.isSetupComplete = true;
+    app.element("micBtn").hidden = true;
+    app.element("micOffBtn").hidden = false;
+    app.context.micOffBtnClick();
+    app.context.micBtnClick();
+    assert.deepEqual(app.api.sent, []);
+
+    // Pending switch from an active mic cancelled with Mic off: ends the old mic's stream.
+    app = sessionWithBufferedAudio();
+    const input = app.context.AppState.liveAudioInputManager;
+    const origUpdate = input.updateAudioInterval.bind(input);
+    input.updateAudioInterval = () => {
+        input.processor = null;
+        return origUpdate();
+    };
+    app.context.newMicSelected();
+    assert.equal(input.processor, null);
+    app.context.micBtnClick();
+    assert.deepEqual(app.api.sent, [["audio", "buffered"], ["audio_stream_end"]]);
+});
+
+test("a GoAway resume while a mic switch is pending doesn't send audio_stream_end on the new connection", async () => {
+    const app = sessionWithBufferedAudio();
+    const { context, api, mic } = app;
+    const input = context.AppState.liveAudioInputManager;
+    const origUpdate = input.updateAudioInterval.bind(input);
+    input.updateAudioInterval = () => {
+        input.processor = null;
+        return origUpdate();
+    };
+    api.resume = async () => {};
+    context.AppState.liveVideoOutputManager.initMediaSource = () => {};
+
+    // Start switching from active Mic A to pending Mic B.
+    context.newMicSelected();
+    assert.deepEqual(api.sent, [["audio", "buffered"]]);
+
+    // Session resumes on a fresh connection before B finishes; A never streamed on it.
+    await context.handleSessionResumptionReconnect();
+    api.isSetupComplete = true;
+
+    mic.fails[0](new Error("Permission denied"));
+    await flush();
+    assert.deepEqual(api.sent, [["audio", "buffered"]]);
+});
+
 test("Start speaking with the mic on sends the audio captured before the click ahead of activity_start", async () => {
     const { context, api } = sessionWithBufferedAudio();
     api.disableDetection = true; // "Start speaking" is only shown then.
