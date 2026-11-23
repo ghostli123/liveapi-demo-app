@@ -1602,9 +1602,11 @@ async function startCameraCapture() {
     camera.deviceId = AppUI.getValue("cameraSource") || null;
     camera.intervalMs = videoIntervalMs();
     try {
-        const webRtcManager = webRtcManagerIfActive();
         // WebRTC sends the camera track itself; WebSocket sends JPEG frames.
-        await camera.startWebcam({ sendFrames: !webRtcManager });
+        await camera.startWebcam({ sendFrames: !webRtcManagerIfActive() });
+        // Re-check after the prompt: media may have fallen back to WebSocket
+        // while the user answered it, so don't attach to a closed manager.
+        const webRtcManager = webRtcManagerIfActive();
         if (webRtcManager) {
             await webRtcManager.attachVideoStream(camera.stream);
         }
@@ -1626,12 +1628,11 @@ async function startCameraCapture() {
 
 async function startScreenCapture() {
     const screen = AppState.liveScreenManager;
-    const webRtcManager = webRtcManagerIfActive();
     screen.intervalMs = videoIntervalMs();
     try {
         // False: the session ended or the camera started while the picker
         // was open, and the pick was dropped.
-        if (!(await screen.startCapture({ sendFrames: !webRtcManager }))) return;
+        if (!(await screen.startCapture({ sendFrames: !webRtcManagerIfActive() }))) return;
     } catch (err) {
         // NotAllowedError means the user closed the picker.
         if (err.name !== "NotAllowedError") {
@@ -1642,8 +1643,23 @@ async function startScreenCapture() {
     // The camera and the screen share the preview, so only one runs at a time.
     AppState.liveVideoManager.stopWebcam();
     showCameraState(false);
+    // Re-check after the picker: media may have fallen back to WebSocket while
+    // it was open, so don't attach to a closed manager.
+    const webRtcManager = webRtcManagerIfActive();
     if (webRtcManager) {
-        await webRtcManager.attachVideoStream(screen.stream);
+        try {
+            await webRtcManager.attachVideoStream(screen.stream);
+        } catch (err) {
+            console.error("Failed to attach screen share:", err);
+            AppUI.showModal(`Could not share the screen: ${deviceErrorReason(err)}`);
+            screen.stopCapture();
+            // The camera stopped above may still sit on the WebRTC sender.
+            const activeWebRtc = webRtcManagerIfActive();
+            if (activeWebRtc) {
+                activeWebRtc.detachVideoStream();
+            }
+            return;
+        }
     }
     sendFramesIfWebSocket(screen);
 }

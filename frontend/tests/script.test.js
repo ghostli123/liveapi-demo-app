@@ -1642,9 +1642,14 @@ test("a camera or screen started over WebRTC sends frames if media falls back to
     const screen = context.AppState.liveScreenManager;
     context.AppState.liveVideoOutputManager = { initMediaSource() {} };
     element("micBtn").hidden = true; // Mic off: the fallback leaves it alone.
-    webRtc.attachVideoStream = async () => {};
+    let attachCalls = 0;
+    webRtc.attachVideoStream = async (stream) => {
+        attachCalls++;
+        webRtc.videoTrack = stream.getVideoTracks()[0];
+    };
     const fallBack = () => {
         api.transportMode = "websocket";
+        webRtc.videoTrack = null;
         api.onTransportFallback();
     };
 
@@ -1654,14 +1659,18 @@ test("a camera or screen started over WebRTC sends frames if media falls back to
     prompts[0].resolve();
     await onWebRtc;
     assert.equal(camera.sendingFrames, false);
+    assert.equal(attachCalls, 1);
+    assert.ok(webRtc.videoTrack);
 
-    // Falls back while the camera prompt is open.
+    // Falls back while the camera prompt is open: sends frames, doesn't attach to the closed manager.
     camera.stream = null;
     const camStart = context.startCameraCapture();
     fallBack();
     prompts[1].resolve();
     await camStart;
     assert.equal(camera.sendingFrames, true);
+    assert.equal(attachCalls, 1);
+    assert.equal(webRtc.videoTrack, null);
 
     // Same for the screen picker.
     api.transportMode = "webrtc";
@@ -1670,6 +1679,55 @@ test("a camera or screen started over WebRTC sends frames if media falls back to
     prompts[2].resolve();
     await screenStart;
     assert.equal(screen.sendingFrames, true);
+    assert.equal(attachCalls, 1);
+    assert.equal(webRtc.videoTrack, null);
+});
+
+test("startScreenCapture handles attachVideoStream failures by stopping the share, detaching video, and showing a dialog", async () => {
+    const tracks = { camera: { kind: "video", readyState: "live" }, screen: { kind: "video", readyState: "live" } };
+    let stopCaptureCalls = 0;
+    const { context, element, webRtc, dialogText } = loadWithWebRtcManager({
+        console: { error() {} },
+        navigator: {},
+        requestAnimationFrame: () => 0,
+        LiveVideoManager: class extends FakeFrameSource {
+            stopWebcam() {
+                if (this.stream) tracks.camera.readyState = "ended";
+                this.stream = null;
+            }
+        },
+        LiveScreenManager: class extends FakeFrameSource {
+            stopCapture() {
+                stopCaptureCalls++;
+                if (this.stream) tracks.screen.readyState = "ended";
+                this.stream = null;
+            }
+            async startCapture() {
+                tracks.screen.readyState = "live";
+                this.stream = { getVideoTracks: () => [tracks.screen] };
+                return true;
+            }
+        },
+    });
+    context.AppState.geminiLiveApi.transportMode = "webrtc";
+    context.AppState.liveVideoManager.stream = { getVideoTracks: () => [tracks.camera] };
+    element("cameraBtn").hidden = false;
+    webRtc.videoTrack = tracks.camera;
+    webRtc.attachVideoStream = async () => {
+        throw Object.assign(new Error("sender rejected track"), { name: "InvalidModificationError" });
+    };
+
+    await context.startScreenCapture();
+
+    assert.equal(stopCaptureCalls, 1);
+    assert.equal(tracks.screen.readyState, "ended");
+    assert.equal(tracks.camera.readyState, "ended");
+    assert.equal(context.AppState.liveScreenManager.stream, null);
+    assert.equal(context.AppState.liveScreenManager.sendingFrames, false);
+    assert.equal(element("cameraBtn").hidden, true);
+    assert.deepEqual(webRtc.detached, [tracks.camera]);
+    assert.equal(webRtc.videoTrack, null);
+    assert.equal(dialogText(), "Could not share the screen: sender rejected track");
 });
 
 /**
