@@ -678,6 +678,73 @@ test("without voice activity frames, latency counts from the last input transcri
     assert.equal(latency(), "300 ms after last transcript");
 });
 
+test("speech over the model that it answers without an interruption gets its own latency", () => {
+    const { context, at, latency } = loadLatencySession();
+    context.AppState.liveAudioOutputManager.playAudioChunk = () => {};
+    at(0, "VOICE_ACTIVITY", "ACTIVITY_START");
+    at(1000, "VOICE_ACTIVITY", "ACTIVITY_END");
+    at(1200, "AUDIO", "");
+    assert.equal(latency(), "200 ms after end of speech");
+    // With interruption off, the user talks over the answer, which goes on.
+    at(2000, "VOICE_ACTIVITY", "ACTIVITY_START");
+    at(2500, "INPUT_TRANSCRIPTION", "wait");
+    at(3000, "VOICE_ACTIVITY", "ACTIVITY_END");
+    at(3100, "INPUT_TRANSCRIPTION", ", stop"); // A trailing transcript.
+    at(3200, "AUDIO", ""); // Still the first answer.
+    assert.equal(latency(), "200 ms after end of speech");
+    at(4000, "END_OF_TURN");
+    at(4700, "AUDIO", "");
+    assert.equal(latency(), "1,700 ms after end of speech");
+    // Its own trailing transcripts don't start a turn.
+    at(4800, "INPUT_TRANSCRIPTION", " please");
+    at(5000, "END_OF_TURN");
+    at(5500, "TEXT", "Anything else?");
+    assert.equal(latency(), "1,700 ms after end of speech");
+});
+
+test("speech over the model whose end arrives before the interruption gets its own latency", () => {
+    const { context, at, latency } = loadLatencySession();
+    context.AppState.liveAudioOutputManager.clear = () => {};
+    at(0, "TEXT", "Once upon a time");
+    at(500, "VOICE_ACTIVITY", "ACTIVITY_START");
+    at(1500, "VOICE_ACTIVITY", "ACTIVITY_END");
+    at(1550, "INTERRUPT");
+    at(1900, "TEXT", "Yes?");
+    assert.equal(latency(), "400 ms after end of speech");
+
+    // The usual order: the interruption while the user is still speaking.
+    at(3000, "VOICE_ACTIVITY", "ACTIVITY_START");
+    at(3100, "INTERRUPT");
+    at(4000, "VOICE_ACTIVITY", "ACTIVITY_END");
+    at(4250, "TEXT", "Sure.");
+    assert.equal(latency(), "250 ms after end of speech");
+});
+
+test("an answer ended without speech over it leaves no turn end for the next answer", () => {
+    const { at, latency } = loadLatencySession();
+    at(0, "VOICE_ACTIVITY", "ACTIVITY_START");
+    at(1000, "VOICE_ACTIVITY", "ACTIVITY_END");
+    at(1300, "TEXT", "Hi.");
+    at(1400, "END_OF_TURN");
+    at(5000, "TEXT", "Still there?"); // Unprompted; nothing to time it from.
+    assert.equal(latency(), "300 ms after end of speech");
+});
+
+test("Start speaking over the model counts from Done speaking for the next answer", async () => {
+    const { context, element, at, clock, latency } = loadLatencySession();
+    element("micBtn").hidden = false; // The mic is already on.
+    at(0, "TEXT", "Once upon a time");
+    clock.now = 500;
+    await context.turnBtnClick();
+    clock.now = 1500;
+    await context.turnBtnClick(); // Done speaking, before the server's echo.
+    at(1600, "VOICE_ACTIVITY", "ACTIVITY_END");
+    at(1700, "TEXT", " there was"); // With interruption off, the answer goes on.
+    at(2000, "END_OF_TURN");
+    at(2300, "TEXT", "Yes?");
+    assert.equal(latency(), "800 ms after Done speaking");
+});
+
 test("'hearing you' shows while the server hears speech, also over the model", () => {
     const { context, element, at } = loadLatencySession();
     const hearing = () => !element("hearing").hidden;

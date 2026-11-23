@@ -952,13 +952,13 @@ function handleReceiveResponse(messageResponse) {
         case "END_OF_TURN":
             closeTranscriptLine("output");
             setModelSpeaking(false);
-            resetLatencyTurn();
+            endModelResponse();
             break;
         case "INTERRUPT":
             if (AppState.liveAudioOutputManager) {
                 AppState.liveAudioOutputManager.clear();
             }
-            resetLatencyTurn();
+            endModelResponse();
             closeTranscriptLine("output");
             setModelSpeaking(false);
             newSystemMessage("Interrupted.");
@@ -1000,6 +1000,9 @@ const LatencyState = {
     turnEndedAt: null,
     source: "",
     responding: false,
+    // The user started speaking while the model was responding, so a turn end
+    // recorded during this response is for the model's next one.
+    speechOverModel: false,
 };
 
 // How exact each turn end is. A less exact one doesn't move a turn end already
@@ -1008,27 +1011,34 @@ const LatencyState = {
 const TURN_END_RANK = { speech: 0, "end of speech": 1, "end of turn": 2, text: 2 };
 
 /**
- * Records (or moves) the end of the user's turn. Input transcripts trail the
- * speech, so ones that arrive once the model is answering are ignored.
+ * Records (or moves) the end of the user's turn. Once the model is answering,
+ * turn ends (trailing transcripts, an echoed ACTIVITY_END) belong to the turn
+ * it is answering and are ignored, unless the user spoke again over it.
  */
 function markUserTurnEnd(source, { force = false } = {}) {
-    if (LatencyState.responding && !force) return;
+    if (LatencyState.responding && !LatencyState.speechOverModel && !force) return;
     if (!force && LatencyState.turnEndedAt !== null && TURN_END_RANK[source] < TURN_END_RANK[LatencyState.source]) {
         return;
     }
-    if (force) LatencyState.responding = false;
+    if (force) {
+        LatencyState.responding = false;
+        LatencyState.speechOverModel = false;
+    }
     LatencyState.turnEndedAt = performance.now();
     LatencyState.source = source;
 }
 
 /** The user (re)started speaking, so their turn hasn't ended yet. */
 function markUserSpeechStart() {
-    if (!LatencyState.responding) LatencyState.turnEndedAt = null;
+    LatencyState.turnEndedAt = null;
+    if (LatencyState.responding) LatencyState.speechOverModel = true;
 }
 
 /** The model's first response in a turn; `what` names it if not audio/text. */
 function markModelResponse(what = "") {
+    if (LatencyState.responding) return; // A later part of the same response.
     LatencyState.responding = true;
+    LatencyState.speechOverModel = false;
     if (LatencyState.turnEndedAt === null) return;
     const ms = Math.round(performance.now() - LatencyState.turnEndedAt);
     LatencyState.turnEndedAt = null;
@@ -1044,6 +1054,18 @@ function markModelResponse(what = "") {
 function resetLatencyTurn() {
     LatencyState.turnEndedAt = null;
     LatencyState.responding = false;
+    LatencyState.speechOverModel = false;
+}
+
+/**
+ * The model's response ended (turn complete or interrupted). Speech over it
+ * that already ended is the turn the next response answers, e.g. with
+ * interruption off, or when ACTIVITY_END arrives before INTERRUPT.
+ */
+function endModelResponse() {
+    if (!LatencyState.speechOverModel) LatencyState.turnEndedAt = null;
+    LatencyState.responding = false;
+    LatencyState.speechOverModel = false;
 }
 
 // --- Connection age ---
@@ -1491,6 +1513,7 @@ async function turnBtnClick() {
             return;
         }
         setUserTurnActive(true);
+        markUserSpeechStart(); // Also over the model; the server's echo may lag.
     } finally {
         if (attempt === AppState.turnAttempt) AppState.turnStarting = false;
     }
