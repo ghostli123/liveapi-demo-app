@@ -804,7 +804,14 @@ class LiveVideoOutputManager {
         // stream; jump to the live edge instead of playing stale video.
         video.addEventListener('play', () => {
             if (!this.sourceBuffer || this.playbackFailed || video.srcObject) return;
-            const buffered = this.sourceBuffer.buffered;
+            let buffered;
+            try {
+                buffered = this.sourceBuffer.buffered;
+            } catch {
+                // Chrome throws InvalidStateError if the SourceBuffer was
+                // removed from its MediaSource before processQueue() noticed.
+                return;
+            }
             if (buffered.length === 0) return;
             const liveEdge = buffered.end(buffered.length - 1);
             if (liveEdge - video.currentTime > VIDEO_MAX_LAG_S) {
@@ -1084,11 +1091,15 @@ class G3RtcWebRtcManager {
         this.remoteStream = null;
         this.micStream = null;
         this.micGeneration = 0;
-        // Called by close(), which drops the senders; see _replaceTrack().
+        // Called by close(), which closes pc and drops the senders; wakes
+        // pending _replaceTrack() and waitForIceGathering() calls.
         /** @type {Set<() => void>} */
         this.onSendersDropped = new Set();
         this.videoTrack = null;
         this.statsInterval = null;
+        /** @type {number | null} */
+        this.connectTimer = null;
+        this.hasConnected = false;
         // Called when the peer connection fails, e.g. UDP is blocked.
         this.onConnectionFailed = () => {};
         // Called when the browser refuses to start playback without a click.
@@ -1149,11 +1160,13 @@ class G3RtcWebRtcManager {
             if (this.pc !== pc) return; // A newer session replaced this one.
             G3RtcWebRtcManager.showState(state);
             if (state === "connected") {
+                this.hasConnected = true;
                 // The connect timeout only covers getting connected. A later
                 // drop shows as "disconnected", which can recover, and then
                 // "failed" if it doesn't.
-                clearTimeout(this.connectTimer);
+                this.clearConnectTimer();
             } else if (state === "failed") {
+                this.clearConnectTimer();
                 this.onConnectionFailed();
             }
         };
@@ -1227,18 +1240,20 @@ class G3RtcWebRtcManager {
         }
         const pc = this.pc;
         return /** @type {Promise<void>} */ (new Promise((resolve) => {
-            const timer = setTimeout(() => {
+            const finish = () => {
+                clearTimeout(timer);
                 pc.removeEventListener("icegatheringstatechange", checkState);
+                this.onSendersDropped.delete(finish);
                 resolve();
-            }, timeoutMs);
+            };
+            const timer = setTimeout(finish, timeoutMs);
             const checkState = () => {
-                if (!this.pc || pc.iceGatheringState === "complete") {
-                    clearTimeout(timer);
-                    pc.removeEventListener("icegatheringstatechange", checkState);
-                    resolve();
+                if (this.pc !== pc || pc.iceGatheringState === "complete") {
+                    finish();
                 }
             };
             pc.addEventListener("icegatheringstatechange", checkState);
+            this.onSendersDropped.add(finish);
         }));
     }
 
@@ -1273,14 +1288,22 @@ class G3RtcWebRtcManager {
 
         // If no candidate pair works, the connection can sit in "connecting"
         // without ever reaching "failed", so give up after a timeout. Cleared
-        // once connected (see onconnectionstatechange above).
-        clearTimeout(this.connectTimer);
-        this.connectTimer = setTimeout(() => {
-            if (this.pc === pc && pc.connectionState !== "connected") {
-                console.warn("[WebRTC] Not connected after", WEBRTC_CONNECT_TIMEOUT_MS, "ms");
-                this.onConnectionFailed();
-            }
-        }, WEBRTC_CONNECT_TIMEOUT_MS);
+        // once connected (see onconnectionstatechange above), and skipped if
+        // the connection already connected or ended during setRemoteDescription.
+        this.clearConnectTimer();
+        if (
+            !this.hasConnected &&
+            pc.connectionState !== "connected" &&
+            pc.connectionState !== "failed" &&
+            pc.connectionState !== "closed"
+        ) {
+            this.connectTimer = setTimeout(() => {
+                if (this.pc === pc && !this.hasConnected && pc.connectionState !== "connected") {
+                    console.warn("[WebRTC] Not connected after", WEBRTC_CONNECT_TIMEOUT_MS, "ms");
+                    this.onConnectionFailed();
+                }
+            }, WEBRTC_CONNECT_TIMEOUT_MS);
+        }
     }
 
     /** @param {string | null} [deviceId] - The microphone to use; null for the default. */
@@ -1440,6 +1463,13 @@ class G3RtcWebRtcManager {
         }
     }
 
+    clearConnectTimer() {
+        if (this.connectTimer !== null) {
+            clearTimeout(this.connectTimer);
+            this.connectTimer = null;
+        }
+    }
+
     /**
      * Closes the peer connection.
      * @param {{keepLocalMedia?: boolean, markClosed?: boolean}} [options] -
@@ -1450,7 +1480,8 @@ class G3RtcWebRtcManager {
      */
     close({ keepLocalMedia = false, markClosed = true } = {}) {
         this.stopStatsPolling();
-        clearTimeout(this.connectTimer);
+        this.clearConnectTimer();
+        this.hasConnected = false;
         if (!keepLocalMedia) {
             this.stopMicrophone();
             this.detachVideoStream();

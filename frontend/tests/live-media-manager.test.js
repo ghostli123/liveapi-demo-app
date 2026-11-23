@@ -641,7 +641,7 @@ test("a WebRTC renegotiation keeps the avatar muted if the user muted it", async
 });
 
 // A WebRTC manager with a negotiated session whose timers the test fires.
-async function webRtcSessionWithManualTimers() {
+async function webRtcSessionWithManualTimers({ onSetRemote } = {}) {
     const timeouts = new Map();
     let pc;
     class FakePeerConnection {
@@ -654,7 +654,9 @@ async function webRtcSessionWithManualTimers() {
         createDataChannel() { return { close() {} }; }
         addTransceiver() { return { sender: { replaceTrack: async () => {} }, receiver: { track: {} }, mid: null }; }
         async setLocalDescription() {}
-        async setRemoteDescription() {}
+        async setRemoteDescription() {
+            if (onSetRemote) onSetRemote(this);
+        }
         close() {}
     }
     const context = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
@@ -681,6 +683,7 @@ async function webRtcSessionWithManualTimers() {
         pc.connectionState = state;
         pc.onconnectionstatechange();
     };
+    const connectTimers = () => [...timeouts.values()].filter((t) => t.ms === 15000);
     const fireConnectTimeout = () => {
         for (const [id, { fn, ms }] of timeouts) {
             if (ms === 15000) {
@@ -689,7 +692,7 @@ async function webRtcSessionWithManualTimers() {
             }
         }
     };
-    return { failures, setState, fireConnectTimeout };
+    return { failures, setState, connectTimers, fireConnectTimeout };
 }
 
 test("a WebRTC session that never connects is reported after the connect timeout", async () => {
@@ -708,6 +711,48 @@ test("a WebRTC session that connected isn't failed by the connect timeout while 
     fireConnectTimeout();
     assert.deepEqual(failures, []);
     setState("failed"); // It didn't recover.
+    assert.deepEqual(failures, ["failed"]);
+});
+
+test("completeSession doesn't arm connectTimer if connected already fired during setRemoteDescription", async () => {
+    const { failures, setState, connectTimers, fireConnectTimeout } = await webRtcSessionWithManualTimers({
+        onSetRemote(pc) {
+            pc.connectionState = "connected";
+            pc.onconnectionstatechange();
+        },
+    });
+    assert.equal(connectTimers().length, 0);
+    setState("disconnected");
+    fireConnectTimeout();
+    assert.deepEqual(failures, []);
+    setState("failed");
+    assert.deepEqual(failures, ["failed"]);
+});
+
+test("completeSession doesn't arm connectTimer if connected then disconnected fired during setRemoteDescription", async () => {
+    const { failures, connectTimers, fireConnectTimeout } = await webRtcSessionWithManualTimers({
+        onSetRemote(pc) {
+            pc.connectionState = "connected";
+            pc.onconnectionstatechange();
+            pc.connectionState = "disconnected";
+            pc.onconnectionstatechange();
+        },
+    });
+    assert.equal(connectTimers().length, 0);
+    fireConnectTimeout();
+    assert.deepEqual(failures, []);
+});
+
+test("completeSession doesn't arm connectTimer if failed already fired during setRemoteDescription", async () => {
+    const { failures, connectTimers, fireConnectTimeout } = await webRtcSessionWithManualTimers({
+        onSetRemote(pc) {
+            pc.connectionState = "failed";
+            pc.onconnectionstatechange();
+        },
+    });
+    assert.deepEqual(failures, ["failed"]);
+    assert.equal(connectTimers().length, 0);
+    fireConnectTimeout();
     assert.deepEqual(failures, ["failed"]);
 });
 
@@ -863,7 +908,9 @@ function videoOutputWithFakeMediaSource({ codecSupported = true, addSourceBuffer
         src: null,
         paused: true,
         loads: 0,
-        addEventListener() {},
+        listeners: {},
+        addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); },
+        emit(type) { (this.listeners[type] || []).forEach((listener) => listener()); },
         play() {
             this.paused = false;
             return Promise.resolve();
@@ -1093,6 +1140,7 @@ test("a SourceBuffer removed from an open MediaSource is reported once without t
     video.currentTime = 4;
     manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
     fake.removed = true; // readyState stays "open"; buffered and appendBuffer throw.
+    assert.doesNotThrow(() => video.emit("play"));
     for (let i = 0; i < 100; i++) {
         assert.doesNotThrow(() => manager.playVideoChunk(VIDEO_CHUNK, "video/mp4"));
     }
@@ -1542,10 +1590,14 @@ function fakeGatheringPeerConnection() {
         listeners,
         addEventListener: (type, listener) => listeners.add(listener),
         removeEventListener: (type, listener) => listeners.delete(listener),
-        finishGathering() {
-            this.iceGatheringState = "complete";
+        fireStateChange() {
             [...listeners].forEach((listener) => listener());
         },
+        finishGathering() {
+            this.iceGatheringState = "complete";
+            this.fireStateChange();
+        },
+        close() {},
     };
 }
 
@@ -1574,17 +1626,50 @@ test("waitForIceGathering resolves when gathering completes and removes its list
     await waiting;
     assert.equal(pc.listeners.size, 0);
     assert.equal(timeout.fire, null);
+    assert.equal(manager.onSendersDropped.size, 0);
 });
 
-test("waitForIceGathering times out after close() and removes its listener", async () => {
+test("waitForIceGathering resolves immediately on close() and cleans up timer and listener", async () => {
+    const { manager, timeout } = webRtcManagerWithManualTimeout();
+    const pc = fakeGatheringPeerConnection();
+    manager.pc = pc;
+    let resolved = false;
+    const waiting = manager.waitForIceGathering().then(() => (resolved = true));
+    await settle();
+    assert.equal(resolved, false);
+    manager.close();
+    await waiting;
+    assert.equal(resolved, true);
+    assert.equal(pc.listeners.size, 0);
+    assert.equal(timeout.fire, null);
+    assert.equal(manager.onSendersDropped.size, 0);
+});
+
+test("waitForIceGathering settles if pc is replaced and fires icegatheringstatechange while still gathering", async () => {
+    const { manager, timeout } = webRtcManagerWithManualTimeout();
+    const pc1 = fakeGatheringPeerConnection();
+    const pc2 = fakeGatheringPeerConnection();
+    manager.pc = pc1;
+    let resolved = false;
+    const waiting = manager.waitForIceGathering().then(() => (resolved = true));
+    manager.pc = pc2; // Replaced without close().
+    pc1.fireStateChange();
+    await waiting;
+    assert.equal(resolved, true);
+    assert.equal(pc1.listeners.size, 0);
+    assert.equal(timeout.fire, null);
+    assert.equal(manager.onSendersDropped.size, 0);
+});
+
+test("waitForIceGathering times out if gathering never completes and removes its listener", async () => {
     const { manager, timeout } = webRtcManagerWithManualTimeout();
     const pc = fakeGatheringPeerConnection();
     manager.pc = pc;
     const waiting = manager.waitForIceGathering();
-    manager.pc = null; // What close() leaves; a closed pc fires no more events.
     timeout.fire();
     await waiting;
     assert.equal(pc.listeners.size, 0);
+    assert.equal(manager.onSendersDropped.size, 0);
 });
 
 test("the WebRTC state reads negotiating while a session is set up, not closed", async () => {
