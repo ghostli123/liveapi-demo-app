@@ -830,7 +830,15 @@ class GeminiLiveAPI {
                 this.isSetupComplete = true;
                 clearTimeout(this.setupTimer);
                 if (this.transportMode === "webrtc" && !message.answerSdp) {
-                    this.fallBackToWebSocketMedia();
+                    // Like onConnectionStarted below: a throw here would skip
+                    // it and leave the UI "connecting" with the timer cleared.
+                    try {
+                        this.fallBackToWebSocketMedia();
+                    } catch (error) {
+                        console.error("Error switching media to the WebSocket:", error);
+                        this.onErrorMessage(`Could not switch media to the WebSocket: ${error.message}`);
+                        return; // The session has ended; drop the rest.
+                    }
                 }
             } else if (message.type === "RESUMPTION") {
                 this.latestResumptionHandle = message.data;

@@ -338,6 +338,45 @@ test("a failing onConnectionStarted is reported, not left 'connecting'", () => {
     assert.deepEqual(plain(handled), ["SETUP COMPLETE"]); // Nothing after the session ended.
 });
 
+test("a failing onTransportFallback is reported, not left 'connecting'", () => {
+    // WebRTC was offered but setupComplete had no SDP answer, so media falls
+    // back to the WebSocket; the page's fallback handler throws.
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    let closed = 0;
+    api.transportMode = "webrtc";
+    api.webRtcManager = { close: () => closed++ };
+    const errors = [];
+    const handled = [];
+    let started = 0;
+    api.onErrorMessage = (message) => errors.push(message);
+    api.onReceiveResponse = (message) => handled.push(message.type);
+    api.onConnectionStarted = () => started++;
+    api.onTransportFallback = () => {
+        throw new Error("no media source");
+    };
+    api.onReceiveMessage({
+        data: JSON.stringify({ setupComplete: {}, sessionResumptionUpdate: { newHandle: "h" } }),
+    });
+    assert.deepEqual(plain(errors), ["Could not switch media to the WebSocket: no media source"]);
+    assert.equal(api.transportMode, "websocket");
+    assert.equal(closed, 1);
+    assert.deepEqual(plain(handled), []); // Nothing after the session ended.
+    assert.equal(started, 0);
+});
+
+test("onConnectionStarted runs after a WebSocket fallback", () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    api.transportMode = "webrtc";
+    api.webRtcManager = { close: () => {} };
+    const order = [];
+    api.onErrorMessage = (message) => order.push(`error: ${message}`);
+    api.onReceiveResponse = (message) => order.push(message.type);
+    api.onConnectionStarted = () => order.push("started");
+    api.onTransportFallback = () => order.push("fallback");
+    api.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) });
+    assert.deepEqual(plain(order), ["fallback", "SETUP COMPLETE", "started"]);
+});
+
 // A session whose WebSocket is still in its handshake. `api.posts` records
 // control requests as [command, session_id].
 function connectingApi() {
