@@ -1044,6 +1044,9 @@ class G3RtcWebRtcManager {
         this.remoteStream = null;
         this.micStream = null;
         this.micGeneration = 0;
+        // Called by close(), which drops the senders; see startMicrophone().
+        /** @type {Set<() => void>} */
+        this.onSendersDropped = new Set();
         this.videoTrack = null;
         this.statsInterval = null;
         // Called when the peer connection fails, e.g. UDP is blocked.
@@ -1274,7 +1277,18 @@ class G3RtcWebRtcManager {
         });
         const audioTrack = this.micStream.getAudioTracks()[0] || null;
         if (this.audioSender && audioTrack) {
-            await this.audioSender.replaceTrack(audioTrack);
+            // Firefox never settles a replaceTrack() that is pending when the
+            // connection closes (e.g. a resume renegotiating), which would leave
+            // the caller ("Start speaking") waiting for good. The next connection
+            // sends micStream anyway, so stop waiting then.
+            let markDropped = () => {};
+            const dropped = new Promise((resolve) => (markDropped = () => resolve(undefined)));
+            this.onSendersDropped.add(markDropped);
+            try {
+                await Promise.race([this.audioSender.replaceTrack(audioTrack), dropped]);
+            } finally {
+                this.onSendersDropped.delete(markDropped);
+            }
         }
     }
 
@@ -1410,6 +1424,7 @@ class G3RtcWebRtcManager {
         }
         this.audioSender = null;
         this.videoSender = null;
+        this.onSendersDropped.forEach((markDropped) => markDropped());
         this.remoteStream = null;
         const videoEl =
             this.videoPlayerElement || document.getElementById("video_player");

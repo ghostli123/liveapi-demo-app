@@ -79,6 +79,7 @@ test("startMicrophone sends the granted microphone", async () => {
     assert.equal(manager.micStream.getAudioTracks()[0], requests[0].track);
     assert.equal(sent.at(-1), requests[0].track);
     assert.equal(requests[0].track.readyState, "live");
+    assert.equal(manager.onSendersDropped.size, 0); // Nothing left for close() to call.
 });
 
 test("a microphone granted after stopMicrophone() is stopped, not sent", async () => {
@@ -131,6 +132,20 @@ test("a microphone refused after a newer start doesn't throw or touch the newer 
     const third = manager.startMicrophone();
     requests[2].deny();
     await assert.rejects(third, { name: "NotAllowedError" }); // Still reported when current.
+});
+
+test("startMicrophone returns when the connection closes during its replaceTrack()", async () => {
+    const { manager, requests } = webRtcManagerWithPendingMic();
+    // Firefox never settles a replaceTrack() that is pending when pc.close() runs.
+    manager.audioSender = { replaceTrack: () => new Promise(() => {}) };
+    const starting = manager.startMicrophone();
+    requests[0].grant();
+    await settle();
+    manager.close({ keepLocalMedia: true }); // A resume renegotiating.
+    const outcome = await Promise.race([starting.then(() => "returned"), settle().then(() => "pending")]);
+    assert.equal(outcome, "returned"); // Pending left "Start speaking" waiting for good.
+    assert.equal(manager.micStream.getAudioTracks()[0], requests[0].track); // The next connection sends it.
+    assert.equal(requests[0].track.readyState, "live");
 });
 
 test("a microphone that ends on its own is reported; a replaced one isn't", async () => {
