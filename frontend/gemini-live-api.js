@@ -265,7 +265,7 @@ class GeminiLiveAPI {
         this.setupTimer = null;
         // From the server's --idle_timeout_s; 0 means sessions never time out.
         this.idleTimeoutMs = 0;
-        this.lastActivityAt = 0; // Date.now() of the last noteActivity()
+        this.lastActivityAt = 0; // performance.now() of the last noteActivity()
         this.idleTimer = null;
         // Called when a session times out for lack of activity; the handler
         // ends the session, as for onErrorMessage.
@@ -574,7 +574,7 @@ class GeminiLiveAPI {
      * @returns {boolean} Whether another automatic resume is allowed now.
      */
     takeAutoResume() {
-        const now = Date.now();
+        const now = performance.now();
         this.autoResumeTimes = this.autoResumeTimes.filter((t) => now - t < 60000);
         if (this.autoResumeTimes.length >= AUTO_RESUME_LIMIT) {
             return false;
@@ -741,7 +741,7 @@ class GeminiLiveAPI {
      * postpones the idle timeout.
      */
     noteActivity() {
-        this.lastActivityAt = Date.now();
+        this.lastActivityAt = performance.now();
     }
 
     /**
@@ -764,7 +764,7 @@ class GeminiLiveAPI {
             this.idleTimer = null;
             // A resume's prepare() may have turned the timeout off.
             if (!this.idleTimeoutMs) return;
-            const left = this.lastActivityAt + this.idleTimeoutMs - Date.now();
+            const left = this.lastActivityAt + this.idleTimeoutMs - performance.now();
             if (left > 0) {
                 this.idleTimer = wait(left);
                 return;
@@ -773,7 +773,7 @@ class GeminiLiveAPI {
                 `Disconnected after ${describeDuration(this.idleTimeoutMs)} without activity.`
             );
         };
-        const left = keepActivity ? this.lastActivityAt + this.idleTimeoutMs - Date.now() : this.idleTimeoutMs;
+        const left = keepActivity ? this.lastActivityAt + this.idleTimeoutMs - performance.now() : this.idleTimeoutMs;
         this.idleTimer = wait(left);
     }
 

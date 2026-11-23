@@ -726,7 +726,7 @@ test("connection age stops when a GoAway resume drops the connection and restart
     const intervals = new Map();
     let nextId = 1;
     const { context, element, api } = loadSession({
-        Date: { now: () => clock.now },
+        performance: { now: () => clock.now },
         setInterval: (tick) => {
             intervals.set(nextId, tick);
             return nextId++;

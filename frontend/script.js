@@ -140,7 +140,7 @@ const AppState = {
     turnAttempt: 0, // Advanced by each "Start speaking" wait and by the end of a session
     /** @type {string | null} */
     preferredTransport: null, // The transport the user last picked
-    recordingStartTime: 0, // Date.now() when the voice recording started
+    recordingStartTime: 0, // performance.now() when the voice recording started
     // Advanced by each choice of that kind, so a slow read that a later choice
     // superseded is dropped rather than applied when it finishes.
     avatarAttempt: 0, // Avatar file, sample image or stock avatar
@@ -1054,9 +1054,9 @@ let connectionTimer = null;
 
 function startConnectionTimer() {
     stopConnectionTimer();
-    const startedAt = Date.now();
+    const startedAt = performance.now();
     const tick = () => {
-        const seconds = Math.floor((Date.now() - startedAt) / 1000);
+        const seconds = Math.floor((performance.now() - startedAt) / 1000);
         AppUI.setText(
             "connection-age",
             `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`
@@ -1977,7 +1977,7 @@ async function handleRecordClick() {
     if (AppState.isRecording) {
         // The take is saved under the name it started with, so Stop works
         // even if the name box has since been cleared.
-        const duration = (Date.now() - AppState.recordingStartTime) / 1000;
+        const duration = (performance.now() - AppState.recordingStartTime) / 1000;
         if (duration < 10) {
             AppUI.showModal(
                 "A recording of at least 10 seconds is required to ensure reference voice quality."
@@ -2066,7 +2066,7 @@ async function handleRecordClick() {
             };
 
             recorder.start();
-            AppState.recordingStartTime = Date.now();
+            AppState.recordingStartTime = performance.now();
             AppState.isRecording = true;
 
             AppUI.setButtonWithIcon("recordButton", "stop", "Stop Recording");

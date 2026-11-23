@@ -980,7 +980,7 @@ test("a full buffer while playing trims behind the playhead and leaves it alone"
 // A LiveAudioOutputManager on fake AudioContexts. `fake.failNextLoad` makes the
 // next addModule() reject (`fake.failAllLoads` every one); like Chrome and
 // Firefox, a context whose load failed keeps rejecting. `fake.now` is the
-// script's Date.now().
+// script's performance.now(), `fake.wallNow` its Date.now().
 function audioOutputWithFakeContexts() {
     const fake = {
         contexts: [],
@@ -990,6 +990,7 @@ function audioOutputWithFakeContexts() {
         refuseContexts: false,
         errors: [],
         now: 0,
+        wallNow: 0,
     };
     class FakeAudioContext {
         constructor() {
@@ -1029,7 +1030,8 @@ function audioOutputWithFakeContexts() {
     const context = loadScript("live-media-manager.js", ["LiveAudioOutputManager"], {
         window: { AudioContext: FakeAudioContext, atob },
         AudioWorkletNode: FakeWorkletNode,
-        Date: { now: () => fake.now },
+        performance: { now: () => fake.now },
+        Date: { now: () => fake.wallNow },
         console: { log() {}, warn() {}, error: (message) => fake.errors.push(message) },
     });
     return { manager: new context.LiveAudioOutputManager(), fake };
@@ -1177,6 +1179,19 @@ test("a player that can't start is reported once per Connect, when a chunk is dr
     await settle();
     manager.workletNode.onprocessorerror(new Event("processorerror"));
     assert.equal(reports.length, 2);
+});
+
+test("a wall clock stepped back doesn't extend the playback retry delay", async () => {
+    const { manager, fake } = audioOutputWithFakeContexts();
+    manager.resume(); // The Connect click.
+    await settle();
+    manager.workletNode.onprocessorerror(new Event("processorerror"));
+    fake.wallNow = -3600000; // E.g. NTP sets the system clock back an hour.
+    fake.now = 1000;
+    manager.playAudioChunk(AUDIO_CHUNK);
+    await settle();
+    assert.equal(fake.contexts.length, 2);
+    assert.equal(manager.workletNode.posted.length, 1);
 });
 
 test("audio chunks share one context and worklet", async () => {

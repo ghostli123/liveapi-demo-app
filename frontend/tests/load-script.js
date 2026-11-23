@@ -10,6 +10,7 @@ function loadScript(file, exportNames, globals = {}) {
     const context = vm.createContext({
         console: quietConsole,
         crypto: globalThis.crypto,
+        performance: globalThis.performance,
         URL,
         Blob,
         ...globals,

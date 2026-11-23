@@ -1012,7 +1012,7 @@ async function idleApi(idleS = 120) {
 function fireIdleTimer(api, idleAgoMs) {
     const timer = timers[api.idleTimer - 1];
     assert.equal(timer.cleared, false);
-    api.lastActivityAt = Date.now() - idleAgoMs;
+    api.lastActivityAt = performance.now() - idleAgoMs;
     timer.fn();
 }
 
@@ -1052,7 +1052,7 @@ test("conversation events and user input postpone the idle timeout", async () =>
     ]) {
         api.lastActivityAt = 0;
         act();
-        assert.ok(Date.now() - api.lastActivityAt < 1000, name);
+        assert.ok(performance.now() - api.lastActivityAt < 1000, name);
     }
     // With the last activity 30 s ago, the timer waits out the other 30 s.
     fireIdleTimer(api, 30000);
@@ -1062,7 +1062,8 @@ test("conversation events and user input postpone the idle timeout", async () =>
 
 test("audio, avatar video and usage reports don't postpone the idle timeout", async () => {
     const api = await idleApi(60);
-    api.lastActivityAt = 0;
+    const longAgo = performance.now() - 60000;
+    api.lastActivityAt = longAgo;
     for (const raw of [
         { serverContent: { modelTurn: { parts: [{ inlineData: { mimeType: "audio/pcm", data: "AA==" } }] } } },
         { serverContent: { modelTurn: { parts: [{ inlineData: { mimeType: "video/mp4", data: "AA==" } }] } } },
@@ -1071,7 +1072,7 @@ test("audio, avatar video and usage reports don't postpone the idle timeout", as
     ]) {
         api.onReceiveMessage({ data: JSON.stringify(raw) });
     }
-    assert.equal(api.lastActivityAt, 0);
+    assert.equal(api.lastActivityAt, longAgo);
     timers[api.idleTimer - 1].fn();
     assert.equal(api.idleMessages.length, 1);
 });
@@ -1087,6 +1088,42 @@ test("an idle timeout beyond setTimeout's limit waits in steps instead of spinni
     assert.equal(timers[api.idleTimer - 1].ms, limit);
     fireIdleTimer(api, 30 * 86400 * 1000);
     assert.deepEqual(plain(api.idleMessages), ["Disconnected after 43200 minutes without activity."]);
+});
+
+test("idle and resume-limit times follow the monotonic clock, not the wall clock", () => {
+    const clock = { now: 0, wallNow: 0 };
+    const recorded = [];
+    const { GeminiLiveAPI } = loadScript("gemini-live-api.js", ["GeminiLiveAPI"], {
+        WebSocket: FakeWebSocket,
+        setTimeout: (fn, ms) => recorded.push({ fn, ms }),
+        clearTimeout: () => {},
+        performance: { now: () => clock.now },
+        Date: { now: () => clock.wallNow },
+    });
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    const messages = [];
+    api.onIdleTimeout = (message) => messages.push(message);
+    api.idleTimeoutMs = 60000;
+    api.startIdleTimer();
+
+    // A wall clock set an hour ahead doesn't end the session...
+    clock.wallNow = 3600000;
+    clock.now = 1000;
+    recorded.at(-1).fn();
+    assert.deepEqual(messages, []);
+    assert.equal(recorded.at(-1).ms, 59000);
+    // ...and one set back doesn't postpone the end.
+    clock.wallNow = -3600000;
+    clock.now = 60000;
+    recorded.at(-1).fn();
+    assert.equal(messages.length, 1);
+
+    // Nor does a forward step make room for more automatic resumes.
+    for (let i = 0; i < 3; i++) assert.equal(api.takeAutoResume(), true);
+    clock.wallNow += 120000;
+    assert.equal(api.takeAutoResume(), false);
+    clock.now += 60000;
+    assert.equal(api.takeAutoResume(), true);
 });
 
 test("disconnect() stops the idle timer, and idle_timeout_s 0 disables it", async () => {
@@ -1114,7 +1151,7 @@ async function resumeWithIdle(api, idleS) {
 
 test("a resume keeps the conversation's last activity", async () => {
     const api = await idleApi(120);
-    const lastActivityAt = Date.now() - 30000;
+    const lastActivityAt = performance.now() - 30000;
     api.lastActivityAt = lastActivityAt;
     await resumeWithIdle(api, 120);
     assert.equal(api.lastActivityAt, lastActivityAt);
@@ -1138,7 +1175,7 @@ test("a resume that turns the idle timeout off stops the timer", async () => {
 test("a resume that turns the idle timeout on or changes it re-arms the timer", async () => {
     const api = await idleApi(0);
     assert.equal(api.idleTimer, null);
-    api.lastActivityAt = Date.now() - 10000;
+    api.lastActivityAt = performance.now() - 10000;
     await resumeWithIdle(api, 60);
     assert.ok(Math.abs(timers[api.idleTimer - 1].ms - 50000) < 1000);
 
@@ -1147,7 +1184,7 @@ test("a resume that turns the idle timeout on or changes it re-arms the timer", 
     assert.equal(old.cleared, true);
     assert.ok(Math.abs(timers[api.idleTimer - 1].ms - 10000) < 1000);
     // Already idle longer than the new timeout: it fires on the next tick.
-    api.lastActivityAt = Date.now() - 30000;
+    api.lastActivityAt = performance.now() - 30000;
     await resumeWithIdle(api, 20);
     assert.equal(timers[api.idleTimer - 1].ms, 0);
     timers[api.idleTimer - 1].fn();

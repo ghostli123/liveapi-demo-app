@@ -14,14 +14,14 @@ class LiveAudioOutputManager {
         /** @type {Promise<AudioWorkletNode> | null} */
         this.ready = null; // Resolves to workletNode; see initializeAudioContext().
         // After a failed start: the rejection returned until retryAt (a
-        // Date.now() time), and the current wait between retries.
+        // performance.now() time), and the current wait between retries.
         /** @type {Promise<AudioWorkletNode> | null} */
         this.failed = null;
         this.retryAt = 0;
         this.retryDelayMs = 0;
         // The wait after the worklet crashes, doubling per crash until the
         // next Connect or a crash long after the last start; see
-        // processorFailed(). startedAt is the Date.now() time the current
+        // processorFailed(). startedAt is the performance.now() time the current
         // worklet node was created.
         this.crashDelayMs = 0;
         this.startedAt = 0;
@@ -106,7 +106,7 @@ class LiveAudioOutputManager {
      */
     initializeAudioContext() {
         if (this.ready) return this.ready;
-        if (this.failed && Date.now() < this.retryAt) return this.failed;
+        if (this.failed && performance.now() < this.retryAt) return this.failed;
         let audioContext;
         try {
             audioContext = new (window.AudioContext ||
@@ -130,7 +130,7 @@ class LiveAudioOutputManager {
                 workletNode.onprocessorerror = (event) => this.processorFailed(workletNode, event);
                 workletNode.connect(audioContext.destination);
                 this.workletNode = workletNode;
-                this.startedAt = Date.now();
+                this.startedAt = performance.now();
                 this.failed = null;
                 this.retryDelayMs = 0;
                 return workletNode;
@@ -169,12 +169,12 @@ class LiveAudioOutputManager {
         this.ready = null;
         this.workletNode = null;
         audioContext?.close().catch(() => {});
-        if (Date.now() - this.startedAt >= PLAYER_CRASH_RESET_MS) this.crashDelayMs = 0;
+        if (performance.now() - this.startedAt >= PLAYER_CRASH_RESET_MS) this.crashDelayMs = 0;
         this.crashDelayMs = Math.min(30000, this.crashDelayMs * 2 || 1000);
         const failed = Promise.reject(new Error("The audio player stopped"));
         failed.catch(() => {});
         this.failed = failed;
-        this.retryAt = Date.now() + this.crashDelayMs;
+        this.retryAt = performance.now() + this.crashDelayMs;
         this.reportFailure("The audio player stopped, so some of the model's speech wasn't played.");
     }
 
@@ -192,7 +192,7 @@ class LiveAudioOutputManager {
     /** @param {Promise<AudioWorkletNode>} failed */
     backOff(failed) {
         this.retryDelayMs = Math.min(30000, this.retryDelayMs * 2 || 1000);
-        this.retryAt = Date.now() + this.retryDelayMs;
+        this.retryAt = performance.now() + this.retryDelayMs;
         this.failed = failed;
     }
 
