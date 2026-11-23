@@ -146,6 +146,7 @@ const AppState = {
     avatarAttempt: 0, // Avatar file, sample image or stock avatar
     voiceAttempt: 0, // Voice file, recorded take or voice picked from the dropdown
     fcAttempt: 0, // Function declarations file or Remove
+    deviceListAttempt: 0, // Device-list refresh (page load, device change, mic or camera grant)
 };
 
 // --- Manager Callbacks ---
@@ -1686,10 +1687,14 @@ function setMaterialSelect(allOptions, selectElement) {
 }
 
 async function refreshDeviceLists() {
+    // Plugging in a headset fires several device changes; a slow enumeration
+    // from an earlier one must not replace the list a later one read.
+    const attempt = ++AppState.deviceListAttempt;
     const [cameras, mics] = await Promise.all([
         getAvailableDevices("videoinput", "Camera"),
         getAvailableDevices("audioinput", "Microphone"),
     ]);
+    if (attempt !== AppState.deviceListAttempt) return;
     setMaterialSelect(cameras, AppUI.getElement("cameraSource"));
     setMaterialSelect(mics, AppUI.getElement("audioSource"));
 }

@@ -147,6 +147,7 @@ function loadApp(globals = {}, { radios = [] } = {}) {
         "AppUI",
         "toggleSchedulingDisable",
         "endSession",
+        "refreshDeviceLists",
     ];
     const context = loadScript("script.js", exportNames, {
         window: { location: { protocol: "http:", host: "localhost:1234" }, addEventListener() {} },
@@ -1658,6 +1659,61 @@ test("camera and screen frames are sent at the clamped video interval", async ()
         ["camera", 400],
         ["screen", 400],
     ]);
+});
+
+test("an earlier device-list refresh that finishes last doesn't replace a newer list", async () => {
+    const enumerations = [];
+    const { context, element, document } = loadApp({
+        navigator: {
+            mediaDevices: {
+                enumerateDevices: () => {
+                    const pending = Promise.withResolvers();
+                    enumerations.push(pending.resolve);
+                    return pending.promise;
+                },
+            },
+        },
+        requestAnimationFrame: () => 0,
+    });
+    // An md-select-option holds its label in a headline <div>.
+    document.createElement = (tag) => {
+        const node = fakeElement("");
+        node.appendChild = (headline) => {
+            node.textContent = headline.textContent;
+        };
+        return tag === "div" ? {} : node;
+    };
+    const options = (id) => {
+        const select = element(id);
+        select.children ??= [];
+        select.replaceChildren = () => {
+            select.children = [];
+        };
+        select.appendChild = (option) => select.children.push(option.textContent);
+        return () => select.children;
+    };
+    const mics = options("audioSource");
+    const cameras = options("cameraSource");
+    const device = (kind, deviceId, label) => ({ kind, deviceId, label });
+    const before = [device("audioinput", "mic", "Built-in mic")];
+    const after = [...before, device("audioinput", "headset", "Headset"), device("videoinput", "cam", "Webcam")];
+
+    // A device change starts a refresh; the headset's second change starts
+    // another, and its enumeration (two calls: cameras and mics) answers first.
+    const first = context.refreshDeviceLists();
+    const second = context.refreshDeviceLists();
+    assert.equal(enumerations.length, 4);
+    enumerations[2](after);
+    enumerations[3](after);
+    await second;
+    assert.deepEqual(plainJson(mics()), ["Built-in mic", "Headset"]);
+    assert.deepEqual(plainJson(cameras()), ["Webcam"]);
+
+    enumerations[0](before);
+    enumerations[1](before);
+    await first;
+    assert.deepEqual(plainJson(mics()), ["Built-in mic", "Headset"]);
+    assert.deepEqual(plainJson(cameras()), ["Webcam"]);
 });
 
 test("a typed interval is replaced by the one the app will use", () => {
