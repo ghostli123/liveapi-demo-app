@@ -745,6 +745,42 @@ test("Start speaking over the model counts from Done speaking for the next answe
     assert.equal(latency(), "800 ms after Done speaking");
 });
 
+/** Types and sends `text` at `ms` on a loadLatencySession() session. */
+function typeAt({ context, element, clock }, ms, text) {
+    clock.now = ms;
+    element("text-message").value = text;
+    context.newUserMessage();
+}
+
+test("text typed over the model's answer is timed when the model answers it after the interruption", () => {
+    const session = loadLatencySession();
+    const { context, at, latency } = session;
+    context.AppState.liveAudioOutputManager.playAudioChunk = () => {};
+    context.AppState.liveAudioOutputManager.clear = () => {};
+    at(0, "VOICE_ACTIVITY", "ACTIVITY_START");
+    at(500, "VOICE_ACTIVITY", "ACTIVITY_END");
+    at(800, "AUDIO", "");
+    assert.equal(latency(), "300 ms after end of speech");
+    typeAt(session, 1000, "wait, what about X?");
+    at(1050, "AUDIO", ""); // Still the old answer.
+    assert.equal(latency(), "300 ms after end of speech");
+    at(1100, "INTERRUPT");
+    at(1600, "AUDIO", "");
+    assert.equal(latency(), "600 ms after text");
+});
+
+test("text typed over the model's answer is timed when the model answers it after the old answer ends", () => {
+    const session = loadLatencySession();
+    const { context, at, latency } = session;
+    context.AppState.liveAudioOutputManager.playAudioChunk = () => {};
+    at(0, "TEXT", "Once upon a time");
+    typeAt(session, 1000, "and X?");
+    at(1500, "TEXT", " there was"); // With interruption off, the answer goes on.
+    at(2000, "END_OF_TURN");
+    at(2600, "AUDIO", ""); // The answer to the text.
+    assert.equal(latency(), "1,600 ms after text");
+});
+
 test("'hearing you' shows while the server hears speech, also over the model", () => {
     const { context, element, at } = loadLatencySession();
     const hearing = () => !element("hearing").hidden;

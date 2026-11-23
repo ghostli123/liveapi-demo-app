@@ -1000,7 +1000,7 @@ const LatencyState = {
     turnEndedAt: null,
     source: "",
     responding: false,
-    // The user started speaking while the model was responding, so a turn end
+    // The user spoke or typed while the model was responding, so a turn end
     // recorded during this response is for the model's next one.
     speechOverModel: false,
 };
@@ -1014,15 +1014,14 @@ const TURN_END_RANK = { speech: 0, "end of speech": 1, "end of turn": 2, text: 2
  * Records (or moves) the end of the user's turn. Once the model is answering,
  * turn ends (trailing transcripts, an echoed ACTIVITY_END) belong to the turn
  * it is answering and are ignored, unless the user spoke again over it.
+ * With `force` (a typed message) the turn end is always recorded; over the
+ * model's answer it counts for the model's next response, like speech over it.
  */
 function markUserTurnEnd(source, { force = false } = {}) {
-    if (LatencyState.responding && !LatencyState.speechOverModel && !force) return;
+    if (force && LatencyState.responding) LatencyState.speechOverModel = true;
+    if (LatencyState.responding && !LatencyState.speechOverModel) return;
     if (!force && LatencyState.turnEndedAt !== null && TURN_END_RANK[source] < TURN_END_RANK[LatencyState.source]) {
         return;
-    }
-    if (force) {
-        LatencyState.responding = false;
-        LatencyState.speechOverModel = false;
     }
     LatencyState.turnEndedAt = performance.now();
     LatencyState.source = source;
