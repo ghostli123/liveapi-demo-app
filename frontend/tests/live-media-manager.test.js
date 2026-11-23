@@ -184,7 +184,10 @@ function audioInputWithPendingMic({ addModule = async () => {} } = {}) {
         }
     }
     class FakeWorkletNode {
-        constructor() {
+        constructor(context, name, options) {
+            this.context = context;
+            this.name = name;
+            this.options = options;
             this.port = {};
         }
         disconnect() {}
@@ -209,6 +212,17 @@ function switchMicrophone(manager, deviceId) {
     manager.deviceId = deviceId;
     return manager.updateAudioInterval("1000"); // Disconnects, then connects.
 }
+
+test("WebSocket microphone worklet forces an explicit mono downmix", async () => {
+    const { manager, requests } = audioInputWithPendingMic();
+    const connecting = manager.connectMicrophone();
+    requests[0].grant();
+    await connecting;
+    assert.equal(manager.processor.name, "input-processor");
+    assert.equal(manager.processor.options?.channelCount, 1);
+    assert.equal(manager.processor.options?.channelCountMode, "explicit");
+    manager.disconnectMicrophone();
+});
 
 test("a WebSocket microphone that ends on its own is reported; one turned off isn't", async () => {
     const { manager, requests, intervals } = audioInputWithPendingMic();

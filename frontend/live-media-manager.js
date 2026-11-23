@@ -337,8 +337,13 @@ class LiveAudioInputManager {
         });
         const source = this.audioContext.createMediaStreamSource(this.stream);
 
-        // Create an AudioWorkletNode.
-        const processor = new AudioWorkletNode(this.audioContext, "input-processor");
+        // Force mono downmix at the node input: input-processor.js reads only
+        // channel 0, so a stereo mic whose left channel is silent would send
+        // silence under the default channelCountMode ("max").
+        const processor = new AudioWorkletNode(this.audioContext, "input-processor", {
+            channelCount: 1,
+            channelCountMode: "explicit",
+        });
         this.processor = processor;
         // A worklet that throws is stopped by the browser and sends nothing
         // more, with the mic still on.
