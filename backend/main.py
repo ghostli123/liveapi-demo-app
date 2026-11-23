@@ -272,12 +272,24 @@ def _json_error(message: str, status: int) -> web.Response:
     return web.json_response({"error": message}, status=status)
 
 
+def _bad_json_response(request: web.Request) -> web.Response:
+    response = _json_error("Request body must be a JSON object", 400)
+    # A failed Content-Encoding decompression leaves the payload errored and not
+    # at EOF; closing the connection and marking EOF keeps aiohttp's post-handler
+    # drain from re-reading the broken stream and logging an ERROR traceback.
+    if request.content.exception() is not None:
+        request.content.feed_eof()
+        response.force_close()
+    return response
+
+
 async def _read_json_object(request: web.Request) -> dict[str, Any] | None:
     # ValueError covers invalid JSON, invalid UTF-8 and integers over Python's
-    # digit limit; RecursionError deep nesting; LookupError an unknown charset.
+    # digit limit; RecursionError deep nesting; LookupError an unknown charset;
+    # RequestPayloadError corrupt Content-Encoding (e.g. gzip) bodies.
     try:
         body = await request.json()
-    except (ValueError, RecursionError, LookupError):
+    except (ValueError, RecursionError, LookupError, web.RequestPayloadError):
         return None
     return body if isinstance(body, dict) else None
 
@@ -399,7 +411,7 @@ async def handle_fr_post_request(request: web.Request):
     """
     request_body = await _read_json_object(request)
     if request_body is None:
-        return _json_error("Request body must be a JSON object", 400)
+        return _bad_json_response(request)
 
     session_id = request_body.pop("session_id", None)
     if not _is_valid_session_id(session_id):
@@ -473,7 +485,7 @@ async def handle_control_request(request: web.Request):
     """Creates the server-side record for a session before its WebSocket opens."""
     request_body = await _read_json_object(request)
     if request_body is None:
-        return _json_error("Request body must be a JSON object", 400)
+        return _bad_json_response(request)
     session_id = request_body.get("session_id")
     if not _is_valid_session_id(session_id):
         return _json_error("Missing or invalid session_id", 400)

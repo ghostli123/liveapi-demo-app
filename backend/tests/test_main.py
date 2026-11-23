@@ -2,6 +2,7 @@ import asyncio
 import base64
 import concurrent.futures
 import datetime
+import gzip
 import hashlib
 import html.parser
 import json
@@ -440,6 +441,52 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                     path, data=data, headers={"Content-Type": content_type}
                 )
                 self.assertEqual(resp.status, 400, f"{path} {name}")
+
+    async def test_corrupt_compressed_bodies_rejected_without_error_log(self):
+        # A body whose Content-Encoding fails mid-stream raises
+        # RequestPayloadError from request.json() and leaves the stream
+        # errored; both the handler and aiohttp's post-handler drain used to
+        # log ERROR tracebacks and answer 500.
+        cases = {
+            "corrupt gzip": ("gzip", b"abcd"),
+            "corrupt zlib-header deflate": ("deflate", b"\x78\x9c\xff\xff"),
+        }
+        for path in ("/api/control", "/api/post_endpoint"):
+            for name, (encoding, data) in cases.items():
+                with self.assertNoLogs("aiohttp.server", level="ERROR"):
+                    resp = await self.client.post(
+                        path,
+                        data=data,
+                        headers={
+                            "Content-Type": "application/json",
+                            "Content-Encoding": encoding,
+                        },
+                    )
+                    self.assertEqual(resp.status, 400, f"{path} {name}")
+                    body = await resp.json()
+                    self.assertEqual(
+                        body, {"error": "Request body must be a JSON object"}
+                    )
+                    # Let aiohttp finish the post-handler drain on the server
+                    # before assertNoLogs exits.
+                    await asyncio.sleep(0)
+        # Valid gzip still works after corrupt compressed requests.
+        payload = gzip.compress(
+            json.dumps(
+                {
+                    "command": "connect",
+                    "session_id": "s-gzip",
+                    "endpoint": "autopush-common",
+                    "location": "us-central1",
+                }
+            ).encode()
+        )
+        resp = await self.client.post(
+            "/api/control",
+            data=payload,
+            headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
+        )
+        self.assertEqual(resp.status, 200)
 
     async def test_unparsable_host_and_origin_rejected(self):
         body = {
