@@ -425,12 +425,6 @@ class LiveAudioInputManager {
         clearInterval(this.interval);
         this.interval = null;
     }
-
-    async updateMicrophoneDevice(deviceId) {
-        this.deviceId = deviceId;
-        this.disconnectMicrophone();
-        await this.connectMicrophone();
-    }
 }
 
 /** Reports a microphone stream's loudness (0-1) about 60 times a second. */

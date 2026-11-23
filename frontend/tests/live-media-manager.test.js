@@ -47,12 +47,12 @@ function fakeTrack() {
 // like a permission prompt the user hasn't answered yet.
 function pendingMediaDevices() {
     const requests = [];
-    const getUserMedia = () =>
+    const getUserMedia = (constraints) =>
         new Promise((resolve, reject) => {
             const track = fakeTrack();
             const stream = { getTracks: () => [track], getAudioTracks: () => [track], getVideoTracks: () => [track] };
             const deny = (name = "NotAllowedError") => reject(Object.assign(new Error(name), { name }));
-            requests.push({ track, stream, grant: () => resolve(stream), deny });
+            requests.push({ constraints, track, stream, grant: () => resolve(stream), deny });
         });
     return { requests, mediaDevices: { getUserMedia } };
 }
@@ -204,6 +204,12 @@ function audioInputWithPendingMic({ addModule = async () => {} } = {}) {
     return { manager: new context.LiveAudioInputManager(), requests: devices.requests, intervals };
 }
 
+/** Switches a LiveAudioInputManager to another device the way script.js's startAudioInput does. */
+function switchMicrophone(manager, deviceId) {
+    manager.deviceId = deviceId;
+    return manager.updateAudioInterval("1000"); // Disconnects, then connects.
+}
+
 test("a WebSocket microphone that ends on its own is reported; one turned off isn't", async () => {
     const { manager, requests, intervals } = audioInputWithPendingMic();
     let ended = 0;
@@ -274,7 +280,7 @@ test("a superseded worklet load that ends late doesn't touch the newer WebSocket
         const first = manager.connectMicrophone();
         requests[0].grant();
         await new Promise((resolve) => setImmediate(resolve));
-        const second = manager.updateMicrophoneDevice("b"); // Disconnects, then connects.
+        const second = switchMicrophone(manager, "b");
         assert.equal(requests[0].track.readyState, "ended");
         requests[1].grant();
         await new Promise((resolve) => setImmediate(resolve));
@@ -310,7 +316,8 @@ test("a WebSocket microphone whose worklet fails to load is released and the err
 test("a WebSocket microphone refused after it was superseded doesn't throw or touch the newer one", async () => {
     const { manager, requests, intervals } = audioInputWithPendingMic();
     const first = manager.connectMicrophone();
-    const second = manager.updateMicrophoneDevice("b"); // Disconnects, then connects.
+    const second = switchMicrophone(manager, "b");
+    assert.deepEqual(JSON.parse(JSON.stringify(requests[1].constraints.audio.deviceId)), { exact: "b" });
     requests[1].grant();
     await second;
     requests[0].deny("NotFoundError");
@@ -361,7 +368,7 @@ test("audio the old capture worklet queued doesn't reach the next microphone", a
 
     // A device switch: messages the old worklet posted before it was disconnected.
     const oldPort = manager.processor.port;
-    connecting = manager.updateMicrophoneDevice("b");
+    connecting = switchMicrophone(manager, "b");
     deliverQueued(oldPort);
     requests[1].grant();
     await connecting;
@@ -390,7 +397,7 @@ test("a WebSocket microphone whose capture worklet throws is reported once; an o
 
     // A processor from before a device switch or Mic off doesn't touch the current one.
     const oldProcessor = manager.processor;
-    connecting = manager.updateMicrophoneDevice("b");
+    connecting = switchMicrophone(manager, "b");
     requests[1].grant();
     await connecting;
     oldProcessor.onprocessorerror(new Event("processorerror"));
