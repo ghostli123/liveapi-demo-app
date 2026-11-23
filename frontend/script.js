@@ -1119,6 +1119,7 @@ async function handleSessionResumptionReconnect() {
     const api = AppState.geminiLiveApi;
     if (!api) return;
 
+    abortPendingFunctionCalls("replaced");
     setAppStatus("connecting");
     // The age is the old connection's, which is being dropped; the new one's
     // starts at its SETUP COMPLETE.
@@ -1144,10 +1145,26 @@ async function handleSessionResumptionReconnect() {
 // The simulator is a Gemini call; with BLOCKING tools the model waits for it.
 const FUNCTION_RESPONSE_TIMEOUT_MS = 30000;
 
-// Function calls waiting for or running their simulation, by call ID, so a
-// toolCallCancellation can stop them.
+// Function calls waiting for or running their simulation: keyed by call ID so
+// toolCallCancellation can stop specific calls, plus every active controller
+// (including calls without an ID) so endSession() and resume stop all of them.
 /** @type {Map<string, AbortController>} */
 const pendingFunctionCalls = new Map();
+/** @type {Set<AbortController>} */
+const activeFunctionCalls = new Set();
+// Incremented by endSession() so an in-flight batch knows the session ended
+// rather than being replaced by a resume, even if the user reconnects quickly
+// or a call had already timed out before Disconnect.
+let endSessionCount = 0;
+
+/** Aborts every in-flight function-simulator request for the current session. */
+function abortPendingFunctionCalls(reason) {
+    for (const controller of activeFunctionCalls) {
+        controller.abort(reason);
+    }
+    activeFunctionCalls.clear();
+    pendingFunctionCalls.clear();
+}
 
 /** Handles a toolCallCancellation: the calls with these IDs get no response. */
 function cancelFunctionCalls(ids) {
@@ -1159,10 +1176,11 @@ function cancelFunctionCalls(ids) {
 
 /**
  * Asks the backend's simulator for a function's response. Returns null if the
- * server cancelled the call meanwhile.
- * @param {AbortController} controller - Aborted with "cancelled" or "timeout".
+ * server cancelled the call or the session ended/reconnected meanwhile.
+ * @param {AbortController} controller - Aborted with "cancelled",
+ *     "disconnected", "replaced", or "timeout".
  */
-async function simulateFunctionResponse(funcCall, sessionId, controller) {
+async function simulateFunctionResponse(funcCall, sessionId, webSocket, controller) {
     const timer = setTimeout(() => controller.abort("timeout"), FUNCTION_RESPONSE_TIMEOUT_MS);
     try {
         return {
@@ -1178,14 +1196,15 @@ async function simulateFunctionResponse(funcCall, sessionId, controller) {
             ),
         };
     } catch (error) {
-        if (controller.signal.reason === "cancelled") return null;
+        const reason = controller.signal.reason;
+        if (reason === "cancelled" || reason === "disconnected" || reason === "replaced") return null;
         const message =
-            controller.signal.reason === "timeout"
+            reason === "timeout"
                 ? `the simulator didn't answer within ${FUNCTION_RESPONSE_TIMEOUT_MS / 1000} s`
                 : error.message;
         console.error(`Simulating ${funcCall.name} failed:`, error);
-        // After a reconnect the old session is gone; that isn't the function's fault.
-        if (AppState.geminiLiveApi.sessionId === sessionId) {
+        // After a disconnect or reconnect the old session is gone; that isn't the function's fault.
+        if (AppState.geminiLiveApi.webSocket === webSocket && AppState.geminiLiveApi.sessionId === sessionId) {
             newErrorMessage(`Function ${funcCall.name} failed: ${message}`);
         }
         // Answer anyway: with BLOCKING tools the model waits for a response.
@@ -1200,9 +1219,11 @@ async function handleFunctionCallRequest(functionCalls) {
     const api = AppState.geminiLiveApi;
     const webSocket = api.webSocket;
     const sessionId = api.sessionId;
+    const endCount = endSessionCount;
     const controllers = functionCalls.map((funcCall) => {
         newSystemMessage(`Function call: ${funcCall.name}(${JSON.stringify(funcCall.args || {})})`);
         const controller = new AbortController();
+        activeFunctionCalls.add(controller);
         if (funcCall.id) pendingFunctionCalls.set(funcCall.id, controller);
         return controller;
     });
@@ -1214,16 +1235,20 @@ async function handleFunctionCallRequest(functionCalls) {
             : null;
     // Sequential, since the simulator is one chat session per connection.
     const responses = [];
-    for (const [i, funcCall] of functionCalls.entries()) {
-        if (api.webSocket !== webSocket) break;
-        if (controllers[i].signal.aborted) continue; // Cancelled before it started.
-        const response = await simulateFunctionResponse(funcCall, sessionId, controllers[i]);
-        if (!response) continue;
-        if (schedulingVal) response.scheduling = schedulingVal;
-        responses.push({ controller: controllers[i], item: { id: funcCall.id, name: funcCall.name, response } });
-    }
-    for (const [i, funcCall] of functionCalls.entries()) {
-        if (pendingFunctionCalls.get(funcCall.id) === controllers[i]) pendingFunctionCalls.delete(funcCall.id);
+    try {
+        for (const [i, funcCall] of functionCalls.entries()) {
+            if (api.webSocket !== webSocket) break;
+            if (controllers[i].signal.aborted) continue; // Cancelled before it started.
+            const response = await simulateFunctionResponse(funcCall, sessionId, webSocket, controllers[i]);
+            if (!response) continue;
+            if (schedulingVal) response.scheduling = schedulingVal;
+            responses.push({ controller: controllers[i], item: { id: funcCall.id, name: funcCall.name, response } });
+        }
+    } finally {
+        for (const [i, funcCall] of functionCalls.entries()) {
+            activeFunctionCalls.delete(controllers[i]);
+            if (pendingFunctionCalls.get(funcCall.id) === controllers[i]) pendingFunctionCalls.delete(funcCall.id);
+        }
     }
     // Calls cancelled while a later one ran aren't answered either.
     const functionResponses = responses
@@ -1232,12 +1257,16 @@ async function handleFunctionCallRequest(functionCalls) {
     if (AppState.geminiLiveApi.webSocket !== webSocket) {
         // The connection that made these calls has closed or been replaced;
         // the new one doesn't know their IDs.
-        console.warn("Dropping responses to calls from a previous connection.");
-        if (AppUI.isHidden("disconnected")) {
-            newSystemMessage(
-                "The connection was replaced while function calls were running, so their " +
-                "results weren't sent. Ask again if the model is waiting for them."
-            );
+        const disconnected = endSessionCount !== endCount;
+        const allCancelled = controllers.every((c) => c.signal.reason === "cancelled");
+        if (!disconnected && !allCancelled) {
+            console.warn("Dropping responses to calls from a previous connection.");
+            if (AppUI.isHidden("disconnected")) {
+                newSystemMessage(
+                    "The connection was replaced while function calls were running, so their " +
+                    "results weren't sent. Ask again if the model is waiting for them."
+                );
+            }
         }
         return;
     }
@@ -1846,7 +1875,9 @@ function setMediaButtonsEnabled(enabled) {
 
 /** Tears down media and UI state when a session ends, for whatever reason. */
 function endSession() {
+    endSessionCount++;
     AppState.geminiLiveApi.disconnect();
+    abortPendingFunctionCalls("disconnected");
     stopAudioInput();
     AppState.liveVideoManager.stopWebcam();
     AppState.liveScreenManager.stopCapture();

@@ -138,6 +138,7 @@ function loadApp(globals = {}, { radios = [] } = {}) {
         "turnBtnClick",
         "micOffBtnClick",
         "handleFunctionCallRequest",
+        "handleSessionResumptionReconnect",
         "initDOMEventListeners",
         "startCameraCapture",
         "startScreenCapture",
@@ -1675,29 +1676,60 @@ test("a camera or screen started over WebRTC sends frames if media falls back to
  * A connected session whose function-response simulator answers when the test
  * says; `timers` holds the callbacks script.js scheduled.
  */
-function loadFunctionCalls() {
+function loadFunctionCalls({ abortRejects = true } = {}) {
     const timers = [];
+    const errors = [];
     const app = loadApp({
         AbortController,
+        clearInterval() {},
         setTimeout: (callback, ms) => timers.push({ callback, ms }) - 1,
         clearTimeout: (id) => {
             if (timers[id]) timers[id].cleared = true;
         },
+        console: {
+            log() {},
+            warn() {},
+            error: (...args) => errors.push(args.join(" ")),
+        },
     });
-    const api = app.context.AppState.geminiLiveApi;
+    const { AppState } = app.context;
+    const api = AppState.geminiLiveApi;
     api.webSocket = {};
     api.sessionId = "s-1";
     api.frUrl = "/api/post_endpoint";
+    // Match real GeminiLiveAPI: disconnect() clears webSocket but keeps sessionId.
+    api.disconnect = () => {
+        api.webSocket = null;
+        api.isSetupComplete = false;
+    };
+    api.resume = async () => {
+        api.webSocket = null;
+        api.sessionId = "s-2";
+        api.isSetupComplete = false;
+    };
+    AppState.micLevelMeter.stop = () => {};
+    AppState.liveAudioInputManager.disconnectMicrophone = () => {};
+    AppState.liveVideoManager.stopWebcam = () => {};
+    AppState.liveScreenManager.stopCapture = () => {};
+    AppState.liveAudioOutputManager.clear = () => {};
+    Object.assign(AppState.liveVideoOutputManager, {
+        getRecordings: () => [],
+        clearRecordedChunks() {},
+        resetPlayer() {},
+        initMediaSource() {},
+    });
     const posts = [];
     api.sendPostRequest = (url, data, { signal }) =>
         new Promise((resolve, reject) => {
-            posts.push({ name: data.functionName, signal, resolve });
-            signal.addEventListener("abort", () => reject(new Error("aborted")));
+            posts.push({ name: data.functionName, signal, resolve, reject });
+            if (abortRejects) {
+                signal.addEventListener("abort", () => reject(new Error("aborted")));
+            }
         });
     api.sendMessage = (message) => api.sent.push(message);
     const chat = [];
     app.element("text-chat").appendChild = (line) => chat.push(line.textContent);
-    return { ...app, api, posts, timers, chat };
+    return { ...app, api, posts, timers, chat, errors };
 }
 
 /** Lets the awaits between one simulator answer and the next request run. */
@@ -1780,6 +1812,120 @@ test("an answered call clears its timeout", async () => {
     assert.deepEqual(plainJson(api.sent[0].toolResponse.functionResponses[0].response), {
         result: { response: "ok" },
     });
+});
+
+test("endSession() aborts in-flight function-simulator calls, clears timers, and posts no failure", async () => {
+    const { context, api, posts, timers, chat, errors } = loadFunctionCalls();
+    const done = context.handleFunctionCallRequest([
+        { id: "c1", name: "slow", args: {} },
+        { id: "c2", name: "next", args: {} },
+    ]);
+    assert.equal(posts.length, 1);
+
+    context.endSession();
+    await done;
+
+    assert.equal(posts.length, 1, "subsequent call in batch must not start after endSession");
+    assert.equal(posts[0].signal.aborted, true);
+    assert.equal(posts[0].signal.reason, "disconnected");
+    assert.equal(timers[0].cleared, true);
+    assert.deepEqual(api.sent, []);
+    assert.deepEqual(
+        chat.filter((line) => /failed:|connection was replaced/i.test(line)),
+        []
+    );
+    assert.deepEqual(errors, []);
+});
+
+test("a late 404 after endSession() posts no function-failed error, even for calls without an ID", async () => {
+    const { context, api, posts, chat, errors } = loadFunctionCalls({ abortRejects: false });
+    const doneWithId = context.handleFunctionCallRequest([{ id: "c1", name: "withId", args: {} }]);
+    const doneNoId = context.handleFunctionCallRequest([{ name: "noId", args: {} }]);
+    assert.equal(posts.length, 2);
+
+    context.endSession();
+    assert.equal(posts[0].signal.aborted, true);
+    assert.equal(posts[1].signal.aborted, true);
+
+    posts[0].reject(new Error("HTTP 404: Unknown session"));
+    posts[1].reject(new Error("HTTP 404: Unknown session"));
+    await Promise.all([doneWithId, doneNoId]);
+
+    assert.deepEqual(api.sent, []);
+    assert.deepEqual(
+        chat.filter((line) => /failed:|connection was replaced/i.test(line)),
+        []
+    );
+    assert.deepEqual(errors, []);
+});
+
+test("reconnecting right after endSession() does not post a connection-replaced notice for old calls", async () => {
+    const { context, element, api, posts, chat, errors } = loadFunctionCalls();
+    const done = context.handleFunctionCallRequest([{ id: "c1", name: "slow", args: {} }]);
+
+    context.endSession();
+    // Simulate an immediate Connect before handleFunctionCallRequest resumes.
+    element("disconnected").hidden = true;
+    api.webSocket = {};
+    api.sessionId = "s-2";
+    await done;
+
+    assert.equal(posts[0].signal.aborted, true);
+    assert.deepEqual(api.sent, []);
+    assert.deepEqual(
+        chat.filter((line) => /failed:|connection was replaced/i.test(line)),
+        []
+    );
+    assert.deepEqual(errors, []);
+});
+
+test("a GoAway resume aborts in-flight simulator calls immediately and posts the connection-replaced notice", async () => {
+    const { context, api, posts, timers, chat, errors } = loadFunctionCalls();
+    const done = context.handleFunctionCallRequest([
+        { id: "c1", name: "slow", args: {} },
+        { id: "c2", name: "next", args: {} },
+    ]);
+    assert.equal(posts.length, 1);
+
+    await context.handleSessionResumptionReconnect();
+    await done;
+
+    assert.equal(posts.length, 1, "subsequent call in batch must not start after resume");
+    assert.equal(posts[0].signal.aborted, true);
+    assert.equal(posts[0].signal.reason, "replaced");
+    assert.equal(timers[0].cleared, true);
+    assert.deepEqual(api.sent, []);
+    assert.deepEqual(
+        chat.filter((line) => /failed:/i.test(line)),
+        []
+    );
+    assert.ok(
+        chat.some((line) => /The connection was replaced while function calls were running/.test(line)),
+        `expected connection-replaced notice, got: ${JSON.stringify(chat)}`
+    );
+    assert.deepEqual(errors, []);
+});
+
+test("endSession() after a simulator timeout still suppresses the stale chat error and replaced notice", async () => {
+    const { context, element, api, posts, timers, chat } = loadFunctionCalls({ abortRejects: false });
+    const done = context.handleFunctionCallRequest([{ id: "c1", name: "hung", args: {} }]);
+
+    // Timer fires first (locking signal.reason to "timeout"), then Disconnect + Connect happen
+    // before the request rejection settles.
+    timers[0].callback();
+    assert.equal(posts[0].signal.reason, "timeout");
+    context.endSession();
+    element("disconnected").hidden = true;
+    api.webSocket = {};
+    api.sessionId = "s-2";
+    posts[0].reject(new Error("aborted"));
+    await done;
+
+    assert.deepEqual(api.sent, []);
+    assert.deepEqual(
+        chat.filter((line) => /failed:|connection was replaced/i.test(line)),
+        []
+    );
 });
 
 /** Objects from the VM context have another realm's prototypes. */
