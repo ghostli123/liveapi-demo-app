@@ -13,6 +13,7 @@ function loadScript(file, exportNames, globals = {}) {
         performance: globalThis.performance,
         URL,
         Blob,
+        AbortController,
         ...globals,
     });
     const source = fs.readFileSync(path.join(__dirname, "..", file), "utf8");

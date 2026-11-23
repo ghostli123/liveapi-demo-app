@@ -669,7 +669,7 @@ test("a connect that times out once succeeds on the retry", async () => {
     assert.ok(timers.every((t) => t.cleared || t.fired));
 });
 
-test("disconnect() during a connect retry's backoff stops the retries", async () => {
+test("disconnect() during a connect retry's backoff stops the retries and clears the timer", async () => {
     for (const [first, expected] of [
         // A timed-out attempt may still create the record, so it's released.
         ["hang", ["connect", "disconnect"]],
@@ -686,8 +686,10 @@ test("disconnect() during a connect retry's backoff stops the retries", async ()
         const connecting = api.connect();
         if (first === "hang") await fireNextTimer(timers); // The first attempt's timeout.
         await new Promise((resolve) => setImmediate(resolve)); // Into the backoff.
+        assert.ok(timers.some((t) => !t.cleared && !t.fired), first);
         api.disconnect();
-        await fireNextTimer(timers); // The backoff.
+        // The backoff timer is cleared immediately instead of waiting 1-3 s.
+        assert.ok(timers.every((t) => t.cleared || t.fired), first);
         await connecting;
         assert.equal(opened, 0);
         assert.deepEqual(errors, []);
@@ -695,6 +697,97 @@ test("disconnect() during a connect retry's backoff stops the retries", async ()
         await new Promise((resolve) => setImmediate(resolve)); // The release's reply.
         assert.ok(timers.every((t) => t.cleared || t.fired), first);
     }
+});
+
+test("disconnect() during a hung prepare() POST aborts it and releases the session immediately", async () => {
+    for (const [hung, expected] of [
+        ["connect", ["connect", "disconnect"]],
+        ["fc_definition", ["connect", "fc_definition", "disconnect"]],
+    ]) {
+        const { api, posts, timers } = apiWithFetch((body) =>
+            (body.command ?? body.objective) === hung ? "hang" : { type: "application/json", text: '{"project_id":"p"}' }
+        );
+        api.functionCallDefinition = [{ name: "f" }];
+        const errors = [];
+        api.onErrorMessage = (message) => errors.push(message);
+        let opened = 0;
+        api.setupWebSocketToService = () => opened++;
+        const connecting = api.connect();
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(posts.length, expected.length - 1, hung);
+        api.disconnect();
+        // Resolves without waiting for the 15 s request timeout.
+        await connecting;
+        assert.equal(opened, 0, hung);
+        assert.deepEqual(errors, [], hung);
+        assert.deepEqual(plain(posts.map((b) => b.command ?? b.objective)), expected, hung);
+        assert.equal(posts.at(-1).session_id, posts[0].session_id, hung);
+        await new Promise((resolve) => setImmediate(resolve)); // The release's reply.
+        assert.ok(timers.every((t) => t.cleared), hung);
+    }
+});
+
+test("disconnect() during a resume's hung prepare() aborts it, releases the new session, and resolves cleanly", async () => {
+    let connects = 0;
+    const { api, posts, timers } = apiWithFetch((body) => {
+        if (body.command === "connect") {
+            return ++connects === 1 ? { type: "application/json", text: '{"project_id":"p1"}' } : "hang";
+        }
+        return { type: "application/json", text: "{}" };
+    });
+    const errors = [];
+    api.onErrorMessage = (message) => errors.push(message);
+    api.setupWebSocketToService = () => {
+        api.webSocket = new FakeWebSocket();
+        api.webSocket.close = () => api.webSocket.onclose?.();
+    };
+    await api.connect();
+    const firstId = api.sessionId;
+    const oldWs = api.webSocket;
+    oldWs.close = () => oldWs.onclose?.();
+
+    const resuming = api.resume("h1");
+    await new Promise((resolve) => setImmediate(resolve));
+    const resumedId = api.sessionId;
+    assert.notEqual(resumedId, firstId);
+    api.disconnect();
+    await resuming;
+    assert.deepEqual(errors, []);
+    assert.deepEqual(plain(posts.map((b) => b.command)), ["connect", "connect", "disconnect"]);
+    assert.equal(posts[2].session_id, resumedId);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(timers.every((t) => t.cleared));
+});
+
+test("a new connect() aborts an earlier hung prepare() without cancelling itself", async () => {
+    let connects = 0;
+    const { api, posts, timers } = apiWithFetch((body) => {
+        if (body.command === "connect") {
+            return ++connects === 1 ? "hang" : { type: "application/json", text: '{"project_id":"p2"}' };
+        }
+        return { type: "application/json", text: "{}" };
+    });
+    const errors = [];
+    api.onErrorMessage = (message) => errors.push(message);
+    let opened = 0;
+    api.setupWebSocketToService = () => opened++;
+
+    const first = api.connect();
+    const firstId = api.sessionId;
+    await new Promise((resolve) => setImmediate(resolve));
+    const second = api.connect();
+    const secondId = api.sessionId;
+    await Promise.all([first, second]);
+
+    assert.deepEqual(errors, []);
+    assert.equal(opened, 1);
+    assert.equal(api.projectId, "p2");
+    assert.notEqual(firstId, secondId);
+    const disconnect = posts.find((b) => b.command === "disconnect");
+    assert.ok(disconnect);
+    assert.equal(disconnect.session_id, firstId);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(timers.every((t) => t.cleared));
 });
 
 test("a connect that timed out once and then failed otherwise is still released", async () => {
@@ -749,6 +842,42 @@ test("sendPostRequest() with a timeout still honors the caller's signal", async 
     const plainRequest = api.sendPostRequest("/api/post_endpoint", {}, { signal: AbortSignal.abort("timeout") });
     await assert.rejects(plainRequest, (reason) => reason === "timeout");
     assert.equal(timers.length, 1);
+});
+
+test("sendPostRequest() propagates abort during response.json() instead of reporting non-JSON", async () => {
+    const timers = [];
+    const fetch = async (url, init) => ({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        headers: { get: () => "application/json" },
+        json: () =>
+            new Promise((_, reject) => {
+                const abort = () => reject(init.signal.reason);
+                if (init.signal?.aborted) abort();
+                init.signal?.addEventListener("abort", abort);
+            }),
+    });
+    const context = loadScript("gemini-live-api.js", ["GeminiLiveAPI"], {
+        WebSocket: FakeWebSocket,
+        fetch,
+        document: { getElementById: () => null },
+        setTimeout: (fn, ms) => timers.push({ fn, ms, cleared: false, fired: false }),
+        clearTimeout: (id) => {
+            if (timers[id - 1]) timers[id - 1].cleared = true;
+        },
+    });
+    const api = new context.GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+
+    const controller = new AbortController();
+    const aborted = api.sendPostRequest("/api/control", {}, { signal: controller.signal, timeoutMs: 15000 });
+    await new Promise((resolve) => setImmediate(resolve));
+    controller.abort("cancelled");
+    await assert.rejects(aborted, (reason) => reason === "cancelled");
+
+    const timedOut = api.sendPostRequest("/api/control", {}, { timeoutMs: 15000 });
+    await fireNextTimer(timers);
+    await assert.rejects(timedOut, { timeout: true, message: "the server didn't answer within 15 s" });
 });
 
 test("a 200 control reply that isn't JSON fails the connect instead of opening a WebSocket", async () => {

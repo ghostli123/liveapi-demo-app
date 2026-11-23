@@ -276,6 +276,7 @@ class GeminiLiveAPI {
         this.isSetupComplete = false; // Whether the server confirmed the setup message
         this.latestResumptionHandle = ""; // Last handle the server sent this session
         this.connectAttempt = 0; // Bumped to cancel a connect in progress
+        this.prepareController = /** @type {AbortController | null} */ (null);
         this.autoResumeTimes = []; // When automatic resumes happened
         this.setupTimer = null;
         // From the server's --idle_timeout_s; 0 means sessions never time out.
@@ -506,11 +507,19 @@ class GeminiLiveAPI {
         // An attempt that disconnect() abandoned must neither report errors
         // (which would end the next attempt's session) nor touch its state.
         const isCurrent = () => attempt === this.connectAttempt;
+        const controller = new AbortController();
+        if (isCurrent()) {
+            this.prepareController?.abort();
+            this.prepareController = controller;
+        } else {
+            controller.abort();
+        }
+        const { signal } = controller;
         const sessionId = this.sessionId;
         let created = false;
         try {
             console.log("prepare(): Initializing backend service...");
-            const control = await this.initBackendService(sessionId, isCurrent);
+            const control = await this.initBackendService(sessionId, isCurrent, signal);
             created = true;
             if (!isCurrent()) {
                 this.abandonSession(sessionId);
@@ -522,15 +531,20 @@ class GeminiLiveAPI {
             this.idleTimeoutMs = Math.max(0, Number(control?.idle_timeout_s) || 0) * 1000;
 
             console.log("prepare(): Setting up function declarations...");
-            await this.setupFuncDeclarationToService(sessionId);
+            await this.setupFuncDeclarationToService(sessionId, signal);
         } catch (error) {
             if (created) {
                 this.abandonSession(sessionId);
             }
-            if (isCurrent()) {
-                this.onErrorMessage(error.message);
+            if (!isCurrent()) {
+                return false;
             }
+            this.onErrorMessage(error.message);
             throw error;
+        } finally {
+            if (this.prepareController === controller) {
+                this.prepareController = null;
+            }
         }
         if (!isCurrent()) {
             this.abandonSession(sessionId);
@@ -554,6 +568,12 @@ class GeminiLiveAPI {
             .catch((error) => console.warn(`Could not release session ${sessionId}:`, error));
     }
 
+    /** Aborts any in-flight prepare() POST or retry backoff. */
+    cancelPrepare() {
+        this.prepareController?.abort();
+        this.prepareController = null;
+    }
+
     /**
      * Initiates the overall connection process: prepares the session and establishes the WebSocket.
      */
@@ -562,6 +582,7 @@ class GeminiLiveAPI {
         // the backend can't remove this one.
         this.sessionId = randomId();
         this.latestResumptionHandle = "";
+        this.cancelPrepare();
         const attempt = ++this.connectAttempt;
         this.autoResumeTimes = [];
         try {
@@ -649,6 +670,7 @@ class GeminiLiveAPI {
         // A new session ID keeps the backend from mixing up the two connections.
         const sessionId = randomId();
         this.sessionId = sessionId;
+        this.cancelPrepare();
         const attempt = ++this.connectAttempt;
         // Close the old connection while the backend prepares the new session.
         const [, ready] = await Promise.all([closed, this.prepare(attempt)]);
@@ -668,9 +690,10 @@ class GeminiLiveAPI {
      * Creates the backend's record for a session.
      * @param {string} [sessionId]
      * @param {() => boolean} [isCurrent] - Stops retrying once false.
+     * @param {AbortSignal} [signal] - Aborts an in-flight request or backoff.
      * @returns {Promise<Object>} The server's reply: project_id, idle_timeout_s.
      */
-    async initBackendService(sessionId = this.sessionId, isCurrent = () => true) {
+    async initBackendService(sessionId = this.sessionId, isCurrent = () => true, signal = undefined) {
         if (this.model === "gemini-3.5-live-early-exp") {
             this.location = "us-central1";
             if (
@@ -696,10 +719,12 @@ class GeminiLiveAPI {
             location: this.location,
         };
         try {
-            return await this.postWithRetry(this.controlUrl, postRequestBody, { isCurrent });
+            return await this.postWithRetry(this.controlUrl, postRequestBody, { isCurrent, signal });
         } catch (error) {
-            console.error("Error in initBackendService:", error);
-            if (error.timeouts > 0) {
+            if (!error.cancelled) {
+                console.error("Error in initBackendService:", error);
+            }
+            if (error.timeouts > 0 || error.abortedInFlight) {
                 // The server may still create the record for an attempt we
                 // gave up on, even if a later one failed another way.
                 this.abandonSession(sessionId);
@@ -710,9 +735,11 @@ class GeminiLiveAPI {
 
     /**
      * Posts tool / function declarations to the function registry service.
+     * @param {string} [sessionId]
+     * @param {AbortSignal} [signal] - Aborts the in-flight request.
      * @returns {Promise<void>}
      */
-    async setupFuncDeclarationToService(sessionId = this.sessionId) {
+    async setupFuncDeclarationToService(sessionId = this.sessionId, signal = undefined) {
         if (!this.functionCallDefinition) {
             return;
         }
@@ -722,9 +749,14 @@ class GeminiLiveAPI {
             functionDefinition: this.functionCallDefinition,
         };
         try {
-            await this.sendPostRequest(this.frUrl, funcDeclarationMessage, { timeoutMs: CONTROL_TIMEOUT_MS });
+            await this.sendPostRequest(this.frUrl, funcDeclarationMessage, {
+                signal,
+                timeoutMs: CONTROL_TIMEOUT_MS,
+            });
         } catch (error) {
-            console.error("Error in setupFuncDeclarationToService:", error);
+            if (!signal?.aborted) {
+                console.error("Error in setupFuncDeclarationToService:", error);
+            }
             throw new Error(`Could not set up function declarations: ${error.message}`, { cause: error });
         }
     }
@@ -735,6 +767,7 @@ class GeminiLiveAPI {
      */
     disconnect() {
         this.connectAttempt++; // Abandons a connect() or resume() in progress.
+        this.cancelPrepare();
         this.stopUpdateBandwidthUsage();
         clearTimeout(this.idleTimer);
         this.idleTimer = null;
@@ -1488,7 +1521,8 @@ class GeminiLiveAPI {
         let receivedData = null;
         try {
             receivedData = await response.json();
-        } catch {
+        } catch (error) {
+            if (signal?.aborted) throw error;
             // Not JSON; fall through to the status check.
         }
         if (!response.ok) {
@@ -1518,23 +1552,25 @@ class GeminiLiveAPI {
      * request must be safe to repeat.
      * @param {string} url
      * @param {Object} data
-     * @param {{attempts?: number, isCurrent?: () => boolean}} [options] -
-     *     `isCurrent` returning false (e.g. after disconnect()) stops the
-     *     retries; the error then has `cancelled` set.
+     * @param {{attempts?: number, isCurrent?: () => boolean, signal?: AbortSignal}} [options] -
+     *     `isCurrent` returning false or `signal` aborting (e.g. after
+     *     disconnect()) stops the request and retries; the error then has
+     *     `cancelled` set, and `abortedInFlight` if an active request was
+     *     aborted.
      * @returns {Promise<Object>} Rejects with the last error, whose `timeouts`
      *     counts the attempts that timed out (the server may still act on
      *     those).
      */
-    async postWithRetry(url, data, { attempts = 4, isCurrent = () => true } = {}) {
+    async postWithRetry(url, data, { attempts = 4, isCurrent = () => true, signal } = {}) {
         let timeouts = 0;
         for (let attempt = 1; ; attempt++) {
             try {
-                if (!isCurrent()) {
+                if (!isCurrent() || signal?.aborted) {
                     throw Object.assign(new Error("cancelled"), { cancelled: true });
                 }
-                return await this.sendPostRequest(url, data, { timeoutMs: CONTROL_TIMEOUT_MS });
+                return await this.sendPostRequest(url, data, { signal, timeoutMs: CONTROL_TIMEOUT_MS });
             } catch (error) {
-                if (error.cancelled) {
+                if (error?.cancelled) {
                     throw Object.assign(error, { timeouts });
                 }
                 // fetch() rejects with a TypeError when the server is
@@ -1542,16 +1578,45 @@ class GeminiLiveAPI {
                 // timeout is retried once, since a new connection can get past
                 // a dead one, but a server that is up and stuck would only
                 // make the user wait longer.
-                if (error.timeout) timeouts++;
+                if (error?.timeout) timeouts++;
+                if (signal?.aborted) {
+                    // An in-flight POST was aborted before we saw a network or
+                    // HTTP failure: the server may still have created a record.
+                    const abortedInFlight = !error?.timeout && !error?.status && !(error instanceof TypeError);
+                    throw Object.assign(new Error("cancelled"), {
+                        cancelled: true,
+                        abortedInFlight,
+                        timeouts,
+                    });
+                }
                 const transient =
                     error instanceof TypeError ||
-                    [502, 503, 504].includes(error.status) ||
-                    (error.timeout && timeouts < 2);
+                    [502, 503, 504].includes(error?.status) ||
+                    (error?.timeout && timeouts < 2);
                 if (!transient || attempt >= attempts) {
                     throw Object.assign(error, { timeouts });
                 }
+                if (!isCurrent()) {
+                    throw Object.assign(new Error("cancelled"), { cancelled: true, timeouts });
+                }
                 console.warn(`POST ${url} failed (${error.message}); retrying...`);
-                await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+                await /** @type {Promise<void>} */ (
+                    new Promise((resolve) => {
+                        if (signal?.aborted) {
+                            resolve();
+                            return;
+                        }
+                        const onAbort = () => {
+                            clearTimeout(timer);
+                            resolve();
+                        };
+                        const timer = setTimeout(() => {
+                            signal?.removeEventListener("abort", onAbort);
+                            resolve();
+                        }, 1000 * attempt);
+                        signal?.addEventListener("abort", onAbort, { once: true });
+                    })
+                );
             }
         }
     }
