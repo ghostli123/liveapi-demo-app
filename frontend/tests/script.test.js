@@ -51,6 +51,11 @@ class FakeFrameSource {
     constructor(previewVideoElement, previewCanvasElement) {
         this.previewVideoElement = previewVideoElement;
         this.previewCanvasElement = previewCanvasElement;
+        this.sendingFrames = false;
+    }
+
+    startSendingFrames() {
+        if (this.stream) this.sendingFrames = true; // Like the real one: a no-op until started.
     }
 }
 
@@ -1506,6 +1511,73 @@ test("a camera that fails to start stops the WebRTC video the screen share or ol
     assert.equal(tracks.camera.readyState, "ended");
     assert.deepEqual(webRtc.detached, [tracks.screen, tracks.camera]);
     assert.equal(webRtc.videoTrack, null);
+});
+
+test("a camera or screen started over WebRTC sends frames if media falls back to the WebSocket during its prompt", async () => {
+    const prompts = [];
+    const prompt = () => {
+        const pending = Promise.withResolvers();
+        prompts.push(pending);
+        return pending.promise;
+    };
+    const { context, element, webRtc } = loadWithWebRtcManager({
+        navigator: {},
+        requestAnimationFrame: () => 0,
+        LiveVideoManager: class extends FakeFrameSource {
+            stopWebcam() {
+                this.stream = null;
+            }
+            async startWebcam({ sendFrames }) {
+                await prompt();
+                this.stream = { getVideoTracks: () => [{ kind: "video" }] };
+                if (sendFrames) this.startSendingFrames();
+            }
+        },
+        LiveScreenManager: class extends FakeFrameSource {
+            stopCapture() {
+                this.stream = null;
+            }
+            async startCapture({ sendFrames }) {
+                await prompt();
+                this.stream = { getVideoTracks: () => [{ kind: "video" }] };
+                if (sendFrames) this.startSendingFrames();
+                return true;
+            }
+        },
+    });
+    const api = context.AppState.geminiLiveApi;
+    const camera = context.AppState.liveVideoManager;
+    const screen = context.AppState.liveScreenManager;
+    context.AppState.liveVideoOutputManager = { initMediaSource() {} };
+    element("micBtn").hidden = true; // Mic off: the fallback leaves it alone.
+    webRtc.attachVideoStream = async () => {};
+    const fallBack = () => {
+        api.transportMode = "websocket";
+        api.onTransportFallback();
+    };
+
+    // Still WebRTC when the camera opens: the track goes over the peer connection.
+    api.transportMode = "webrtc";
+    const onWebRtc = context.startCameraCapture();
+    prompts[0].resolve();
+    await onWebRtc;
+    assert.equal(camera.sendingFrames, false);
+
+    // Falls back while the camera prompt is open.
+    camera.stream = null;
+    const camStart = context.startCameraCapture();
+    fallBack();
+    prompts[1].resolve();
+    await camStart;
+    assert.equal(camera.sendingFrames, true);
+
+    // Same for the screen picker.
+    api.transportMode = "webrtc";
+    const screenStart = context.startScreenCapture();
+    fallBack();
+    prompts[2].resolve();
+    await screenStart;
+    assert.equal(screen.sendingFrames, true);
 });
 
 /**

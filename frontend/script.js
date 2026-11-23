@@ -1558,6 +1558,7 @@ async function startCameraCapture() {
         if (webRtcManager) {
             await webRtcManager.attachVideoStream(camera.stream);
         }
+        sendFramesIfWebSocket(camera);
         refreshDeviceLists();
     } catch (err) {
         console.error("Failed to start camera:", err);
@@ -1594,6 +1595,14 @@ async function startScreenCapture() {
     if (webRtcManager) {
         await webRtcManager.attachVideoStream(screen.stream);
     }
+    sendFramesIfWebSocket(screen);
+}
+
+// A start that began over WebRTC can finish after media fell back to the
+// WebSocket (e.g. a resume during the prompt). The fallback's
+// startSendingFrames() ran before this source had a stream, so start it here.
+function sendFramesIfWebSocket(source) {
+    if (!webRtcManagerIfActive()) source.startSendingFrames();
 }
 
 // A camera or screen track ended; stop the WebRTC sender if it was sending it,
