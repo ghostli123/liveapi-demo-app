@@ -81,18 +81,21 @@ class SessionManager:
 
     async def add_unless_connected(
         self, session_id: str, data: SessionBaseModel, max_sessions: int = 0
-    ) -> bool:
-        """Stores data for session_id unless its record has a WebSocket.
+    ) -> Optional[SessionBaseModel]:
+        """Stores data for session_id unless a record already exists.
 
-        A record still waiting for its WebSocket (e.g. from a retried control
-        request) is replaced and ended.
+        An existing pending record (e.g. from a retried control request) is
+        kept so state already attached to it (such as fc_definitions) isn't
+        lost, and data is not stored.
 
         Args:
             max_sessions: Most records to hold, pending or connected; 0 for no
-                limit. Replacing session_id's own record doesn't count.
+                limit. Reusing session_id's own pending record doesn't count.
 
         Returns:
-            False, storing nothing, if the current record has a WebSocket.
+            The pending record in the manager (data if newly stored, or the
+            existing pending record if one was already waiting), or None if the
+            current record already has a WebSocket.
 
         Raises:
             SessionLimitError: Storing a new record would exceed max_sessions.
@@ -101,14 +104,14 @@ class SessionManager:
         """
         async with self._lock:
             current = self._sessions.get(session_id)
-            if current and current.websocket_handler:
-                return False
+            if current:
+                if current.websocket_handler:
+                    return None
+                return current
             self._check_can_add_locked(session_id, max_sessions)
             self._sessions[session_id] = data
         logging.info("Session %s added", session_id)
-        if current:
-            await current.del_session()
-        return True
+        return data
 
     async def check_can_add(self, session_id: str, max_sessions: int) -> None:
         """Raises SessionAddError if session_id couldn't be added right now.

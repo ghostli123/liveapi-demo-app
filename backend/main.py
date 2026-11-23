@@ -508,9 +508,15 @@ async def handle_control_request(request: web.Request):
         return _json_error(str(e), 400)
     logging.info("Websocket host for session %s is set to: %s", session_id, ws_host)
 
-    session_handler = await SESSION_MANAGER.search_item(session_id)
-    if session_handler and session_handler.websocket_handler:
-        return _json_error("Already running", 409)
+    existing = await SESSION_MANAGER.search_item(session_id)
+    if existing:
+        if existing.websocket_handler:
+            return _json_error("Already running", 409)
+        # Keep the pending record (preserving any fc_definitions already
+        # posted to it) and refresh its expiry window without re-running
+        # simulator init.
+        _arm_pending_expiry(session_id, existing)
+        return _session_initialized_response()
     # Before the simulator init: a rejected connect shouldn't build a chat.
     try:
         await SESSION_MANAGER.check_can_add(session_id, MAX_SESSIONS.value)
@@ -532,25 +538,23 @@ async def handle_control_request(request: web.Request):
     session_handler = session_management.SessionBaseModel(
         session_id=session_id, ws_host=ws_host, fr_session=fr_session, fr_error=fr_error
     )
-    # Checked again after the await above: a /ws may have attached meanwhile.
+    # Checked again after the await above: a retry or /ws may have arrived
+    # meanwhile. Keep an existing pending record so a slow first connect
+    # finishing after its retry cannot drop stored fc_definitions.
     try:
-        added = await SESSION_MANAGER.add_unless_connected(
+        record = await SESSION_MANAGER.add_unless_connected(
             session_id, session_handler, max_sessions=MAX_SESSIONS.value
         )
     except session_management.SessionAddError as e:
+        await session_handler.del_session()
         return _add_refused_response(session_id, e)
-    if not added:
+    if record is None:
+        await session_handler.del_session()
         return _json_error("Already running", 409)
-    session_handler.expiry_task = asyncio.create_task(
-        _remove_if_never_connected(session_id, session_handler)
-    )
-    return web.json_response(
-        {
-            "status": "Session initialized.",
-            "project_id": project_id(),
-            "idle_timeout_s": IDLE_TIMEOUT_S.value,
-        }
-    )
+    _arm_pending_expiry(session_id, record)
+    if record is not session_handler:
+        await session_handler.del_session()
+    return _session_initialized_response()
 
 
 async def _send_simulator_message(chat, content, session_id: str):
@@ -636,12 +640,36 @@ def _add_refused_response(
     return response
 
 
+def _session_initialized_response() -> web.Response:
+    return web.json_response(
+        {
+            "status": "Session initialized.",
+            "project_id": project_id(),
+            "idle_timeout_s": IDLE_TIMEOUT_S.value,
+        }
+    )
+
+
+def _arm_pending_expiry(
+    session_id: str, session: session_management.SessionBaseModel
+) -> None:
+    """Starts or resets the pending-session expiry timer."""
+    if session.expiry_task:
+        session.expiry_task.cancel()
+    session.expiry_task = asyncio.create_task(
+        _remove_if_never_connected(session_id, session)
+    )
+
+
 async def _remove_if_never_connected(
     session_id: str, session: session_management.SessionBaseModel
 ) -> None:
     """Drops a session record whose WebSocket never arrived, so it can't leak."""
     await asyncio.sleep(PENDING_SESSION_TTL_S)
-    if session.websocket_handler is None:
+    if (
+        session.websocket_handler is None
+        and session.expiry_task is asyncio.current_task()
+    ):
         logging.info("Session %s never opened a WebSocket; removing it", session_id)
         await SESSION_MANAGER.delete_item(session_id, session)
 

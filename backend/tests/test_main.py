@@ -993,31 +993,42 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 await ws.close()
 
     async def test_control_retry_cannot_replace_a_connected_session(self):
-        # /api/control checked for a WebSocket, awaited the simulator's init,
-        # then replaced the record, so a /ws arriving during that await was
-        # attached to a record nobody tracked and a second /ws was allowed.
+        # A slow connect awaiting simulator init while a retry connects and
+        # opens /ws must get 409 instead of replacing the live record.
         async with FakeUpstream() as upstream:
             with flagsaver.flagsaver(common_bag_ws_port=upstream.port):
-                await self.connect_session("s23")
-                first = await main.SESSION_MANAGER.search_item("s23")
                 init_started, release = threading.Event(), threading.Event()
+                calls = 0
 
-                def slow_init():
-                    init_started.set()
-                    release.wait(5)
+                def slow_first_init():
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        init_started.set()
+                        release.wait(5)
                     raise RuntimeError("no creds")
 
                 try:
                     with mock.patch.object(
-                        main, "initialize_gemini_chat_session", side_effect=slow_init
+                        main,
+                        "initialize_gemini_chat_session",
+                        side_effect=slow_first_init,
                     ):
-                        retry = asyncio.create_task(self.connect_session("s23"))
+                        slow = asyncio.create_task(self.connect_session("s23"))
                         self.assertTrue(await asyncio.to_thread(init_started.wait, 5))
+                        status, body = await self.connect_session("s23")
+                        self.assertEqual(status, 200, body)
+                        first = await main.SESSION_MANAGER.search_item("s23")
                         ws = await self.client.ws_connect("/ws?session_id=s23")
                         await ws.send_str("ping")
                         await asyncio.wait_for(ws.receive(), 5)
+                        # A direct retry on an already-connected session also
+                        # gets 409 immediately without running simulator init.
+                        status_now, body_now = await self.connect_session("s23")
+                        self.assertEqual(status_now, 409, body_now)
+                        self.assertEqual(calls, 2)
                         release.set()
-                        status, body = await retry
+                        status, body = await slow
                 finally:
                     release.set()
                 self.assertEqual(status, 409, body)
@@ -1028,20 +1039,106 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 await ws.close()
                 await self.wait_for_session_end("s23")
 
-    async def test_control_retry_replaces_a_pending_session(self):
+    async def test_control_retry_keeps_a_pending_session(self):
         with mock.patch.object(main, "PENDING_SESSION_TTL_S", 0.5):
             await self.connect_session("s24")
         first = await main.SESSION_MANAGER.search_item("s24")
+        assert first is not None and first.expiry_task is not None
+        first_expiry = first.expiry_task
+        resp = await self.client.post(
+            "/api/post_endpoint",
+            json={
+                "session_id": "s24",
+                "objective": "fc_definition",
+                "functionDefinition": [{"name": "f"}],
+            },
+        )
+        self.assertEqual(resp.status, 200)
         status, body = await self.connect_session("s24")
         self.assertEqual(status, 200, body)
         second = await main.SESSION_MANAGER.search_item("s24")
-        self.assertIsNot(second, first)
-        assert first is not None and first.expiry_task is not None
+        self.assertIs(second, first)
+        self.assertIn('"name": "f"', first.fc_definitions)
+        self.assertIsNot(first.expiry_task, first_expiry)
         await asyncio.sleep(0)
-        self.assertTrue(first.expiry_task.cancelled())
-        # The first record's expiry time passes; the second record stays.
+        self.assertTrue(first_expiry.cancelled())
+        # The first record's expiry time passes; the refreshed record stays.
         await asyncio.sleep(0.8)
-        self.assertIs(await main.SESSION_MANAGER.search_item("s24"), second)
+        self.assertIs(await main.SESSION_MANAGER.search_item("s24"), first)
+
+    async def test_slow_connect_finishing_after_retry_keeps_fc_definitions(self):
+        # If attempt 1 is stuck in simulator init, attempt 2 succeeds and the
+        # browser posts fc_definition before attempt 1 finishes; attempt 1 must
+        # keep attempt 2's record instead of replacing it with an empty one.
+        class FakeChat:
+            def __init__(self):
+                self.messages = []
+
+            async def send_message(self, parts):
+                self.messages.append([p.text for p in parts])
+                return mock.Mock(text='{"ok": true}')
+
+        stale_chat, winner_chat = FakeChat(), FakeChat()
+        first_started, release = threading.Event(), threading.Event()
+        calls = 0
+
+        def init_chat():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                first_started.set()
+                release.wait(5)
+                return stale_chat
+            return winner_chat
+
+        with flagsaver.flagsaver(max_sessions=1):
+            try:
+                with mock.patch.object(
+                    main, "initialize_gemini_chat_session", side_effect=init_chat
+                ):
+                    slow_first = asyncio.create_task(self.connect_session("s24-race"))
+                    self.assertTrue(await asyncio.to_thread(first_started.wait, 5))
+                    status2, body2 = await self.connect_session("s24-race")
+                    self.assertEqual(status2, 200, body2)
+                    winner = await main.SESSION_MANAGER.search_item("s24-race")
+                    assert winner is not None
+                    self.assertIs(winner.fr_session, winner_chat)
+
+                    resp = await self.client.post(
+                        "/api/post_endpoint",
+                        json={
+                            "session_id": "s24-race",
+                            "objective": "fc_definition",
+                            "functionDefinition": [{"name": "lookup"}],
+                        },
+                    )
+                    self.assertEqual(resp.status, 200)
+                    release.set()
+                    status1, body1 = await slow_first
+            finally:
+                release.set()
+
+            self.assertEqual(status1, 200, body1)
+            current = await main.SESSION_MANAGER.search_item("s24-race")
+            self.assertIs(current, winner)
+            self.assertIs(winner.fr_session, winner_chat)
+            self.assertIn('"name": "lookup"', winner.fc_definitions)
+            self.assertEqual(len(await main.SESSION_MANAGER.all_items()), 1)
+
+            resp = await self.client.post(
+                "/api/post_endpoint",
+                json={
+                    "session_id": "s24-race",
+                    "objective": "fr_generate",
+                    "functionName": "lookup",
+                    "functionArgs": {},
+                },
+            )
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(await resp.json(), {"response": '{"ok": true}'})
+            self.assertEqual(len(winner_chat.messages), 1)
+            self.assertIn('"name": "lookup"', winner_chat.messages[0][1])
+            self.assertEqual(stale_chat.messages, [])
 
     async def test_control_enforces_max_sessions(self):
         async with FakeUpstream() as upstream:
@@ -1089,10 +1186,11 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([status for status, _ in results], [503] * 5)
                 self.assertIn("session limit (1)", results[0][1]["error"])
                 init.assert_not_called()
-                # A retry for the pending session still fits and still inits.
+                # A retry for the pending session still fits and reuses the
+                # pending record without re-running simulator init.
                 status, body = await self.connect_session("s28")
                 self.assertEqual(status, 200, body)
-                init.assert_called_once()
+                init.assert_not_called()
 
     async def test_control_reports_idle_timeout(self):
         # The browser enforces it, so it must learn the server's value.
@@ -2379,40 +2477,52 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         manager = session_management.SessionManager()
         old = session_management.SessionBaseModel("s", "host")
         new = session_management.SessionBaseModel("s", "host")
-        self.assertTrue(await manager.add_unless_connected("s", old))
-        self.assertTrue(await manager.add_unless_connected("s", new))
+        self.assertIs(await manager.add_unless_connected("s", old), old)
+        self.assertTrue(await manager.release("s", old))
+        self.assertIs(await manager.add_unless_connected("s", new), new)
         await manager.delete_item("s", old)
         self.assertIs(await manager.search_item("s"), new)
         await manager.delete_item("s", new)
         self.assertIsNone(await manager.search_item("s"))
 
+    async def test_add_unless_connected_keeps_existing_pending_record(self):
+        manager = session_management.SessionManager()
+        first = session_management.SessionBaseModel("s", "host")
+        first.fc_definitions = '{"functions": ["f"]}'
+        second = session_management.SessionBaseModel("s", "host")
+        self.assertIs(await manager.add_unless_connected("s", first), first)
+        self.assertIs(await manager.add_unless_connected("s", second), first)
+        self.assertIs(await manager.search_item("s"), first)
+        self.assertEqual(first.fc_definitions, '{"functions": ["f"]}')
+
     async def test_claim_websocket_is_exclusive(self):
         manager = session_management.SessionManager()
         record = session_management.SessionBaseModel("s", "host")
         other = session_management.SessionBaseModel("s", "host")
-        await manager.add_unless_connected("s", record)
+        self.assertIs(await manager.add_unless_connected("s", record), record)
         handler = mock.Mock(spec=websocket_handler.WebsocketHandler)
         self.assertFalse(await manager.claim_websocket("s", other, handler))
         self.assertTrue(await manager.claim_websocket("s", record, handler))
         self.assertFalse(await manager.claim_websocket("s", record, handler))
-        self.assertFalse(await manager.add_unless_connected("s", other))
+        self.assertIsNone(await manager.add_unless_connected("s", other))
         self.assertIs(await manager.search_item("s"), record)
 
     async def test_session_limit(self):
         manager = session_management.SessionManager()
         a = session_management.SessionBaseModel("a", "host")
         b = session_management.SessionBaseModel("b", "host")
-        self.assertTrue(await manager.add_unless_connected("a", a, max_sessions=2))
-        self.assertTrue(await manager.add_unless_connected("b", b, max_sessions=2))
+        self.assertIs(await manager.add_unless_connected("a", a, max_sessions=2), a)
+        self.assertIs(await manager.add_unless_connected("b", b, max_sessions=2), b)
         c = session_management.SessionBaseModel("c", "host")
         with self.assertRaises(session_management.SessionLimitError):
             await manager.add_unless_connected("c", c, max_sessions=2)
         self.assertIsNone(await manager.search_item("c"))
-        # A retry replacing a pending record takes no extra slot.
+        # A retry for a pending record keeps it and takes no extra slot.
         a2 = session_management.SessionBaseModel("a", "host")
-        self.assertTrue(await manager.add_unless_connected("a", a2, max_sessions=2))
+        self.assertIs(await manager.add_unless_connected("a", a2, max_sessions=2), a)
+        self.assertIs(await manager.search_item("a"), a)
         await manager.delete_item("b", b)
-        self.assertTrue(await manager.add_unless_connected("c", c, max_sessions=2))
+        self.assertIs(await manager.add_unless_connected("c", c, max_sessions=2), c)
         # A released record frees its slot without being ended.
         handler = mock.Mock(spec=websocket_handler.WebsocketHandler)
         self.assertTrue(await manager.claim_websocket("c", c, handler))
@@ -2420,24 +2530,24 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await manager.release("c", c))
         handler.end_websocket.assert_not_called()
         b2 = session_management.SessionBaseModel("b", "host")
-        self.assertTrue(await manager.add_unless_connected("b", b2, max_sessions=2))
+        self.assertIs(await manager.add_unless_connected("b", b2, max_sessions=2), b2)
         # Deleting it later still ends it, and leaves a newer "c" alone.
         c2 = session_management.SessionBaseModel("c", "host")
         await manager.delete_item("b", b2)
-        self.assertTrue(await manager.add_unless_connected("c", c2, max_sessions=2))
+        self.assertIs(await manager.add_unless_connected("c", c2, max_sessions=2), c2)
         await manager.delete_item("c", c)
         handler.end_websocket.assert_awaited_once()
         self.assertIs(await manager.search_item("c"), c2)
         # 0 means no limit.
         d = session_management.SessionBaseModel("d", "host")
-        self.assertTrue(await manager.add_unless_connected("d", d))
+        self.assertIs(await manager.add_unless_connected("d", d), d)
         self.assertEqual(len(await manager.all_items()), 3)
 
     async def test_check_can_add(self):
         manager = session_management.SessionManager()
         await manager.check_can_add("a", 1)
         a = session_management.SessionBaseModel("a", "host")
-        self.assertTrue(await manager.add_unless_connected("a", a, max_sessions=1))
+        self.assertIs(await manager.add_unless_connected("a", a, max_sessions=1), a)
         with self.assertRaises(session_management.SessionLimitError):
             await manager.check_can_add("b", 1)
         # Its own ID fits, and 0 means no limit; nothing is stored.
@@ -2454,7 +2564,7 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         ):
             # Removed or not yet added: both refuse a later add of the ID.
             a = session_management.SessionBaseModel("a", "host")
-            self.assertTrue(await manager.add_unless_connected("a", a))
+            self.assertIs(await manager.add_unless_connected("a", a), a)
             self.assertTrue(await manager.remove_pending("a"))
             self.assertFalse(await manager.remove_pending("b"))
             for session_id in ("a", "b"):
@@ -2467,7 +2577,7 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
 
             # A connected record is left alone, and its ID isn't refused.
             c = session_management.SessionBaseModel("c", "host")
-            self.assertTrue(await manager.add_unless_connected("c", c))
+            self.assertIs(await manager.add_unless_connected("c", c), c)
             self.assertTrue(await manager.claim_websocket("c", c, mock.AsyncMock()))
             self.assertFalse(await manager.remove_pending("c"))
             self.assertIs(await manager.search_item("c"), c)
