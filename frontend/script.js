@@ -1400,6 +1400,9 @@ function deviceErrorReason(err) {
 
 async function startAudioInput() {
     const deviceId = AppUI.getValue("audioSource") || null;
+    // Over WebSocket, a connected capture node means audio is being sent (a
+    // device switch); a first start that fails has sent none.
+    const wasSendingAudio = !!AppState.liveAudioInputManager.processor;
     try {
         const webRtcManager = webRtcManagerIfActive();
         if (webRtcManager) {
@@ -1421,7 +1424,7 @@ async function startAudioInput() {
         // E.g. switching to another mic mid-turn: like turning the mic off,
         // this ends the turn, or it stays open with nothing being sent.
         endUserTurn();
-        stopAudioInput();
+        stopAudioInput({ endStream: wasSendingAudio });
         showMicState(false);
     }
 }
@@ -1452,8 +1455,9 @@ function endAudioStream() {
     api.sendAudioStreamEnd();
 }
 
-function stopAudioInput() {
-    endAudioStream();
+/** `endStream: false` when no audio was sent, so there is no stream to end. */
+function stopAudioInput({ endStream = true } = {}) {
+    if (endStream) endAudioStream();
     AppState.micLevelMeter.stop();
     AppUI.setHidden("micLevel", true);
     // Over WebRTC a stopped track sends nothing, so ACTIVITY_END may never come.

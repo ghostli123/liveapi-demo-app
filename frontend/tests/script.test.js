@@ -1068,6 +1068,7 @@ function sessionWithBufferedAudio() {
     element("micBtn").hidden = false; // The mic is on.
     element("micOffBtn").hidden = true;
     const input = context.AppState.liveAudioInputManager;
+    input.processor = {}; // Its capture node is connected: audio is being sent.
     input.buffered = true;
     input.recordChunk = () => {
         if (input.buffered) api.sent.push(["audio", "buffered"]);
@@ -1122,6 +1123,34 @@ test("switching microphones sends the old one's buffered audio first", async () 
     mic.starts[0]();
     await flush();
     assert.deepEqual(api.sent, [["audio", "buffered"]], "the stream continues on the new mic");
+});
+
+test("a failed microphone switch ends the old mic's audio stream", async () => {
+    const { context, element, api, mic, dialogText } = sessionWithBufferedAudio();
+    context.newMicSelected();
+    mic.fails[0](new Error("Constraints could not be satisfied."));
+    await flush();
+    assert.deepEqual(api.sent, [["audio", "buffered"], ["audio_stream_end"]]);
+    assert.equal(element("micBtn").hidden, true);
+    assert.equal(dialogText(), "Could not start the microphone: Constraints could not be satisfied.");
+});
+
+test("a microphone that fails to start sends no audio_stream_end: no audio was sent", async () => {
+    const { context, element, api, mic, dialogText } = loadSession();
+    api.isSetupComplete = true; // Automatic activity detection, WebSocket media.
+    element("micBtn").hidden = true; // The mic is off.
+    element("micOffBtn").hidden = false;
+    context.micOffBtnClick();
+    assert.equal(element("micBtn").hidden, false, "shown as on during the permission prompt");
+    mic.fails[0](new Error("Permission denied"));
+    await flush();
+    assert.deepEqual(api.sent, []);
+    assert.equal(element("micBtn").hidden, true);
+    assert.equal(dialogText(), "Could not start the microphone: Permission denied");
+
+    // A later Mic off click (already off) sends nothing either.
+    context.micBtnClick();
+    assert.deepEqual(api.sent, []);
 });
 
 test("Start speaking with the mic on sends the audio captured before the click ahead of activity_start", async () => {
