@@ -59,6 +59,10 @@ If a function response should follow a specific format, it will be described in 
 If there are any issues with the arguments, such as type is incorrect, required arguments not provided, in these kind of cases, you should return a string like raise Exception.
 
 """
+# Deadline for one fr_generate request, waiting for its turn included. Under
+# the browser's 30 s (FUNCTION_RESPONSE_TIMEOUT_MS in script.js), so the user
+# sees why the call failed.
+FR_SIMULATOR_TIMEOUT_S = 25
 # Max size of one WebSocket message from the browser (custom avatar images are large).
 MAX_CLIENT_MESSAGE_BYTES = 64 * 1024 * 1024
 # A session record is removed if its WebSocket doesn't open within this time.
@@ -415,32 +419,52 @@ async def handle_fr_post_request(request: web.Request):
 
     # One request at a time per session (see SessionBaseModel.fr_lock). The
     # checks run inside the lock: the session may end while a request waits.
-    async with chat_session.fr_lock:
-        if not chat_session.fr_session:
-            return _json_error(
-                f"Function response simulator unavailable ({chat_session.fr_error or 'not initialized'}); see the server log",
-                503,
-            )
-        current_content = []
-        send_definitions = (
-            chat_session.fc_definitions and not chat_session.fc_definitions_sent
+    # The deadline covers the wait too: the genai client has no timeout, so a
+    # call that never returns would hold the lock, and every later call,
+    # forever. Cancelling leaves the chat as it was; it records a turn only
+    # once the reply arrives.
+    try:
+        async with asyncio.timeout(FR_SIMULATOR_TIMEOUT_S):
+            async with chat_session.fr_lock:
+                if not chat_session.fr_session:
+                    return _json_error(
+                        f"Function response simulator unavailable ({chat_session.fr_error or 'not initialized'}); see the server log",
+                        503,
+                    )
+                current_content = []
+                send_definitions = (
+                    chat_session.fc_definitions and not chat_session.fc_definitions_sent
+                )
+                if send_definitions:
+                    current_content += [
+                        genai.types.Part(text="The definition of the functions are:"),
+                        genai.types.Part(text=chat_session.fc_definitions),
+                    ]
+                current_content += [
+                    genai.types.Part(
+                        text="Now generate function response this function call."
+                    ),
+                    genai.types.Part(text=query),
+                ]
+                try:
+                    response = await chat_session.fr_session.send_message(
+                        current_content
+                    )
+                except Exception as e:
+                    logging.exception("Function response simulator request failed")
+                    return _json_error(_simulator_error(e), 502)
+                if send_definitions:
+                    chat_session.fc_definitions_sent = True
+    except TimeoutError:
+        logging.warning(
+            "Function response simulator gave no answer within %s s (session %s)",
+            FR_SIMULATOR_TIMEOUT_S,
+            session_id,
         )
-        if send_definitions:
-            current_content += [
-                genai.types.Part(text="The definition of the functions are:"),
-                genai.types.Part(text=chat_session.fc_definitions),
-            ]
-        current_content += [
-            genai.types.Part(text="Now generate function response this function call."),
-            genai.types.Part(text=query),
-        ]
-        try:
-            response = await chat_session.fr_session.send_message(current_content)
-        except Exception as e:
-            logging.exception("Function response simulator request failed")
-            return _json_error(_simulator_error(e), 502)
-        if send_definitions:
-            chat_session.fc_definitions_sent = True
+        return _json_error(
+            f"Function response simulator didn't answer within {FR_SIMULATOR_TIMEOUT_S} s",
+            504,
+        )
     logging.debug("Sending back frontend with response:\n%s", response.text)
     return web.json_response({"response": response.text})
 

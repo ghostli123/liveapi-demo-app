@@ -618,6 +618,63 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await asyncio.gather(first, second), [200, 503])
         self.assertEqual(len(chat.messages), 3)
 
+    async def test_fr_call_that_never_returns_times_out_and_frees_the_chat(self):
+        # The genai client sets no timeout, so a call that never returns held
+        # fr_lock forever, and every later call queued behind it.
+        class HungChat:
+            def __init__(self):
+                self.messages = []
+                self.cancelled = 0
+                self.answering = asyncio.Event()
+
+            async def send_message(self, parts):
+                self.messages.append([p.text for p in parts])
+                try:
+                    await self.answering.wait()
+                except asyncio.CancelledError:
+                    self.cancelled += 1
+                    raise
+                return mock.Mock(text='{"ok": true}')
+
+        chat = HungChat()
+        with mock.patch.object(
+            main, "initialize_gemini_chat_session", return_value=chat
+        ):
+            await self.connect_session("s24")
+
+        async def post(body):
+            resp = await self.client.post(
+                "/api/post_endpoint", json={"session_id": "s24", **body}
+            )
+            return resp.status, await resp.json()
+
+        await post(
+            {"objective": "fc_definition", "functionDefinition": [{"name": "f"}]}
+        )
+        body = {"objective": "fr_generate", "functionName": "f", "functionArgs": {}}
+        with (
+            mock.patch.object(main, "FR_SIMULATOR_TIMEOUT_S", 0.3),
+            self.assertLogs("absl", level="WARNING") as logs,
+        ):
+            # The second one times out waiting for its turn.
+            replies = await asyncio.wait_for(asyncio.gather(post(body), post(body)), 5)
+        for status, reply in replies:
+            self.assertEqual(status, 504)
+            self.assertEqual(
+                reply["error"],
+                "Function response simulator didn't answer within 0.3 s",
+            )
+        self.assertNotIn("ERROR", "\n".join(logs.output))
+        self.assertGreaterEqual(chat.cancelled, 1)
+        self.assertEqual(chat.cancelled, len(chat.messages))
+
+        # The chat is free again, and the declarations, never delivered, go
+        # with the next call.
+        chat.answering.set()
+        chat.messages.clear()
+        self.assertEqual(await post(body), (200, {"response": '{"ok": true}'}))
+        self.assertEqual([len(m) for m in chat.messages], [4])
+
     async def test_fr_definitions_stored_without_simulator(self):
         await self.connect_session("s9")
         resp = await self.client.post(
