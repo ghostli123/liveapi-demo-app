@@ -188,6 +188,28 @@ class GetAccessTokenTest(unittest.TestCase):
             get_credentials.get_access_token()
         self.assertEqual(get_credentials.get_access_token().source, "later")
 
+    def test_invalidate_drops_only_the_cached_token(self):
+        cached = _token(60, "cached")
+        get_credentials._cached_token = cached
+        self.assertFalse(get_credentials.invalidate(_token(60, "other")))
+        self.assertIs(get_credentials._cached_token, cached)
+        # Matched by the token itself, whichever object carries it.
+        self.assertTrue(get_credentials.invalidate(_token(60, "cached")))
+        self.assertIsNone(get_credentials._cached_token)
+        self.assertFalse(get_credentials.invalidate(cached))
+
+    def test_invalidated_token_is_not_reused_when_refresh_fails(self):
+        cached = _token(60, "cached")
+        get_credentials._cached_token = cached
+        get_credentials.invalidate(cached)
+
+        def failing():
+            raise RuntimeError("Account restricted")
+
+        self.use_sources(failing)
+        with self.assertRaisesRegex(RuntimeError, "Account restricted"):
+            get_credentials.get_access_token()
+
     def test_adc_without_token_falls_through(self):
         adc = mock.Mock(token=None, expiry=None)
         self.enterContext(mock.patch.object(get_credentials, "_adc_credentials", None))

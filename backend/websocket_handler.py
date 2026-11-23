@@ -44,6 +44,10 @@ _DEBUG_PREVIEW_CHARS = 300
 # body can be a whole HTML error page (up to websockets' 1 MiB limit); the
 # browser sees only the first 123 bytes anyway.
 _MAX_CONNECT_ERROR_CHARS = 300
+# In the close reason the Live API sends, with code 1008, after the setup
+# message when the handshake's token is invalid (it doesn't refuse the
+# handshake itself): "Request had invalid authentication credentials. ..."
+_INVALID_TOKEN_REASON = "invalid authentication credentials"
 # The browser's close reason when no access token could be fetched.
 CREDENTIALS_ERROR_REASON = (
     "Server could not get Google Cloud credentials; see the server log"
@@ -178,6 +182,8 @@ class WebsocketHandler:
         # logged when the session ends.
         self.traffic = {"c->s": [0, 0], "s->c": [0, 0]}
         self.started_at: float | None = None
+        # The token the upstream connection opened with, if any.
+        self.upstream_token: get_credentials.AccessToken | None = None
         logging.info("Websocket handler initialized for session: %s", self.session_id)
 
     async def proxy_task(
@@ -279,7 +285,17 @@ class WebsocketHandler:
                 )
                 return None
         try:
-            return await self._connect_upstream(token.token if token else None)
+            try:
+                upstream = await self._connect_upstream(token.token if token else None)
+            except websockets.InvalidStatus as e:
+                if token is None or e.response.status_code != 401:
+                    raise
+                token = await self._replace_rejected_token(token)
+                if token is None:
+                    raise
+                upstream = await self._connect_upstream(token.token)
+            self.upstream_token = token
+            return upstream
         except Exception as e:
             self.close_code = 1011
             self.close_reason = describe_connect_error(e)
@@ -289,6 +305,45 @@ class WebsocketHandler:
                 connect_error_detail(e),
             )
             return None
+
+    def _drop_rejected_token(self, rejected, how: str) -> None:
+        """Drops a token the upstream rejected from the cache.
+
+        A cached token can stop working before its expiry: revoked, the ADC
+        account changed, or a lifetime that was only assumed. Kept, it would
+        fail every session until then.
+        """
+        get_credentials.invalidate(rejected)
+        logging.warning(
+            "Upstream rejected the access token from %s (%s) for session %s; "
+            "dropped it from the cache",
+            rejected.source,
+            how,
+            self.session_id,
+        )
+
+    async def _replace_rejected_token(self, rejected):
+        """A token to retry with after the upstream answered 401; None if none.
+
+        The rejected token is dropped from the cache, and the handshake is
+        retried once with a different token.
+        """
+        self._drop_rejected_token(rejected, "HTTP 401")
+        try:
+            token = await get_credentials.fetch_access_token()
+        except Exception as e:
+            logging.warning(
+                "No other access token for session %s: %s", self.session_id, e
+            )
+            return None
+        if token.token == rejected.token:
+            # A source can keep handing out its own cached copy.
+            logging.warning(
+                "Token sources returned the rejected token again for session %s",
+                self.session_id,
+            )
+            return None
+        return token
 
     async def _read_client_while_connecting(self, messages: list) -> None:
         """Collects browser messages (the setup) until cancelled or it closes.
@@ -419,6 +474,12 @@ class WebsocketHandler:
             self.server_websocket = None
             self.close_code = server_websocket.close_code
             self.close_reason = server_websocket.close_reason or ""
+            if (
+                self.upstream_token is not None
+                and self.close_code == 1008
+                and _INVALID_TOKEN_REASON in self.close_reason.lower()
+            ):
+                self._drop_rejected_token(self.upstream_token, "close code 1008")
             if error is not None:
                 self.close_code = 1011
                 self.close_reason = f"Proxy error: {type(error).__name__}"

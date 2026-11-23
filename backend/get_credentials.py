@@ -65,6 +65,9 @@ class AccessToken:
 
 _lock = threading.Lock()
 _cached_token: AccessToken | None = None
+# Guards writes to _cached_token, which invalidate() makes from the event loop
+# while a fetch may hold _lock for many seconds.
+_cache_lock = threading.Lock()
 # Failed fetches so far, and the last one's error. Callers that waited on _lock
 # while a fetch failed get its error instead of each trying every source again.
 _failed_fetches = 0
@@ -210,13 +213,29 @@ def get_access_token() -> AccessToken:
                 name,
                 token.expiry.isoformat(),
             )
-            _cached_token = token
+            with _cache_lock:
+                _cached_token = token
             return token
         _last_failure = "No access token available. " + " | ".join(errors)
         _failed_fetches += 1
         return _fallback_token(_last_failure)
     finally:
         _lock.release()
+
+
+def invalidate(token: AccessToken) -> bool:
+    """Drops token from the cache if it is still cached; True if it was.
+
+    For a token the upstream rejected (revoked, or the ADC account changed, or
+    a source whose lifetime was assumed): kept, it would fail every session
+    until it expires. A token another caller already replaced stays replaced.
+    """
+    global _cached_token
+    with _cache_lock:
+        if _cached_token is None or _cached_token.token != token.token:
+            return False
+        _cached_token = None
+        return True
 
 
 async def fetch_access_token(*, bounded: bool = True) -> AccessToken:

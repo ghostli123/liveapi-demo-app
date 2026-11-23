@@ -15,6 +15,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
+import get_credentials
 import websocket_handler
 
 
@@ -283,7 +284,9 @@ class ConnectProxy:
         )
 
 
-class UpstreamProxyTest(unittest.IsolatedAsyncioTestCase):
+class TlsUpstreamTestCase(unittest.IsolatedAsyncioTestCase):
+    """Serves a wss:// upstream for HOST with a certificate the handler trusts."""
+
     HOST = "live.test"
 
     def environ(self, **proxies):
@@ -296,6 +299,30 @@ class UpstreamProxyTest(unittest.IsolatedAsyncioTestCase):
         }
         return mock.patch.dict("os.environ", {**cleared, **proxies})
 
+    async def serve_tls(self, directory, handler, process_request=None):
+        cert_path, key_path = _self_signed_cert(directory, self.HOST)
+        server_ssl = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ssl.load_cert_chain(cert_path, key_path)
+        quiet = logging.getLogger("test.quiet_server")
+        quiet.setLevel(logging.INFO)
+        server = await websockets.serve(
+            handler,
+            "127.0.0.1",
+            0,
+            ssl=server_ssl,
+            logger=quiet,
+            process_request=process_request,
+        )
+        self.addAsyncCleanup(server.wait_closed)
+        self.addCleanup(server.close)
+        # The handler trusts certifi's bundle; trust the test's certificate.
+        self.enterContext(
+            mock.patch.object(websocket_handler.certifi, "where", lambda: cert_path)
+        )
+        return next(iter(server.sockets)).getsockname()[1]
+
+
+class UpstreamProxyTest(TlsUpstreamTestCase):
     async def test_gateway_ignores_proxy_environment_variables(self):
         async def close(connection):
             await connection.close()
@@ -364,23 +391,6 @@ class UpstreamProxyTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(await connection.recv(), "hello")
         self.assertEqual(len(proxy.requests), 1)
 
-    async def serve_tls(self, directory, handler):
-        cert_path, key_path = _self_signed_cert(directory, self.HOST)
-        server_ssl = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        server_ssl.load_cert_chain(cert_path, key_path)
-        quiet = logging.getLogger("test.quiet_server")
-        quiet.setLevel(logging.INFO)
-        server = await websockets.serve(
-            handler, "127.0.0.1", 0, ssl=server_ssl, logger=quiet
-        )
-        self.addAsyncCleanup(server.wait_closed)
-        self.addCleanup(server.close)
-        # The handler trusts certifi's bundle; trust the test's certificate.
-        self.enterContext(
-            mock.patch.object(websocket_handler.certifi, "where", lambda: cert_path)
-        )
-        return next(iter(server.sockets)).getsockname()[1]
-
     async def start_proxy(self, proxy):
         server = await asyncio.start_server(proxy.handle, "127.0.0.1", 0)
         self.addAsyncCleanup(server.wait_closed)
@@ -438,6 +448,138 @@ class UpstreamProxyTest(unittest.IsolatedAsyncioTestCase):
         reason = websocket_handler.describe_connect_error(caught.exception)
         self.assertEqual(reason, "Invalid proxy setting: scheme ftp isn't supported")
         self.assertNotIn("hunter2", reason)
+
+
+def _access_token(name):
+    expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
+    return get_credentials.AccessToken(f"token-{name}", expiry, name)
+
+
+class UpstreamUnauthorizedTest(TlsUpstreamTestCase):
+    """A token the upstream rejects is dropped and the handshake retried once."""
+
+    HOST = "localhost"
+
+    def setUp(self):
+        self.received = []
+        self.enterContext(mock.patch.object(get_credentials, "_cached_token", None))
+        self.enterContext(self.environ())
+
+    def use_sources(self, *results):
+        fetch = mock.Mock(side_effect=results)
+        self.enterContext(
+            mock.patch.object(get_credentials, "_SOURCES", (("test source", fetch),))
+        )
+        return fetch
+
+    async def open_upstream(self, rejected, status=401):
+        def check_token(connection, request):
+            token = request.headers.get("Authorization")
+            self.received.append(token)
+            if token in rejected:
+                body = json.dumps({"error": {"message": "Invalid credentials"}})
+                return connection.respond(status, body)
+            return None
+
+        async def close(connection):
+            await connection.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            port = await self.serve_tls(directory, close, check_token)
+            handler = websocket_handler.WebsocketHandler(
+                f"wss://{self.HOST}:{port}/ws", "s", None
+            )
+            with self.assertLogs(level=logging.INFO) as logs:
+                upstream = await handler._open_upstream()
+            if upstream is not None:
+                await upstream.close()
+        self.assertNotIn("token-", "\n".join(logs.output))
+        return handler, upstream
+
+    async def test_rejected_cached_token_is_replaced(self):
+        get_credentials._cached_token = _access_token("old")
+        fetch = self.use_sources(_access_token("new"))
+        handler, upstream = await self.open_upstream({"Bearer token-old"})
+        self.assertIsNotNone(upstream)
+        self.assertEqual(self.received, ["Bearer token-old", "Bearer token-new"])
+        self.assertEqual(fetch.call_count, 1)
+        # Later sessions use the new token too.
+        self.assertEqual(get_credentials._cached_token.token, "token-new")
+
+    async def test_rejected_again_is_not_retried_twice(self):
+        get_credentials._cached_token = _access_token("old")
+        self.use_sources(_access_token("new"), _access_token("newer"))
+        handler, upstream = await self.open_upstream(
+            {"Bearer token-old", "Bearer token-new"}
+        )
+        self.assertIsNone(upstream)
+        self.assertEqual(self.received, ["Bearer token-old", "Bearer token-new"])
+        self.assertEqual(handler.close_code, 1011)
+        self.assertEqual(handler.close_reason, "Upstream HTTP 401: Invalid credentials")
+
+    async def test_same_token_from_the_source_is_not_retried(self):
+        fetch = self.use_sources(_access_token("old"), _access_token("old"))
+        handler, upstream = await self.open_upstream({"Bearer token-old"})
+        self.assertIsNone(upstream)
+        self.assertEqual(self.received, ["Bearer token-old"])
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(handler.close_reason, "Upstream HTTP 401: Invalid credentials")
+
+    async def test_failed_refetch_reports_the_401_and_drops_the_token(self):
+        get_credentials._cached_token = _access_token("old")
+        self.use_sources(RuntimeError("Account restricted"))
+        handler, upstream = await self.open_upstream({"Bearer token-old"})
+        self.assertIsNone(upstream)
+        self.assertEqual(self.received, ["Bearer token-old"])
+        self.assertEqual(handler.close_reason, "Upstream HTTP 401: Invalid credentials")
+        self.assertIsNone(get_credentials._cached_token)
+
+    async def test_other_rejections_keep_the_token(self):
+        get_credentials._cached_token = _access_token("old")
+        fetch = self.use_sources(_access_token("new"))
+        handler, upstream = await self.open_upstream({"Bearer token-old"}, 403)
+        self.assertIsNone(upstream)
+        self.assertEqual(self.received, ["Bearer token-old"])
+        self.assertEqual(fetch.call_count, 0)
+        self.assertEqual(get_credentials._cached_token.token, "token-old")
+
+    async def run_session(self, close_reason):
+        """Runs a session whose upstream answers its setup like the Live API."""
+
+        async def close_after_setup(connection):
+            self.received.append(connection.request.headers.get("Authorization"))
+            await connection.recv()
+            await connection.close(1008, close_reason)
+
+        with tempfile.TemporaryDirectory() as directory:
+            port = await self.serve_tls(directory, close_after_setup)
+            handler = websocket_handler.WebsocketHandler(
+                f"wss://{self.HOST}:{port}/ws",
+                "s",
+                FakeConnection(messages=["setup"]),
+                keepalive_s=None,
+            )
+            with self.assertLogs(level=logging.INFO) as logs:
+                await asyncio.wait_for(handler.create_proxy(), 5)
+        self.assertNotIn("token-", "\n".join(logs.output))
+        return handler
+
+    async def test_invalid_credentials_close_drops_the_token(self):
+        # The Live API accepts the handshake with an invalid token and then
+        # closes with this (seen from prod-us-rep with a fake token).
+        get_credentials._cached_token = _access_token("old")
+        handler = await self.run_session(
+            "Request had invalid authentication credentials. Expected OAuth 2 "
+            "access token, login cookie or other valid authentication c"
+        )
+        self.assertEqual(handler.close_code, 1008)
+        self.assertEqual(self.received, ["Bearer token-old"])
+        self.assertIsNone(get_credentials._cached_token)
+
+    async def test_other_policy_closes_keep_the_token(self):
+        get_credentials._cached_token = _access_token("old")
+        await self.run_session("Publisher Model `gemini-x` was not found")
+        self.assertEqual(get_credentials._cached_token.token, "token-old")
 
 
 class FakeConnection:
