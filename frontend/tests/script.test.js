@@ -1934,6 +1934,36 @@ test("closing the dialog cancels the recording's limit timer", async () => {
     assert.notEqual(element("recordStatus").textContent, "Processing recorded sample...");
 });
 
+test("Stop works after the voice name is cleared, and the voice keeps the name it started with", async () => {
+    const devices = fakeRecordingDevices();
+    const OfflineAudioContext = fakeOfflineAudioContext(12);
+    const { context, element } = loadApp({ ...devices.globals, OfflineAudioContext, FileReader: FakeFileReader, Blob });
+    const voices = [];
+    element("voice-dropdown").appendChild = (option) => voices.push(option.textContent);
+    context.openModal();
+    element("newVoiceName").value = "Kai";
+    const click = context.handleRecordClick();
+    devices.prompts[0].grant();
+    await click;
+    context.AppState.recordingStartTime -= 11000; // Past the 10 s minimum.
+
+    element("newVoiceName").value = "  ";
+    await context.handleRecordClick();
+    assert.equal(devices.recorders[0].state, "inactive");
+    assert.equal(context.AppState.isRecording, false);
+    await flush();
+    assert.equal(devices.prompts[0].track.stopped, true);
+    assert.ok(context.AppState.customVoiceBase64.length > 0);
+    assert.deepEqual(voices, ["Kai"]);
+    assert.match(element("dialogMessage").textContent, /^New branded voice "Kai" has been created/);
+
+    // Starting a take still needs a name.
+    context.openModal();
+    await context.handleRecordClick();
+    assert.equal(devices.prompts.length, 1);
+    assert.equal(element("dialogMessage").textContent, "Please enter a name for the reference voice.");
+});
+
 test("a take still processing when the dialog closes doesn't touch a newer recording", async () => {
     for (const outcome of ["decoded", "failed"]) {
         const devices = fakeRecordingDevices();

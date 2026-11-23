@@ -1974,15 +1974,9 @@ function closeModal() {
 }
 
 async function handleRecordClick() {
-    const nameInput = AppUI.getControl("newVoiceName");
-    const voiceName = nameInput ? nameInput.value.trim() : "";
-    if (voiceName === "") {
-        AppUI.showModal("Please enter a name for the reference voice.");
-        if (nameInput) nameInput.focus();
-        return;
-    }
-
     if (AppState.isRecording) {
+        // The take is saved under the name it started with, so Stop works
+        // even if the name box has since been cleared.
         const duration = (Date.now() - AppState.recordingStartTime) / 1000;
         if (duration < 10) {
             AppUI.showModal(
@@ -1993,6 +1987,14 @@ async function handleRecordClick() {
 
         stopRecording();
     } else {
+        const nameInput = AppUI.getControl("newVoiceName");
+        const voiceName = nameInput ? nameInput.value.trim() : "";
+        if (voiceName === "") {
+            AppUI.showModal("Please enter a name for the reference voice.");
+            if (nameInput) nameInput.focus();
+            return;
+        }
+
         /** @type {MediaStream | null} */
         let stream = null;
         // A second click while the first waits for the microphone supersedes it.
