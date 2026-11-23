@@ -1112,6 +1112,29 @@ test("switching microphones sends the old one's buffered audio first", async () 
     assert.deepEqual(api.sent, [["audio", "buffered"]], "the stream continues on the new mic");
 });
 
+test("Start speaking with the mic on sends the audio captured before the click ahead of activity_start", async () => {
+    const { context, api } = sessionWithBufferedAudio();
+    api.disableDetection = true; // "Start speaking" is only shown then.
+    await context.turnBtnClick();
+    assert.deepEqual(api.sent, [["audio", "buffered"], ["activity", true]]);
+    assert.equal(context.AppState.userTurnActive, true);
+});
+
+test("Start speaking over WebRTC or during a resume flushes nothing ahead of the turn", async () => {
+    // WebRTC: the mic's audio is on the peer connection, with nothing buffered here.
+    let app = sessionWithBufferedAudio();
+    app.api.transportMode = "webrtc";
+    await app.context.turnBtnClick();
+    assert.deepEqual(app.api.sent, [["activity", true]]);
+
+    // During a resume the click is refused, and the buffered audio is sent later as usual.
+    app = sessionWithBufferedAudio();
+    app.api.isSetupComplete = false;
+    await app.context.turnBtnClick();
+    assert.deepEqual(app.api.sent, []);
+    assert.equal(app.context.AppState.liveAudioInputManager.buffered, true);
+});
+
 /** A media error as Chrome throws it: a name and an empty message. */
 function namedError(name, message = "") {
     return Object.assign(new Error(message), { name });

@@ -1506,6 +1506,9 @@ async function turnBtnClick() {
             if (attempt !== AppState.turnAttempt) return;
             if (!isMicOn()) return; // The microphone failed to start.
         }
+        // Over WebSocket, audio is sent every audioInterval ms; send what the mic
+        // captured before the click first, or it arrives inside the turn.
+        if (!isWebRtcTransport()) AppState.liveAudioInputManager.recordChunk();
         // The session may have started resuming during the permission prompt.
         if (!AppState.geminiLiveApi.sendVoiceActivityMessage(true)) {
             AppUI.showModal(notReadyMessage("speaking"));
