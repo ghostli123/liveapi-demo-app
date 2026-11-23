@@ -409,6 +409,156 @@ function connectedApi() {
     return api;
 }
 
+test("disconnect() inside onTransportFallback stops setupComplete and trailing events", () => {
+    const api = connectedApi();
+    api.webSocket.close = () => {};
+    api.transportMode = "webrtc";
+    api.webRtcManager = { close: () => {} };
+    const seen = [];
+    let started = 0;
+    api.onTransportFallback = () => {
+        seen.push("fallback");
+        api.disconnect();
+    };
+    api.onReceiveResponse = (message) => seen.push(message.type);
+    api.onConnectionStarted = () => started++;
+
+    api.webSocket.onmessage({
+        data: JSON.stringify({
+            setupComplete: {},
+            sessionResumptionUpdate: { newHandle: "h1" },
+            usageMetadata: { totalTokenCount: 10 },
+        }),
+    });
+
+    assert.deepEqual(plain(seen), ["fallback"]);
+    assert.equal(started, 0);
+    assert.equal(api.latestResumptionHandle, "");
+    assert.equal(api.isSetupComplete, false);
+});
+
+test("disconnect() inside onReceiveResponse stops onConnectionStarted and trailing events", () => {
+    const api = connectedApi();
+    api.webSocket.close = () => {};
+    const seen = [];
+    let started = 0;
+    api.onReceiveResponse = (message) => {
+        seen.push(message.type);
+        if (message.type === "SETUP COMPLETE") api.disconnect();
+    };
+    api.onConnectionStarted = () => started++;
+
+    api.webSocket.onmessage({
+        data: JSON.stringify({
+            setupComplete: {},
+            serverContent: { modelTurn: { parts: [{ text: "hi" }] } },
+            sessionResumptionUpdate: { newHandle: "h1" },
+        }),
+    });
+
+    assert.deepEqual(plain(seen), ["SETUP COMPLETE"]);
+    assert.equal(started, 0);
+    assert.equal(api.latestResumptionHandle, "");
+});
+
+test("resume() inside GO_AWAY stops trailing events in the same frame", async () => {
+    const api = connectedApi();
+    const oldSocket = api.webSocket;
+    oldSocket.close = () => oldSocket.onclose?.();
+    api.setResumption(true, "");
+    const seen = [];
+    let resumePromise;
+    // Keep prepare() pending so resume() stays mid-flight while the frame unwinds.
+    const pendingPost = Promise.withResolvers();
+    api.sendPostRequest = () => pendingPost.promise;
+    api.onReceiveResponse = (message) => {
+        seen.push(message.type);
+        if (message.type === "GO_AWAY") {
+            resumePromise = api.resume(api.latestResumptionHandle);
+        }
+    };
+    api.onConnectionStarted = () => {};
+
+    oldSocket.onmessage({
+        data: JSON.stringify({
+            setupComplete: {},
+            sessionResumptionUpdate: { newHandle: "h1" },
+            goAway: { timeLeft: "5s" },
+            usageMetadata: { totalTokenCount: 99 },
+        }),
+    });
+
+    assert.deepEqual(plain(seen), ["SETUP COMPLETE", "RESUMPTION", "GO_AWAY"]);
+    api.disconnect();
+    pendingPost.resolve({});
+    await resumePromise;
+});
+
+test("disconnect() inside onConnectionStarted stops trailing events in the same frame", () => {
+    const api = connectedApi();
+    api.webSocket.close = () => {};
+    const seen = [];
+    api.onReceiveResponse = (message) => seen.push(message.type);
+    api.onConnectionStarted = () => {
+        seen.push("started");
+        api.disconnect();
+    };
+
+    api.webSocket.onmessage({
+        data: JSON.stringify({
+            setupComplete: {},
+            serverContent: { modelTurn: { parts: [{ text: "hi" }] } },
+            sessionResumptionUpdate: { newHandle: "h1" },
+        }),
+    });
+
+    assert.deepEqual(plain(seen), ["SETUP COMPLETE", "started"]);
+    assert.equal(api.latestResumptionHandle, "");
+});
+
+test("a late completeSession() rejection after disconnect() does not report an error", async () => {
+    const api = connectedApi();
+    api.webSocket.close = () => {};
+    api.transportMode = "webrtc";
+    let rejectComplete;
+    api.webRtcManager = {
+        close: () => {},
+        completeSession: () =>
+            new Promise((_, reject) => {
+                rejectComplete = reject;
+            }),
+    };
+    api.onConnectionStarted = () => {};
+
+    api.webSocket.onmessage({
+        data: JSON.stringify({ setupComplete: { rtcSetupComplete: { answerSdp: "v=0" } } }),
+    });
+    api.disconnect();
+    rejectComplete(new Error("late SDP failure"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.deepEqual(plain(api.errors), []);
+});
+
+test("onmessage on a superseded WebSocket is ignored", () => {
+    const api = connectedApi();
+    const oldSocket = api.webSocket;
+    const seen = [];
+    api.onReceiveResponse = (message) => seen.push(message.type);
+    api.onConnectionStarted = () => {};
+
+    // Replace the socket without going through disconnect() (e.g. a second connect).
+    api.setupWebSocketToService();
+    const bytesBefore = api.bytesIn;
+    oldSocket.onmessage({
+        data: JSON.stringify({ serverContent: { modelTurn: { parts: [{ text: "stale" }] } } }),
+    });
+
+    assert.deepEqual(plain(seen), []);
+    assert.equal(api.bytesIn, bytesBefore);
+});
+
 test("a server restart (1001) resumes when the session has a handle", () => {
     const api = connectedApi();
     api.setResumption(true, "");

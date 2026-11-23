@@ -867,7 +867,12 @@ class GeminiLiveAPI {
             console.error("Failed to parse incoming WebSocket message as JSON:", error);
             return;
         }
+        const webSocket = this.webSocket;
+        const connectAttempt = this.connectAttempt;
+        const isCurrent = () =>
+            this.webSocket === webSocket && this.connectAttempt === connectAttempt;
         for (const message of events) {
+            if (!isCurrent()) return;
             if (message.type === "SETUP COMPLETE") {
                 this.isSetupComplete = true;
                 clearTimeout(this.setupTimer);
@@ -881,6 +886,7 @@ class GeminiLiveAPI {
                         this.onErrorMessage(`Could not switch media to the WebSocket: ${error.message}`);
                         return; // The session has ended; drop the rest.
                     }
+                    if (!isCurrent()) return;
                 }
             } else if (message.type === "RESUMPTION") {
                 this.latestResumptionHandle = message.data;
@@ -899,6 +905,7 @@ class GeminiLiveAPI {
                 this.webRtcManager
                     .completeSession(message.answerSdp)
                     .catch((err) => {
+                        if (!isCurrent()) return;
                         console.error(
                             "[WebRTC] Failed to complete session with answerSdp:",
                             err
@@ -913,6 +920,7 @@ class GeminiLiveAPI {
             } catch (error) {
                 console.error(`Error handling ${message.type} event:`, error);
             }
+            if (!isCurrent()) return;
             if (message.type === "SETUP COMPLETE") {
                 // Only now does the server accept input. This runs even if
                 // the handler above failed, or the UI would stay "connecting".
@@ -1031,7 +1039,10 @@ class GeminiLiveAPI {
             }
         };
 
-        webSocket.onmessage = this.onReceiveMessage.bind(this);
+        webSocket.onmessage = (event) => {
+            if (this.webSocket !== webSocket) return; // Superseded by disconnect() or resume().
+            this.onReceiveMessage(event);
+        };
 
         // Override send to track outbound bandwidth
         const originalSend = webSocket.send.bind(webSocket);
