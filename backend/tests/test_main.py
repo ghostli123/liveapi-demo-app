@@ -1915,6 +1915,85 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.dict("os.environ", {"K_SERVICE": "demo"}):
             self.assertTrue(main.is_allowed_host("demo-abc123-uc.a.run.app"))
 
+    async def test_slow_getfqdn_does_not_stall_event_loop_or_duplicate_lookups(self):
+        main._machine_hostnames.cache_clear()
+        self.addCleanup(main._machine_hostnames.cache_clear)
+        started = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        calls = 0
+
+        def slow_fqdn():
+            nonlocal calls
+            calls += 1
+            started.set()
+            release.wait(timeout=5)
+            return "MyBox.Corp.Example."
+
+        with (
+            mock.patch.object(main.socket, "getfqdn", slow_fqdn),
+            mock.patch.object(main.socket, "gethostname", lambda: "mybox"),
+        ):
+            # Loopback/IP requests don't need reverse DNS at all.
+            resp = await asyncio.wait_for(
+                self.client.post("/api/control", json={}), timeout=2.0
+            )
+            self.assertEqual(resp.status, 400)
+            self.assertEqual(calls, 0)
+
+            # Two concurrent requests that need FQDN share one worker-thread lookup.
+            fqdn_req = asyncio.create_task(
+                self.client.post(
+                    "/api/control",
+                    json={},
+                    headers={"Host": "mybox.corp.example:8080"},
+                )
+            )
+            evil_req = asyncio.create_task(
+                self.client.post(
+                    "/api/control",
+                    json={},
+                    headers={"Host": "evil.example:8080"},
+                )
+            )
+            for _ in range(200):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                self.fail("getfqdn was not called")
+
+            # While getfqdn is blocked, the event loop still serves other requests.
+            health = await asyncio.wait_for(self.client.get("/healthz"), timeout=1.0)
+            self.assertEqual(health.status, 200)
+            fast_post = await asyncio.wait_for(
+                self.client.post("/api/control", json={}), timeout=1.0
+            )
+            self.assertEqual(fast_post.status, 400)
+            self.assertFalse(fqdn_req.done())
+            self.assertFalse(evil_req.done())
+            self.assertEqual(calls, 1)
+
+            release.set()
+            fqdn_resp, evil_resp = await asyncio.wait_for(
+                asyncio.gather(fqdn_req, evil_req), timeout=2.0
+            )
+            self.assertEqual(fqdn_resp.status, 400)
+            self.assertEqual(evil_resp.status, 403)
+            self.assertEqual(calls, 1)
+
+            # Subsequent lookups hit the cache without re-running getfqdn.
+            cached_resp = await asyncio.wait_for(
+                self.client.post(
+                    "/api/control",
+                    json={},
+                    headers={"Host": "mybox.corp.example:8080"},
+                ),
+                timeout=1.0,
+            )
+            self.assertEqual(cached_resp.status, 400)
+            self.assertEqual(calls, 1)
+
     async def test_static_files_revalidate(self):
         resp = await self.client.get("/frontend/script.js")
         self.assertEqual(resp.status, 200)
@@ -2026,6 +2105,61 @@ class MainAsyncTest(unittest.IsolatedAsyncioTestCase):
             os.kill(os.getpid(), signal.SIGTERM)
             await asyncio.wait_for(server, timeout=10)
         self.gateway.terminate.assert_called_once()
+
+    async def test_main_async_warms_machine_hostnames_without_blocking_startup(self):
+        main._machine_hostnames.cache_clear()
+        self.addCleanup(main._machine_hostnames.cache_clear)
+        started = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def slow_fqdn():
+            started.set()
+            release.wait(timeout=5)
+            return "warmed.example"
+
+        with socket.socket() as probe:
+            probe.bind(("", 0))
+            port = probe.getsockname()[1]
+        with (
+            mock.patch.dict("os.environ", {"PORT": str(port)}),
+            mock.patch.object(main.socket, "getfqdn", slow_fqdn),
+        ):
+            server = asyncio.create_task(main.main_async())
+            try:
+                async with aiohttp.ClientSession() as session:
+                    for _ in range(100):
+                        try:
+                            async with session.get(
+                                f"http://127.0.0.1:{port}/healthz"
+                            ) as resp:
+                                self.assertEqual(resp.status, 200)
+                                break
+                        except aiohttp.ClientConnectionError:
+                            self.assertFalse(server.done())
+                            await asyncio.sleep(0.05)
+                    else:
+                        self.fail("server didn't start")
+                for _ in range(200):
+                    if started.is_set():
+                        break
+                    await asyncio.sleep(0.01)
+                else:
+                    self.fail("warmup did not start getfqdn")
+                self.assertEqual(main._machine_hostnames.cache_info().currsize, 0)
+                release.set()
+                for _ in range(200):
+                    if main._machine_hostnames.cache_info().currsize:
+                        break
+                    await asyncio.sleep(0.01)
+                else:
+                    self.fail("warmup did not populate _machine_hostnames cache")
+                self.assertIn("warmed.example", main._machine_hostnames())
+            finally:
+                release.set()
+                if not server.done():
+                    os.kill(os.getpid(), signal.SIGTERM)
+                await asyncio.wait_for(server, timeout=10)
 
     async def _bound_addresses(self, k_service=None):
         """Starts main_async, returns what it listens on, and stops it."""

@@ -719,11 +719,49 @@ async def revalidate_static_files(request: web.Request, handler):
     return response
 
 
+_machine_hostnames_task: asyncio.Task[frozenset[str]] | None = None
+
+
 @functools.cache
 def _machine_hostnames() -> frozenset[str]:
     return frozenset(
-        {"localhost", socket.gethostname().lower(), socket.getfqdn().lower()}
+        name
+        for name in (
+            "localhost",
+            _normalize_hostname(socket.gethostname()),
+            _normalize_hostname(socket.getfqdn()),
+        )
+        if name
     )
+
+
+def _on_machine_hostnames_done(task: asyncio.Task[frozenset[str]]) -> None:
+    global _machine_hostnames_task
+    if _machine_hostnames_task is task:
+        _machine_hostnames_task = None
+    if not task.cancelled():
+        exc = task.exception()
+        if exc is not None:
+            logging.warning("Machine hostname lookup failed: %s", exc)
+
+
+def _ensure_machine_hostnames_task() -> asyncio.Task[frozenset[str]]:
+    """Starts one shared worker-thread lookup for _machine_hostnames()."""
+    global _machine_hostnames_task
+    loop = asyncio.get_running_loop()
+    task = _machine_hostnames_task
+    if task is None or task.done() or task.get_loop() is not loop:
+        task = loop.create_task(asyncio.to_thread(_machine_hostnames))
+        _machine_hostnames_task = task
+        task.add_done_callback(_on_machine_hostnames_done)
+    return task
+
+
+async def _get_machine_hostnames() -> frozenset[str]:
+    """Returns _machine_hostnames() without blocking the event loop."""
+    if _machine_hostnames.cache_info().currsize:
+        return _machine_hostnames()
+    return await asyncio.shield(_ensure_machine_hostnames_task())
 
 
 def _normalize_hostname(hostname: str | None) -> str:
@@ -811,26 +849,51 @@ def is_explicitly_allowed_origin(origin: str) -> bool:
     return False
 
 
-def is_allowed_host(hostname: str | None) -> bool:
-    """Whether browsers may reach this server under `hostname`.
-
-    Checking Host defeats DNS rebinding: a page on evil.example whose DNS
-    points at this server sends Host: evil.example, which isn't allowed.
-    """
-    hostname = _normalize_hostname(hostname)
+def _check_allowed_host_fast(hostname: str) -> bool | None:
+    """Checks rules that need no DNS lookup; returns None if FQDN is needed."""
     if not hostname:
         return False
     extra = explicitly_allowed_hosts()
     if "*" in extra or hostname in extra:
         return True
-    if hostname in _machine_hostnames() or hostname.endswith(".localhost"):
+    if hostname == "localhost" or hostname.endswith(".localhost"):
         return True
     try:
         ipaddress.ip_address(hostname)
         return True  # DNS rebinding needs a domain name.
     except ValueError:
         pass
-    return bool(os.environ.get("K_SERVICE")) and hostname.endswith(".run.app")
+    if os.environ.get("K_SERVICE") and hostname.endswith(".run.app"):
+        return True
+    if hostname == _normalize_hostname(socket.gethostname()):
+        return True
+    return None
+
+
+def is_allowed_host(hostname: str | None) -> bool:
+    """Whether browsers may reach this server under `hostname`.
+
+    Checking Host defeats DNS rebinding: a page on evil.example whose DNS
+    points at this server sends Host: evil.example, which isn't allowed.
+    """
+    normalized = _normalize_hostname(hostname)
+    fast = _check_allowed_host_fast(normalized)
+    if fast is not None:
+        return fast
+    return normalized in _machine_hostnames()
+
+
+async def _is_allowed_host(hostname: str | None) -> bool:
+    """Async counterpart to is_allowed_host() for request middleware.
+
+    Resolves socket.getfqdn() in a worker thread when needed so a slow reverse
+    DNS resolver cannot stall the event loop.
+    """
+    normalized = _normalize_hostname(hostname)
+    fast = _check_allowed_host_fast(normalized)
+    if fast is not None:
+        return fast
+    return normalized in await _get_machine_hostnames()
 
 
 @web.middleware
@@ -851,7 +914,7 @@ async def reject_cross_origin(request: web.Request, handler):
             host = urllib.parse.urlsplit("//" + request.host).hostname
         except ValueError:  # e.g. an unclosed IPv6 bracket
             return web.Response(text="Invalid Host header", status=400)
-        if not is_allowed_host(host):
+        if not await _is_allowed_host(host):
             # %r: the path (percent-decoded) and headers come from the client,
             # and a newline or terminal escape in them could forge log lines.
             logging.warning(
@@ -931,6 +994,7 @@ async def main_async():
     logging.set_verbosity(logging.DEBUG if DEBUG.value else logging.INFO)
     proxy_proc = None
     runner = None
+    warmup_hostnames = None
     # Everything after the gateway starts is inside the try, so a failed start
     # (e.g. the port is in use) doesn't leave the gateway running.
     try:
@@ -963,6 +1027,10 @@ async def main_async():
             project_id(),
             ", ".join(ALLOWED_HOST_SUFFIXES.value),
         )
+        # Warm the machine FQDN cache in a worker thread so a slow reverse DNS
+        # resolver doesn't delay startup or block the event loop on requests.
+        if not _machine_hostnames.cache_info().currsize:
+            warmup_hostnames = _ensure_machine_hostnames_task()
         # Fetch a token now so the first session doesn't wait for it (seconds
         # when it comes from the gcloud fallback). Failures are retried per
         # session.
@@ -996,6 +1064,12 @@ async def main_async():
             if runner is not None:
                 await runner.cleanup()
         finally:
+            if warmup_hostnames is not None and not warmup_hostnames.done():
+                warmup_hostnames.cancel()
+                try:
+                    await warmup_hostnames
+                except (asyncio.CancelledError, Exception):
+                    pass
             if proxy_proc is not None and proxy_proc.poll() is None:
                 proxy_proc.terminate()
 
