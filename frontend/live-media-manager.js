@@ -1084,7 +1084,7 @@ class G3RtcWebRtcManager {
         this.remoteStream = null;
         this.micStream = null;
         this.micGeneration = 0;
-        // Called by close(), which drops the senders; see startMicrophone().
+        // Called by close(), which drops the senders; see _replaceTrack().
         /** @type {Set<() => void>} */
         this.onSendersDropped = new Set();
         this.videoTrack = null;
@@ -1177,11 +1177,11 @@ class G3RtcWebRtcManager {
 
         const micTrack = this.micStream && this.micStream.getAudioTracks()[0];
         if (micTrack && micTrack.readyState === "live") {
-            await sendAudioTransceiver.sender.replaceTrack(micTrack);
+            await this._replaceTrack(sendAudioTransceiver.sender, micTrack);
             ensureOpen();
         }
         if (this.videoTrack && this.videoTrack.readyState === "live") {
-            await sendVideoTransceiver.sender.replaceTrack(this.videoTrack);
+            await this._replaceTrack(sendVideoTransceiver.sender, this.videoTrack);
             ensureOpen();
         }
 
@@ -1317,18 +1317,27 @@ class G3RtcWebRtcManager {
         });
         const audioTrack = this.micStream.getAudioTracks()[0] || null;
         if (this.audioSender && audioTrack) {
-            // Firefox never settles a replaceTrack() that is pending when the
-            // connection closes (e.g. a resume renegotiating), which would leave
-            // the caller ("Start speaking") waiting for good. The next connection
-            // sends micStream anyway, so stop waiting then.
-            let markDropped = () => {};
-            const dropped = new Promise((resolve) => (markDropped = () => resolve(undefined)));
-            this.onSendersDropped.add(markDropped);
-            try {
-                await Promise.race([this.audioSender.replaceTrack(audioTrack), dropped]);
-            } finally {
-                this.onSendersDropped.delete(markDropped);
-            }
+            await this._replaceTrack(this.audioSender, audioTrack);
+        }
+    }
+
+    /**
+     * Replaces a sender's track, stopping early if close() drops the senders.
+     * Firefox never settles a replaceTrack() that is pending when pc.close()
+     * runs (e.g. a resume renegotiating), which would leave callers like
+     * "Start speaking", Camera, or Screen share waiting for good. The next
+     * connection sends micStream / videoTrack anyway.
+     * @param {RTCRtpSender} sender
+     * @param {MediaStreamTrack | null} track
+     */
+    async _replaceTrack(sender, track) {
+        let markDropped = () => {};
+        const dropped = new Promise((resolve) => (markDropped = () => resolve(undefined)));
+        this.onSendersDropped.add(markDropped);
+        try {
+            await Promise.race([sender.replaceTrack(track), dropped]);
+        } finally {
+            this.onSendersDropped.delete(markDropped);
         }
     }
 
@@ -1348,7 +1357,7 @@ class G3RtcWebRtcManager {
         // Remembered so a renegotiated session (resumption) keeps sending it.
         this.videoTrack = stream.getVideoTracks()[0] || null;
         if (this.videoSender) {
-            await this.videoSender.replaceTrack(this.videoTrack);
+            await this._replaceTrack(this.videoSender, this.videoTrack);
         }
     }
 

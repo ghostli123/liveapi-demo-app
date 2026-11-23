@@ -148,6 +148,20 @@ test("startMicrophone returns when the connection closes during its replaceTrack
     assert.equal(requests[0].track.readyState, "live");
 });
 
+test("attachVideoStream returns when the connection closes during its replaceTrack()", async () => {
+    const { manager } = webRtcManagerWithPendingMic();
+    // Firefox never settles a videoSender.replaceTrack() that is pending when pc.close() runs.
+    manager.videoSender = { replaceTrack: () => new Promise(() => {}) };
+    const track = fakeTrack();
+    const attaching = manager.attachVideoStream({ getVideoTracks: () => [track] });
+    await settle();
+    manager.close({ keepLocalMedia: true }); // A resume renegotiating.
+    const outcome = await Promise.race([attaching.then(() => "returned"), settle().then(() => "pending")]);
+    assert.equal(outcome, "returned");
+    assert.equal(manager.videoTrack, track); // The next connection sends it.
+    assert.equal(track.readyState, "live");
+});
+
 test("a microphone that ends on its own is reported; a replaced one isn't", async () => {
     const { manager, requests } = webRtcManagerWithPendingMic();
     let ended = 0;
@@ -1670,6 +1684,20 @@ test("close() while initiateSession sends the mic ends it with the closed error 
     releaseAll();
     const error = await offering;
     assert.equal(error.message, "The WebRTC session was closed.");
+    assert.equal(manager.remoteStream, null);
+});
+
+test("close() while initiateSession sends media ends it even if replaceTrack() never settles", async () => {
+    const { manager } = webRtcManagerWithHeldReplaceTrack();
+    // Firefox leaves replaceTrack() unsettled after pc.close(); do not call releaseAll().
+    const offering = manager.initiateSession().catch((error) => error);
+    await settle();
+    manager.close({ keepLocalMedia: true });
+    const outcome = await Promise.race([
+        offering.then((error) => error?.message || "resolved"),
+        settle().then(() => "pending"),
+    ]);
+    assert.equal(outcome, "The WebRTC session was closed.");
     assert.equal(manager.remoteStream, null);
 });
 
