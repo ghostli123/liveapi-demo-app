@@ -1004,12 +1004,20 @@ async def main_async():
                 COMMON_BAG_PROXY_PAR,
                 COMMON_BAG_WS_PORT.value,
             )
-            proxy_proc = subprocess.Popen(
-                [
+            try:
+                proxy_proc = subprocess.Popen(
+                    [
+                        COMMON_BAG_PROXY_PAR,
+                        f"--port={COMMON_BAG_WS_PORT.value}",
+                    ]
+                )
+            except OSError as e:
+                logging.warning(
+                    "Could not start Common BAG Stubby gateway (%s): %s; "
+                    "continuing without it",
                     COMMON_BAG_PROXY_PAR,
-                    f"--port={COMMON_BAG_WS_PORT.value}",
-                ]
-            )
+                    e,
+                )
 
         app = await create_app()
         port = int(os.environ.get("PORT", 8080))

@@ -2059,9 +2059,11 @@ class MainAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(gateway.close)
         self.gateway = mock.Mock(spec=subprocess.Popen)
         self.gateway.poll.return_value = None
-        popen = mock.patch.object(main.subprocess, "Popen", return_value=self.gateway)
-        self.popen = popen.start()
-        self.addCleanup(popen.stop)
+        self._popen_patcher = mock.patch.object(
+            main.subprocess, "Popen", return_value=self.gateway
+        )
+        self.popen = self._popen_patcher.start()
+        self.addCleanup(self._popen_patcher.stop)
         for patcher in [
             mock.patch.object(main, "COMMON_BAG_PROXY_PAR", gateway.name),
             mock.patch.object(
@@ -2105,6 +2107,61 @@ class MainAsyncTest(unittest.IsolatedAsyncioTestCase):
             os.kill(os.getpid(), signal.SIGTERM)
             await asyncio.wait_for(server, timeout=10)
         self.gateway.terminate.assert_called_once()
+
+    async def _assert_starts_without_gateway(self, gateway_path: str) -> list[str]:
+        """Runs main_async with the real Popen against a failing gateway file."""
+        self._popen_patcher.stop()
+        with socket.socket() as probe:
+            probe.bind(("", 0))
+            port = probe.getsockname()[1]
+        with (
+            mock.patch.object(main, "COMMON_BAG_PROXY_PAR", gateway_path),
+            mock.patch.dict("os.environ", {"PORT": str(port)}),
+            self.assertLogs("absl", level="WARNING") as logs,
+        ):
+            server = asyncio.create_task(main.main_async())
+            try:
+                async with aiohttp.ClientSession() as session:
+                    for _ in range(100):
+                        try:
+                            async with session.get(
+                                f"http://127.0.0.1:{port}/healthz"
+                            ) as resp:
+                                self.assertEqual(resp.status, 200)
+                                break
+                        except aiohttp.ClientConnectionError:
+                            if server.done():
+                                await server
+                            await asyncio.sleep(0.05)
+                    else:
+                        self.fail("server didn't start")
+            finally:
+                if not server.done():
+                    os.kill(os.getpid(), signal.SIGTERM)
+                await asyncio.wait_for(server, timeout=10)
+        return logs.output
+
+    async def test_non_executable_gateway_logs_warning_and_continues(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gateway_path = os.path.join(tmpdir, "common_bag_ws_proxy.par")
+            with open(gateway_path, "wb") as f:
+                f.write(b"#!/bin/sh\nexit 0\n")
+            os.chmod(gateway_path, 0o644)
+            warnings = await self._assert_starts_without_gateway(gateway_path)
+        joined = "\n".join(warnings)
+        self.assertIn(gateway_path, joined)
+        self.assertIn("continuing without it", joined)
+
+    async def test_broken_gateway_shebang_logs_warning_and_continues(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gateway_path = os.path.join(tmpdir, "common_bag_ws_proxy.par")
+            with open(gateway_path, "wb") as f:
+                f.write(b"#!/nonexistent/interpreter/for/test\n")
+            os.chmod(gateway_path, 0o755)
+            warnings = await self._assert_starts_without_gateway(gateway_path)
+        joined = "\n".join(warnings)
+        self.assertIn(gateway_path, joined)
+        self.assertIn("continuing without it", joined)
 
     async def test_main_async_warms_machine_hostnames_without_blocking_startup(self):
         main._machine_hostnames.cache_clear()
