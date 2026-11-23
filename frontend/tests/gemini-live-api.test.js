@@ -45,6 +45,25 @@ const { GeminiLiveAPI, GeminiLiveResponseMessage } = loadScript(
 const plain = (value) => JSON.parse(JSON.stringify(value));
 const types = (events) => plain(events.map((e) => e.type));
 
+test("session IDs are UUIDs even where crypto.randomUUID is missing", () => {
+    // Plain http from another machine isn't a secure context, so browsers
+    // leave out crypto.randomUUID; getRandomValues is always there. Calling
+    // randomUUID at construction used to stop the whole page from loading.
+    const insecure = loadScript("gemini-live-api.js", ["GeminiLiveAPI", "randomId"], {
+        crypto: { getRandomValues: (array) => globalThis.crypto.getRandomValues(array) },
+    });
+    const uuidV4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+    const api = new insecure.GeminiLiveAPI("ws://host/ws", "/api/control", "/api/post_endpoint");
+    assert.match(api.sessionId, uuidV4);
+    const ids = new Set(Array.from({ length: 100 }, () => insecure.randomId()));
+    assert.equal(ids.size, 100);
+    for (const id of ids) assert.match(id, uuidV4);
+
+    // Where randomUUID exists, it's used as is.
+    const secure = loadScript("gemini-live-api.js", ["randomId"], { crypto: { randomUUID: () => "from-randomUUID" } });
+    assert.equal(secure.randomId(), "from-randomUUID");
+});
+
 test("parseAll returns every event in a message, in order", () => {
     const events = GeminiLiveResponseMessage.parseAll({
         serverContent: {

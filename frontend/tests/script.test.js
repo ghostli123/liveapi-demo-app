@@ -1171,6 +1171,58 @@ test("a microphone that isn't available says so, though Chrome's error has no me
     assert.equal(dialogText(), "Could not start the microphone: NotReadableError");
 });
 
+test("an insecure page says why at load, and why the camera can't start", async () => {
+    // Plain http from another machine: browsers hide navigator.mediaDevices,
+    // so getUserMedia fails with a TypeError about undefined.
+    const loadHandlers = [];
+    const window = {
+        location: { protocol: "http:", host: "192.168.1.5:8080" },
+        isSecureContext: false,
+        addEventListener: (type, handler) => type === "load" && loadHandlers.push(handler),
+    };
+    const { context, element } = loadApp({
+        window,
+        console: { log() {}, warn() {}, error() {} },
+        navigator: {},
+        requestAnimationFrame: () => 0,
+        LiveVideoManager: class extends FakeFrameSource {
+            stopWebcam() {}
+            async startWebcam() {
+                throw new TypeError("Cannot read properties of undefined (reading 'getUserMedia')");
+            }
+        },
+        LiveScreenManager: class extends FakeFrameSource {
+            stopCapture() {}
+        },
+    });
+    const dialogText = () => element("dialogMessage").textContent;
+    let shown = 0;
+    element("dialog").show = () => shown++;
+
+    assert.equal(loadHandlers.length, 1);
+    loadHandlers[0]();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(shown, 1);
+    assert.match(dialogText(), /^This page was opened over plain http from another machine/);
+    assert.match(dialogText(), /HTTPS, or at http:\/\/localhost/);
+
+    await context.startCameraCapture();
+    assert.equal(
+        dialogText(),
+        "Could not start the camera: browsers allow it only on pages opened over HTTPS or at http://localhost"
+    );
+
+    // A secure page (HTTPS or localhost) shows nothing at load.
+    window.isSecureContext = true;
+    loadHandlers.length = 0;
+    const secure = loadApp({ window, console: { log() {}, warn() {}, error() {} }, navigator: {}, requestAnimationFrame: () => 0 });
+    let secureShown = 0;
+    secure.element("dialog").show = () => secureShown++;
+    loadHandlers[0]();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(secureShown, 0);
+});
+
 test("camera and screen errors without a message name the error", async () => {
     let cameraError = null;
     let screenError = null;

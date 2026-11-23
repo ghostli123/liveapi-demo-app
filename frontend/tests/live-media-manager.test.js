@@ -576,7 +576,7 @@ test("a WebRTC renegotiation keeps the avatar muted if the user muted it", async
         document: { getElementById: () => null },
         RTCPeerConnection: FakePeerConnection,
         MediaStream: class { addTrack() {} },
-        crypto: { randomUUID: () => "id" },
+        randomId: () => "id",
         setTimeout: () => ({}),
         clearTimeout: () => {},
         setInterval: () => ({}),
@@ -626,7 +626,7 @@ async function webRtcSessionWithManualTimers() {
         document: { getElementById: () => null },
         RTCPeerConnection: FakePeerConnection,
         MediaStream: class { addTrack() {} },
-        crypto: { randomUUID: () => "id" },
+        randomId: () => "id",
         setTimeout: (fn, ms) => {
             const id = {};
             timeouts.set(id, { fn, ms });
@@ -1044,8 +1044,9 @@ test("a full buffer while playing trims behind the playhead and leaves it alone"
 
 // A LiveAudioOutputManager on fake AudioContexts. `fake.failNextLoad` makes the
 // next addModule() reject (`fake.failAllLoads` every one); like Chrome and
-// Firefox, a context whose load failed keeps rejecting. `fake.now` is the
-// script's performance.now(), `fake.wallNow` its Date.now().
+// Firefox, a context whose load failed keeps rejecting. `fake.noWorklet` leaves
+// out `audioWorklet`, as on an insecure page. `fake.now` is the script's
+// performance.now(), `fake.wallNow` its Date.now().
 function audioOutputWithFakeContexts() {
     const fake = {
         contexts: [],
@@ -1053,6 +1054,7 @@ function audioOutputWithFakeContexts() {
         failNextLoad: false,
         failAllLoads: false,
         refuseContexts: false,
+        noWorklet: false,
         errors: [],
         now: 0,
         wallNow: 0,
@@ -1063,16 +1065,18 @@ function audioOutputWithFakeContexts() {
             this.state = "suspended";
             this.destination = {};
             let failed = false;
-            this.audioWorklet = {
-                addModule: async () => {
-                    fake.loads++;
-                    if (fake.failNextLoad || fake.failAllLoads) {
-                        fake.failNextLoad = false;
-                        failed = true;
-                    }
-                    if (failed) throw new Error("503");
-                },
-            };
+            this.audioWorklet = fake.noWorklet
+                ? undefined
+                : {
+                      addModule: async () => {
+                          fake.loads++;
+                          if (fake.failNextLoad || fake.failAllLoads) {
+                              fake.failNextLoad = false;
+                              failed = true;
+                          }
+                          if (failed) throw new Error("503");
+                      },
+                  };
             fake.contexts.push(this);
         }
         resume() {
@@ -1128,6 +1132,28 @@ test("a failed audio worklet load is retried on a new context", async () => {
         assert.equal(manager.workletNode.context, fake.contexts[1]);
         assert.equal(manager.workletNode.posted.length, 1);
         assert.equal(fake.contexts[1].state, "running");
+        assert.deepEqual(unhandled, []);
+    } finally {
+        process.off("unhandledRejection", onUnhandled);
+    }
+});
+
+test("a page without AudioWorklet rejects instead of throwing, and closes the context", async () => {
+    const { manager, fake } = audioOutputWithFakeContexts();
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+        // Plain http from another machine: browsers leave out audioWorklet.
+        fake.noWorklet = true;
+        manager.resume(); // The Connect click; a throw here stopped Connect.
+        manager.playAudioChunk(AUDIO_CHUNK);
+        await settle();
+        assert.equal(fake.contexts[0].state, "closed");
+        assert.equal(manager.ready, null);
+        assert.ok(fake.errors.includes("Could not load the audio player:"));
+        await assert.rejects(manager.initializeAudioContext(), /AudioWorklet is unavailable/);
+        assert.equal(fake.contexts.length, 1); // Backing off, not a context per chunk.
         assert.deepEqual(unhandled, []);
     } finally {
         process.off("unhandledRejection", onUnhandled);
@@ -1486,7 +1512,7 @@ test("the WebRTC state reads negotiating while a session is set up, not closed",
         document: { getElementById: (id) => (id === "webrtc-state" ? stateEl : null) },
         RTCPeerConnection: FakePeerConnection,
         MediaStream: class { addTrack() {} },
-        crypto: { randomUUID: () => "id" },
+        randomId: () => "id",
         clearTimeout,
         clearInterval,
     });
@@ -1545,7 +1571,7 @@ function webRtcManagerWithHeldReplaceTrack() {
         document: { getElementById: () => null },
         RTCPeerConnection: FakePeerConnection,
         MediaStream: class { addTrack() {} },
-        crypto: { randomUUID: () => "id" },
+        randomId: () => "id",
         clearTimeout,
         clearInterval,
     });

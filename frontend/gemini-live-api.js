@@ -1,6 +1,6 @@
 // @ts-check
 /* global G3RtcWebRtcManager -- from live-media-manager.js (see index.html) */
-/* exported GeminiLiveAPI */
+/* exported GeminiLiveAPI, randomId */
 
 /**
  * One event from a Gemini Live API server message. A single server message can
@@ -163,6 +163,21 @@ function describeDuration(ms) {
 }
 
 /**
+ * A random v4 UUID. `crypto.randomUUID` exists only in secure contexts (HTTPS
+ * or localhost); over plain http from another machine the page builds one from
+ * `crypto.getRandomValues`, which every context has.
+ * @returns {string}
+ */
+function randomId() {
+    if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // Version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
  * Main Client API class for interacting with Gemini Live Realtime connections.
  * Manages WebSocket connections, HTTP backend control requests, tool declarations,
  * and real-time bandwidth statistics.
@@ -182,7 +197,7 @@ class GeminiLiveAPI {
         this.environment = "prod";
 
         // Session and Context State
-        this.sessionId = crypto.randomUUID();
+        this.sessionId = randomId();
         this.projectId = null;
         this.model = null;
         this.location = null;
@@ -545,7 +560,7 @@ class GeminiLiveAPI {
     async connect() {
         // A fresh ID per connection, so cleanup of the previous connection on
         // the backend can't remove this one.
-        this.sessionId = crypto.randomUUID();
+        this.sessionId = randomId();
         this.latestResumptionHandle = "";
         const attempt = ++this.connectAttempt;
         this.autoResumeTimes = [];
@@ -623,7 +638,7 @@ class GeminiLiveAPI {
 
         this.setResumption(true, handle);
         // A new session ID keeps the backend from mixing up the two connections.
-        const sessionId = crypto.randomUUID();
+        const sessionId = randomId();
         this.sessionId = sessionId;
         const attempt = ++this.connectAttempt;
         // Close the old connection while the backend prepares the new session.

@@ -355,9 +355,22 @@ function offersValue(element, value) {
     return !element.options || [...element.options].some((option) => option.value === value);
 }
 
+// Plain http from another machine (the server run with --host=0.0.0.0 and
+// opened at its LAN address) isn't a secure context: browsers hide the
+// microphone, camera and screen APIs and the AudioWorklet that plays audio.
+const INSECURE_PAGE_REASON = "browsers allow it only on pages opened over HTTPS or at http://localhost";
+const INSECURE_PAGE_MESSAGE =
+    "This page was opened over plain http from another machine, so the browser blocks the microphone, " +
+    "camera, screen sharing, and audio playback. Open it over HTTPS, or at http://localhost on the " +
+    "server's machine (for example through ssh -L 8080:localhost:8080 <server>).";
+
 // --- Page Load Event Initialization ---
 window.addEventListener("load", () => {
     console.log("Hello Gemini Realtime Demo!");
+
+    if (window.isSecureContext === false) {
+        customElements.whenDefined("md-dialog").then(() => AppUI.showModal(INSECURE_PAGE_MESSAGE));
+    }
 
     initDOMEventListeners();
     restoreSettings();
@@ -1376,8 +1389,11 @@ function showCameraState(on) {
  * Why a getUserMedia/getDisplayMedia call failed, for an error dialog. Chrome's
  * OverconstrainedError has an empty message; the only exact constraint the app
  * sets is the picked deviceId, so it means that device is gone (e.g. unplugged).
+ * On an insecure page navigator.mediaDevices is missing, so the error is a
+ * TypeError that says nothing useful.
  */
 function deviceErrorReason(err) {
+    if (window.isSecureContext === false) return INSECURE_PAGE_REASON;
     if (err && err.name === "OverconstrainedError") return "the selected device isn't available";
     return (err && (err.message || err.name)) || String(err);
 }

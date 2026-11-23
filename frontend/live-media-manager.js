@@ -1,4 +1,5 @@
 // @ts-check
+/* global randomId -- from gemini-live-api.js (see index.html) */
 /* exported LiveAudioOutputManager, LiveAudioInputManager, MicLevelMeter, LiveVideoManager,
    LiveScreenManager, LiveVideoOutputManager, G3RtcWebRtcManager, parseIntervalMs,
    AUDIO_INTERVAL_MS, VIDEO_INTERVAL_MS */
@@ -121,20 +122,23 @@ class LiveAudioOutputManager {
             this.backOff(failed);
             return failed;
         }
-        const ready = audioContext.audioWorklet
-            .addModule("/frontend/pcm-processor.js")
-            .then(() => {
-                const workletNode = new AudioWorkletNode(audioContext, "pcm-processor", {
-                    outputChannelCount: [1],
-                });
-                workletNode.onprocessorerror = (event) => this.processorFailed(workletNode, event);
-                workletNode.connect(audioContext.destination);
-                this.workletNode = workletNode;
-                this.startedAt = performance.now();
-                this.failed = null;
-                this.retryDelayMs = 0;
-                return workletNode;
+        // Browsers leave out audioWorklet on insecure pages (plain http from
+        // another machine); reject like a failed load rather than throw.
+        const loaded = audioContext.audioWorklet
+            ? audioContext.audioWorklet.addModule("/frontend/pcm-processor.js")
+            : Promise.reject(new Error("AudioWorklet is unavailable: the page needs HTTPS or localhost"));
+        const ready = loaded.then(() => {
+            const workletNode = new AudioWorkletNode(audioContext, "pcm-processor", {
+                outputChannelCount: [1],
             });
+            workletNode.onprocessorerror = (event) => this.processorFailed(workletNode, event);
+            workletNode.connect(audioContext.destination);
+            this.workletNode = workletNode;
+            this.startedAt = performance.now();
+            this.failed = null;
+            this.retryDelayMs = 0;
+            return workletNode;
+        });
         ready.catch((error) => {
             console.error("Could not load the audio player:", error);
             // Chrome and Firefox remember a failed module fetch per
@@ -1121,7 +1125,7 @@ class G3RtcWebRtcManager {
         this.dataChannel = pc.createDataChannel("g3rtc-media-stats");
 
         const transceiverToGroupId = new Map();
-        const sendStreamGroupId = crypto.randomUUID();
+        const sendStreamGroupId = randomId();
 
         const sendAudioTransceiver = pc.addTransceiver("audio", {
             direction: "sendonly",
@@ -1147,7 +1151,7 @@ class G3RtcWebRtcManager {
 
         const remoteStream = new MediaStream();
         this.remoteStream = remoteStream;
-        const recvGroupId = remoteStream.id || crypto.randomUUID();
+        const recvGroupId = remoteStream.id || randomId();
 
         const recvAudioTransceiver = pc.addTransceiver("audio", {
             direction: "recvonly",
