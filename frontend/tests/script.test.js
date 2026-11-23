@@ -1041,6 +1041,16 @@ test("a failed capture worklet turns the mic off and says why; a failed player i
     assert.deepEqual(chat, ["The audio player stopped."]);
 });
 
+test("the avatar video recording limit is reported in the chat", () => {
+    const { context, element } = loadSession();
+    const chat = [];
+    element("text-chat").appendChild = (line) => chat.push([line.className, line.textContent]);
+    context.AppState.liveVideoOutputManager.onRecordingLimit("Stopped saving the avatar video at 512 MB.");
+    assert.equal(chat.length, 1);
+    assert.match(chat[0][0], /chat-system/);
+    assert.equal(chat[0][1], "Stopped saving the avatar video at 512 MB.");
+});
+
 test("switching to a microphone that fails mid-turn ends the turn and turns the mic off", async () => {
     const { context, element, api, mic, dialogText } = loadSession();
     api.isSetupComplete = true;

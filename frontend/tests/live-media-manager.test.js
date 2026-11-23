@@ -875,6 +875,66 @@ test("an unsupported codec is reported once and chunks aren't queued", () => {
     assert.equal(manager.recordedChunks.length, 100);
 });
 
+test("saving the avatar video stops at maxRecordedBytes and keeps what was recorded", async () => {
+    const { manager, fake } = videoOutputWithFakeMediaSource();
+    const chunkBytes = Buffer.from(VIDEO_CHUNK, "base64").length;
+    const limits = [];
+    manager.onRecordingLimit = (message) => limits.push(message);
+    manager.recordingEnabled = true;
+    manager.maxRecordedBytes = 3 * chunkBytes;
+    manager.initMediaSource();
+    fake.mediaSources[0].open();
+    for (let i = 0; i < 3; i++) manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.deepEqual(limits, []);
+    assert.equal(manager.recordedChunks.length, 3);
+
+    // The chunk that would pass the cap ends the recording; later ones aren't kept.
+    for (let i = 0; i < 5; i++) manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(limits.length, 1);
+    assert.match(limits[0], /Stopped saving the avatar video at 0 MB/);
+    assert.equal(manager.recordedChunks.length, 0);
+    assert.equal(manager.recordedBytes, 3 * chunkBytes);
+    // Playback isn't affected.
+    assert.equal(fake.mediaSources[0].sourceBuffer.appended.length, 8);
+
+    // A resume starts a new stream; the cap counts the whole session, so it stays stopped.
+    manager.initMediaSource();
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(manager.recordedChunks.length, 0);
+    assert.equal(limits.length, 1);
+    const recordings = manager.getRecordings();
+    assert.equal(recordings.length, 1);
+    assert.equal(recordings[0].size, 3 * chunkBytes);
+    assert.equal(await recordings[0].text(), "fake mp4 fragment".repeat(3));
+
+    // Disconnect saves and clears the recordings; the next session records again.
+    manager.clearRecordedChunks();
+    manager.initMediaSource();
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(manager.recordedChunks.length, 1);
+    assert.equal(manager.recordedBytes, chunkBytes);
+});
+
+test("the recording cap counts streams finished earlier in the session", () => {
+    const { manager } = videoOutputWithFakeMediaSource({ codecSupported: false });
+    const chunkBytes = Buffer.from(VIDEO_CHUNK, "base64").length;
+    const limits = [];
+    manager.onRecordingLimit = (message) => limits.push(message);
+    manager.recordingEnabled = true;
+    manager.maxRecordedBytes = 3 * chunkBytes;
+    manager.initMediaSource();
+    for (let i = 0; i < 2; i++) manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    manager.initMediaSource(); // A resume finishes the first part.
+    for (let i = 0; i < 2; i++) manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(limits.length, 1);
+    assert.deepEqual(Array.from(manager.getRecordings(), (blob) => blob.size), [2 * chunkBytes, chunkBytes]);
+});
+
+test("the recording cap defaults to 512 MiB", () => {
+    const { manager } = videoOutputWithFakeMediaSource();
+    assert.equal(manager.maxRecordedBytes, 512 * 1024 * 1024);
+});
+
 test("an unsupported codec isn't reported for streams without MP4 chunks", () => {
     const { manager, video, errors } = videoOutputWithFakeMediaSource({ codecSupported: false });
     manager.initMediaSource(); // Every WebSocket session, avatar or not.

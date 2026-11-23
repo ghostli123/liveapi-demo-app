@@ -195,6 +195,7 @@ function initApplicationManagers() {
     };
     AppState.liveVideoOutputManager.onAutoplayBlocked = showAutoplayBlocked;
     AppState.liveVideoOutputManager.onPlaybackError = (message) => newErrorMessage(message);
+    AppState.liveVideoOutputManager.onRecordingLimit = (message) => newSystemMessage(message);
     AppState.liveAudioOutputManager.onPlayerError = (message) => newErrorMessage(message);
     if (AppState.geminiLiveApi.webRtcManager) {
         AppState.geminiLiveApi.webRtcManager.onAutoplayBlocked = showAutoplayBlocked;

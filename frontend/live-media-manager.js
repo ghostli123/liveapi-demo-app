@@ -666,6 +666,10 @@ const VIDEO_UNSUPPORTED_MESSAGE =
 const VIDEO_STOPPED_MESSAGE =
     "The avatar video stopped after a playback error. Audio and transcripts still work; " +
     "reconnect to restart the video.";
+// "Save avatar video" keeps the video in memory until Disconnect, about 1 MB
+// per second even while the avatar is idle, so it stops at this size (about
+// 8-10 minutes) rather than let a long session run the tab out of memory.
+const MAX_RECORDED_VIDEO_BYTES = 512 * 1024 * 1024;
 
 /** @returns {HTMLVideoElement | null} The avatar's <video>, shared by both transports. */
 function getAvatarVideoElement() {
@@ -691,6 +695,17 @@ class LiveVideoOutputManager {
         this.recordingEnabled = false;
         this.recordedChunks = [];
         this.finishedRecordings = [];
+        // Bytes in recordedChunks and finishedRecordings, which both stay in
+        // memory until clearRecordedChunks().
+        this.recordedBytes = 0;
+        this.maxRecordedBytes = MAX_RECORDED_VIDEO_BYTES;
+        // Set once recordedBytes would pass maxRecordedBytes; later chunks
+        // aren't recorded until clearRecordedChunks().
+        this.recordingLimitReached = false;
+        // Called once when recording stops at maxRecordedBytes, with a message
+        // for the user.
+        /** @type {(message: string) => void} */
+        this.onRecordingLimit = () => {};
         this.videoListenersAttached = false;
         // Called when the browser refuses to start playback without a click.
         this.onAutoplayBlocked = () => {};
@@ -820,9 +835,7 @@ class LiveVideoOutputManager {
         }
         const arrayBuffer = LiveVideoOutputManager.base64ToArrayBuffer(base64Chunk);
         // Recording is the user's choice and doesn't need the player.
-        if (this.recordingEnabled) {
-            this.recordedChunks.push(arrayBuffer);
-        }
+        if (this.recordingEnabled && !this.recordingLimitReached) this.recordChunk(arrayBuffer);
         if (this.playbackFailed) return;
         if (this.unplayableDetail) {
             this.failPlayback(this.unplayableDetail, VIDEO_UNSUPPORTED_MESSAGE);
@@ -954,6 +967,28 @@ class LiveVideoOutputManager {
         return this.trimBuffer(VIDEO_BACK_BUFFER_S);
     }
 
+    /**
+     * Adds a chunk to the current stream's recording, or stops recording if it
+     * would take the recorded video past maxRecordedBytes.
+     * @param {ArrayBuffer} chunk
+     */
+    recordChunk(chunk) {
+        if (this.recordedBytes + chunk.byteLength > this.maxRecordedBytes) {
+            this.recordingLimitReached = true;
+            // Ends the file like Disconnect does, between two chunks; this
+            // stream's later chunks are all left out.
+            this.finishRecording();
+            const megabytes = Math.round(this.maxRecordedBytes / (1024 * 1024));
+            this.onRecordingLimit(
+                `Stopped saving the avatar video at ${megabytes} MB to keep the page from running out of ` +
+                    "memory. The video so far is saved when you disconnect."
+            );
+            return;
+        }
+        this.recordedChunks.push(chunk);
+        this.recordedBytes += chunk.byteLength;
+    }
+
     /** Closes the current stream's recording; each stream is its own MP4. */
     finishRecording() {
         if (this.recordedChunks.length > 0) {
@@ -971,6 +1006,8 @@ class LiveVideoOutputManager {
     clearRecordedChunks() {
         this.recordedChunks = [];
         this.finishedRecordings = [];
+        this.recordedBytes = 0;
+        this.recordingLimitReached = false;
     }
 
     resetPlayer() {
