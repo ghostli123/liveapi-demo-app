@@ -969,7 +969,9 @@ function handleReceiveResponse(messageResponse) {
         case "VOICE_ACTIVITY":
             if (messageResponse.data === "ACTIVITY_START") {
                 markUserSpeechStart();
-                showHearingUser(true);
+                // A frame in flight at Mic off would bring the badge back after
+                // stopAudioInput() hid it, with no ACTIVITY_END to come over WebRTC.
+                showHearingUser(isMicOn());
             } else if (messageResponse.data === "ACTIVITY_END") {
                 markUserTurnEnd("end of speech");
                 showHearingUser(false);

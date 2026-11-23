@@ -809,10 +809,15 @@ test("'hearing you' clears when no ACTIVITY_END will come: Mic off, a GoAway res
     const start = () => context.handleReceiveResponse({ type: "VOICE_ACTIVITY", data: "ACTIVITY_START" });
 
     start();
+    assert.equal(hearing(), true);
     context.micBtnClick();
     assert.equal(hearing(), false);
+    start(); // Sent before the mic stopped: nothing will end it over WebRTC.
+    assert.equal(hearing(), false);
+    context.showMicState(true);
 
     start();
+    assert.equal(hearing(), true);
     api.goAwayAction = () => "resume";
     api.resume = async () => {};
     context.AppState.liveVideoOutputManager.initMediaSource = () => {};
@@ -820,6 +825,7 @@ test("'hearing you' clears when no ACTIVITY_END will come: Mic off, a GoAway res
     assert.equal(hearing(), false);
 
     start();
+    assert.equal(hearing(), true);
     reconnect(app);
     assert.equal(hearing(), false);
 });
