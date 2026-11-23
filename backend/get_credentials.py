@@ -223,6 +223,11 @@ def get_access_token() -> AccessToken:
         _lock.release()
 
 
+def cached_token() -> AccessToken | None:
+    """Returns the currently cached token without fetching, or None."""
+    return _cached_token
+
+
 def invalidate(token: AccessToken) -> bool:
     """Drops token from the cache if it is still cached; True if it was.
 
@@ -256,7 +261,31 @@ async def fetch_access_token(*, bounded: bool = True) -> AccessToken:
 
 
 class ChainCredentials(google.auth.credentials.Credentials):
-    """google-auth credentials backed by get_access_token(), for the genai client."""
+    """google-auth credentials backed by get_access_token(), for the genai client.
+
+    The genai client caches one instance for the process and checks `expired`
+    (and `token`) before each request. Keeping `expired` tied to the shared
+    cache lets `invalidate()` — from a Live API 1008/401 or a simulator 401 —
+    force the next request to refresh instead of re-sending the rejected token.
+    """
+
+    def _stale_in_cache(self) -> bool:
+        if self.token is None:
+            return True
+        cached = _cached_token
+        return cached is None or cached.token != self.token
+
+    @property
+    def expired(self) -> bool:
+        if self._stale_in_cache():
+            return True
+        return super().expired
+
+    @property
+    def token_state(self):
+        if self._stale_in_cache():
+            return google.auth.credentials.TokenState.INVALID
+        return super().token_state
 
     def refresh(self, request) -> None:
         del request  # Unused; get_access_token() picks its own transport.

@@ -447,8 +447,8 @@ async def handle_fr_post_request(request: web.Request):
                     genai.types.Part(text=query),
                 ]
                 try:
-                    response = await chat_session.fr_session.send_message(
-                        current_content
+                    response = await _send_simulator_message(
+                        chat_session.fr_session, current_content, session_id
                     )
                 except Exception as e:
                     logging.exception("Function response simulator request failed")
@@ -539,6 +539,62 @@ async def handle_control_request(request: web.Request):
             "idle_timeout_s": IDLE_TIMEOUT_S.value,
         }
     )
+
+
+async def _send_simulator_message(chat, content, session_id: str):
+    """Sends one simulator turn; on HTTP 401 drops the rejected token and retries once.
+
+    The genai client reuses one ChainCredentials instance across calls, so a
+    revoked token would fail every simulator call until it expires. Dropping it
+    from the shared cache forces ChainCredentials (and new Live API sessions)
+    to fetch a fresh token on the retry; if the sources hand back the same
+    token, the original 401 is raised instead of sending a duplicate request.
+    """
+    token_before = get_credentials.cached_token()
+    try:
+        return await chat.send_message(content)
+    except genai_errors.APIError as e:
+        if e.code != 401:
+            raise
+        # A call whose token was fetched inside send_message() had no cached
+        # token before the call; read the cache again to catch it too.
+        rejected = get_credentials.cached_token() or token_before
+        if rejected is None:
+            raise
+        # If another caller already replaced the cached token while this call
+        # was in flight, invalidate() is a no-op and fetch_access_token()
+        # immediately returns the replacement without refetching.
+        if token_before is not None and token_before.token != rejected.token:
+            logging.warning(
+                "Simulator rejected an earlier access token (HTTP 401) for session %s; "
+                "retrying with the newer cached token from %s",
+                session_id,
+                rejected.source,
+            )
+            return await chat.send_message(content)
+        get_credentials.invalidate(rejected)
+        logging.warning(
+            "Simulator rejected the access token from %s (HTTP 401) for session %s; "
+            "dropped it from the cache",
+            rejected.source,
+            session_id,
+        )
+        try:
+            replacement = await get_credentials.fetch_access_token()
+        except Exception as fetch_err:
+            logging.warning(
+                "No other access token for simulator (session %s): %s",
+                session_id,
+                fetch_err,
+            )
+            raise e from None
+        if replacement.token == rejected.token:
+            logging.warning(
+                "Token sources returned the rejected token again for simulator (session %s)",
+                session_id,
+            )
+            raise
+        return await chat.send_message(content)
 
 
 def _simulator_error(error: Exception) -> str:

@@ -258,6 +258,41 @@ class GetAccessTokenTest(unittest.TestCase):
         self.assertEqual(creds.token, "token-fake")
         self.assertIsNone(creds.expiry.tzinfo)
         self.assertTrue(creds.valid)
+        self.assertFalse(creds.expired)
+
+    def test_chain_credentials_follow_cache_invalidation(self):
+        fetch = mock.Mock(side_effect=[_token(60, "first"), _token(60, "second")])
+        self.use_sources(fetch)
+        creds = get_credentials.ChainCredentials()
+        creds.refresh(None)
+        self.assertEqual(creds.token, "token-first")
+        self.assertFalse(creds.expired)
+        self.assertTrue(creds.valid)
+
+        # Dropping the cached token (e.g. after a Live API 1008 or simulator
+        # 401) must mark ChainCredentials expired so google-genai refreshes.
+        cached = get_credentials._cached_token
+        assert cached is not None
+        self.assertTrue(get_credentials.invalidate(cached))
+        self.assertTrue(creds.expired)
+        self.assertFalse(creds.valid)
+        self.assertEqual(
+            creds.token_state,
+            get_credentials.google.auth.credentials.TokenState.INVALID,
+        )
+
+        creds.refresh(None)
+        self.assertEqual(creds.token, "token-second")
+        self.assertFalse(creds.expired)
+        self.assertTrue(creds.valid)
+
+        # A newer token cached by another caller also marks the old copy stale.
+        get_credentials._cached_token = _token(60, "third")
+        self.assertTrue(creds.expired)
+        self.assertFalse(creds.valid)
+        creds.refresh(None)
+        self.assertEqual(creds.token, "token-third")
+        self.assertEqual(fetch.call_count, 2)
 
 
 class FetchAccessTokenTest(unittest.IsolatedAsyncioTestCase):

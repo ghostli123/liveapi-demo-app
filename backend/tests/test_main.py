@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import concurrent.futures
+import datetime
 import hashlib
 import html.parser
 import json
@@ -21,6 +22,7 @@ from absl import flags
 from absl.testing import flagsaver
 import websockets
 
+import get_credentials
 import main
 import session_management
 import websocket_handler
@@ -674,6 +676,221 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         chat.messages.clear()
         self.assertEqual(await post(body), (200, {"response": '{"ok": true}'}))
         self.assertEqual([len(m) for m in chat.messages], [4])
+
+    async def test_fr_401_drops_rejected_token_and_retries_once(self):
+        # Mirrors google-genai's async_get_token_from_credentials check on
+        # ChainCredentials: it refreshes only when `expired` or `not token`.
+        creds = get_credentials.ChainCredentials()
+        expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+            hours=1
+        )
+        tokens = [
+            get_credentials.AccessToken("revoked-token", expiry, "gcloud"),
+            get_credentials.AccessToken("fresh-token", expiry, "gcloud"),
+        ]
+        fetch = mock.Mock(side_effect=tokens)
+        seen_tokens = []
+
+        class AuthCheckingChat:
+            async def send_message(self, parts):
+                del parts
+                if creds.expired or not creds.token:
+                    creds.refresh(None)
+                seen_tokens.append(creds.token)
+                if creds.token == "revoked-token":
+                    raise main.genai_errors.ClientError(
+                        401,
+                        {"error": {"code": 401, "status": "UNAUTHENTICATED"}},
+                    )
+                return mock.Mock(text='{"ok": true}')
+
+        self.enterContext(
+            mock.patch.object(get_credentials, "_SOURCES", (("gcloud", fetch),))
+        )
+        self.enterContext(mock.patch.object(get_credentials, "_cached_token", None))
+        self.enterContext(
+            mock.patch.object(
+                main, "initialize_gemini_chat_session", return_value=AuthCheckingChat()
+            )
+        )
+        # Prime both the shared cache and ChainCredentials with the revoked token.
+        creds.refresh(None)
+        self.assertEqual(creds.token, "revoked-token")
+
+        await self.connect_session("s25")
+        with self.assertLogs("absl", level="WARNING") as logs:
+            resp = await self.client.post(
+                "/api/post_endpoint",
+                json={
+                    "session_id": "s25",
+                    "objective": "fr_generate",
+                    "functionName": "f",
+                    "functionArgs": {},
+                },
+            )
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(await resp.json(), {"response": '{"ok": true}'})
+        self.assertEqual(seen_tokens, ["revoked-token", "fresh-token"])
+        self.assertEqual(fetch.call_count, 2)
+        cached = get_credentials.cached_token()
+        assert cached is not None
+        self.assertEqual(cached.token, "fresh-token")
+        output = "\n".join(logs.output)
+        self.assertIn("dropped it from the cache", output)
+        self.assertNotIn("revoked-token", output)
+        self.assertNotIn("fresh-token", output)
+
+    async def test_fr_401_does_not_retry_when_sources_return_same_token(self):
+        creds = get_credentials.ChainCredentials()
+        expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+            hours=1
+        )
+        fetch = mock.Mock(
+            side_effect=lambda: get_credentials.AccessToken(
+                "same-bad-token", expiry, "gcloud"
+            )
+        )
+        calls = 0
+
+        class Always401Chat:
+            async def send_message(self, parts):
+                nonlocal calls
+                del parts
+                calls += 1
+                if creds.expired or not creds.token:
+                    creds.refresh(None)
+                raise main.genai_errors.ClientError(
+                    401, {"error": {"code": 401, "status": "UNAUTHENTICATED"}}
+                )
+
+        self.enterContext(
+            mock.patch.object(get_credentials, "_SOURCES", (("gcloud", fetch),))
+        )
+        self.enterContext(mock.patch.object(get_credentials, "_cached_token", None))
+        self.enterContext(
+            mock.patch.object(
+                main, "initialize_gemini_chat_session", return_value=Always401Chat()
+            )
+        )
+        await self.connect_session("s26")
+        with self.assertLogs("absl", level="WARNING") as logs:
+            resp = await self.client.post(
+                "/api/post_endpoint",
+                json={
+                    "session_id": "s26",
+                    "objective": "fr_generate",
+                    "functionName": "f",
+                    "functionArgs": {},
+                },
+            )
+        self.assertEqual(resp.status, 502)
+        self.assertEqual(
+            (await resp.json())["error"],
+            "Function response simulator failed (401 UNAUTHENTICATED)",
+        )
+        self.assertEqual(calls, 1)
+        self.assertEqual(fetch.call_count, 2)
+        self.assertIn("returned the rejected token again", "\n".join(logs.output))
+
+    async def test_fr_401_surfaces_401_when_replacement_fetch_fails(self):
+        creds = get_credentials.ChainCredentials()
+        expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+            hours=1
+        )
+        fetch = mock.Mock(
+            side_effect=[
+                get_credentials.AccessToken("revoked-token", expiry, "gcloud"),
+                RuntimeError("gcloud down"),
+            ]
+        )
+
+        class Always401Chat:
+            async def send_message(self, parts):
+                del parts
+                if creds.expired or not creds.token:
+                    creds.refresh(None)
+                raise main.genai_errors.ClientError(
+                    401, {"error": {"code": 401, "status": "UNAUTHENTICATED"}}
+                )
+
+        self.enterContext(
+            mock.patch.object(get_credentials, "_SOURCES", (("gcloud", fetch),))
+        )
+        self.enterContext(mock.patch.object(get_credentials, "_cached_token", None))
+        self.enterContext(
+            mock.patch.object(
+                main, "initialize_gemini_chat_session", return_value=Always401Chat()
+            )
+        )
+        await self.connect_session("s27")
+        with self.assertLogs("absl", level="WARNING"):
+            resp = await self.client.post(
+                "/api/post_endpoint",
+                json={
+                    "session_id": "s27",
+                    "objective": "fr_generate",
+                    "functionName": "f",
+                    "functionArgs": {},
+                },
+            )
+        self.assertEqual(resp.status, 502)
+        self.assertEqual(
+            (await resp.json())["error"],
+            "Function response simulator failed (401 UNAUTHENTICATED)",
+        )
+        self.assertIsNone(get_credentials._cached_token)
+
+    async def test_fr_401_retries_with_token_replaced_while_in_flight(self):
+        creds = get_credentials.ChainCredentials()
+        expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+            hours=1
+        )
+        old = get_credentials.AccessToken("old-token", expiry, "gcloud")
+        newer = get_credentials.AccessToken("newer-token", expiry, "gcloud")
+        fetch = mock.Mock(side_effect=AssertionError("should not refetch"))
+        seen_tokens = []
+
+        class RacingChat:
+            async def send_message(self, parts):
+                del parts
+                if creds.expired or not creds.token:
+                    creds.refresh(None)
+                seen_tokens.append(creds.token)
+                if creds.token == "old-token":
+                    # Another caller (e.g. a Live API reconnect) refreshed the
+                    # shared cache while this simulator request was in flight.
+                    get_credentials._cached_token = newer
+                    raise main.genai_errors.ClientError(
+                        401, {"error": {"code": 401, "status": "UNAUTHENTICATED"}}
+                    )
+                return mock.Mock(text='{"ok": true}')
+
+        self.enterContext(
+            mock.patch.object(get_credentials, "_SOURCES", (("gcloud", fetch),))
+        )
+        self.enterContext(mock.patch.object(get_credentials, "_cached_token", old))
+        self.enterContext(
+            mock.patch.object(
+                main, "initialize_gemini_chat_session", return_value=RacingChat()
+            )
+        )
+        creds.refresh(None)
+        await self.connect_session("s28")
+        with self.assertLogs("absl", level="WARNING"):
+            resp = await self.client.post(
+                "/api/post_endpoint",
+                json={
+                    "session_id": "s28",
+                    "objective": "fr_generate",
+                    "functionName": "f",
+                    "functionArgs": {},
+                },
+            )
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(await resp.json(), {"response": '{"ok": true}'})
+        self.assertEqual(seen_tokens, ["old-token", "newer-token"])
+        self.assertEqual(fetch.call_count, 0)
+        self.assertIs(get_credentials.cached_token(), newer)
 
     async def test_fr_definitions_stored_without_simulator(self):
         await self.connect_session("s9")
