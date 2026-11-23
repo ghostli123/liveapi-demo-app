@@ -1073,7 +1073,12 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 mock.patch.object(
                     websocket_handler.WebsocketHandler, "_open_upstream", slow_open
                 ),
-                mock.patch.object(websocket_handler, "MAX_PENDING_CLIENT_BYTES", 1000),
+                # 1000 bytes of payload in two messages.
+                mock.patch.object(
+                    websocket_handler,
+                    "MAX_PENDING_CLIENT_BYTES",
+                    1000 + 2 * websocket_handler.PENDING_MESSAGE_OVERHEAD_BYTES,
+                ),
             ):
                 await self.connect_session("s49")
                 ws = await self.client.ws_connect("/ws?session_id=s49")
@@ -1101,6 +1106,42 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         # The second session never reached upstream.
         self.assertEqual(upstream.received, ["x" * 600, "y" * 400])
         self.assertEqual(len(upstream.close_codes), 1)
+
+    async def test_many_small_messages_while_connecting_close_the_browser(self):
+        # Each held message costs memory beyond its payload (~60 bytes for a
+        # 2-byte frame), so 1-byte frames counted by payload alone could hold
+        # ~30x the cap (1.7 GB per session, measured in the cycle 132 audit).
+        open_upstream = websocket_handler.WebsocketHandler._open_upstream
+        opened = asyncio.Event()
+
+        async def slow_open(handler):
+            await opened.wait()
+            return await open_upstream(handler)
+
+        async with FakeUpstream() as upstream:
+            with (
+                flagsaver.flagsaver(common_bag_ws_port=upstream.port),
+                mock.patch.object(
+                    websocket_handler.WebsocketHandler, "_open_upstream", slow_open
+                ),
+                mock.patch.object(
+                    websocket_handler,
+                    "MAX_PENDING_CLIENT_BYTES",
+                    10 * websocket_handler.PENDING_MESSAGE_OVERHEAD_BYTES,
+                ),
+            ):
+                await self.connect_session("s95")
+                ws = await self.client.ws_connect("/ws?session_id=s95")
+                for _ in range(20):  # 20 bytes of payload in all.
+                    await ws.send_str("x")
+                try:
+                    msg = await asyncio.wait_for(ws.receive(), 5)
+                finally:
+                    opened.set()
+                await self.wait_for_session_end("s95")
+        self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(msg.data, 1009)
+        self.assertEqual(upstream.received, [])
 
     async def test_upstream_handshake_times_out(self):
         async def silent(reader, writer):

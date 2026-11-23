@@ -22,6 +22,11 @@ MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 # large one: at most ~46 MB, with a 20 MB avatar image and a 5-minute voice
 # sample in base64. A browser that sends more is closed with 1009.
 MAX_PENDING_CLIENT_BYTES = 64 * 1024 * 1024
+# Charged per held message on top of its length. A tiny message costs ~60
+# bytes of memory for 1-2 bytes of payload, so counting payload alone let a
+# flood of small frames hold ~30x the cap. The app sends only its setup
+# before the Live API answers, so this costs real sessions nothing.
+PENDING_MESSAGE_OVERHEAD_BYTES = 1024
 # Seconds between pings to the Live API, and how long to wait for each pong.
 DEFAULT_KEEPALIVE_S = 20
 # How long to wait for upstream to acknowledge a close, including the one sent
@@ -298,7 +303,7 @@ class WebsocketHandler:
             except websockets.exceptions.ConnectionClosed:
                 self.client_closed = True
                 return
-            pending_bytes += len(message)
+            pending_bytes += len(message) + PENDING_MESSAGE_OVERHEAD_BYTES
             if pending_bytes > MAX_PENDING_CLIENT_BYTES:
                 self.close_code = 1009
                 self.close_reason = (
