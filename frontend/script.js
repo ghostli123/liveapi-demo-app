@@ -1978,13 +1978,18 @@ function openModal() {
         nameInput.focus();
     }
 
+    resetRecordButton();
+
+    AppState.isRecording = false;
+    AppState.audioChunks = [];
+}
+
+/** Shows the Record button ready for a new take. */
+function resetRecordButton() {
     AppUI.setDisabled("recordButton", false);
     AppUI.setButtonWithIcon("recordButton", "mic", "Record reference voice");
     AppUI.setText("recordStatus", "");
     AppUI.setHidden("processingSpinner", true);
-
-    AppState.isRecording = false;
-    AppState.audioChunks = [];
 }
 
 function closeModal() {
@@ -2062,6 +2067,11 @@ async function handleRecordClick() {
                     AppState.audioChunks = [];
                     return;
                 }
+                // Stop and the sample limit end the take through stopRecording();
+                // otherwise the microphone's track ended (unplugged, or access
+                // turned off) and the recorder stopped by itself.
+                const micEnded = AppState.isRecording;
+                if (micEnded) showRecordingProcessing();
                 const audioBlob = new Blob(AppState.audioChunks, { type: recorder.mimeType });
                 AppState.audioChunks = [];
                 // Closing the dialog while the take is processed abandons it
@@ -2070,13 +2080,28 @@ async function handleRecordClick() {
                 const abandoned = () => attempt !== AppState.recordingAttempt;
                 try {
                     // The encoder can add a few milliseconds past the limit.
-                    const { base64 } = await toVoiceSample(await audioBlob.arrayBuffer(), { clip: true });
+                    const { base64, durationS } = await toVoiceSample(await audioBlob.arrayBuffer(), { clip: true });
                     if (abandoned()) return;
+                    const micStopped = micEnded
+                        ? `The microphone stopped after ${durationS.toFixed(1)} s: it was unplugged or ` +
+                          "the browser's access to it was turned off. "
+                        : "";
+                    if (micEnded && durationS < MIN_VOICE_SAMPLE_S) {
+                        // Stop refuses takes this short too; keep the name for another take.
+                        resetRecordButton();
+                        AppUI.showModal(
+                            micStopped +
+                            `A recording of at least ${MIN_VOICE_SAMPLE_S} seconds is required, so this one ` +
+                            "was discarded. Check the microphone and record again."
+                        );
+                        return;
+                    }
                     addBrandedVoice(voiceName, base64);
                     // Close first, so the message dialog returns focus to the page.
                     closeModal();
                     AppUI.showModal(
                         (reachedLimit ? `Recording stopped at the ${formatMinutes(MAX_VOICE_SAMPLE_S)} limit. ` : "") +
+                        micStopped +
                         `New branded voice "${voiceName}" has been created and selected. ` +
                         "It applies from the next connection."
                     );
@@ -2114,7 +2139,11 @@ function stopRecording() {
     if (AppState.mediaRecorder) {
         AppState.mediaRecorder.stop();
     }
+    showRecordingProcessing();
+}
 
+/** The take is over; its onstop handler is processing it. */
+function showRecordingProcessing() {
     AppUI.setDisabled("recordButton", true);
     AppUI.setText("recordStatus", "Processing recorded sample...");
     AppUI.setHidden("processingSpinner", false);

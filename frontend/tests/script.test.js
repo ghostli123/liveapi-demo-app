@@ -2031,6 +2031,46 @@ test("Stop works after the voice name is cleared, and the voice keeps the name i
     assert.equal(element("dialogMessage").textContent, "Please enter a name for the reference voice.");
 });
 
+test("a take the microphone ended is refused under 10 s and saved with a note past it", async () => {
+    for (const [durationS, saved] of [
+        [4, false],
+        [12, true],
+    ]) {
+        const devices = fakeRecordingDevices();
+        const OfflineAudioContext = fakeOfflineAudioContext(durationS);
+        const { context, element } = loadApp({ ...devices.globals, OfflineAudioContext, FileReader: FakeFileReader, Blob });
+        const voices = [];
+        element("voice-dropdown").appendChild = (option) => voices.push(option.textContent);
+        context.openModal();
+        element("newVoiceName").value = "Kai";
+        const click = context.handleRecordClick();
+        devices.prompts[0].grant();
+        await click;
+
+        // The track ended, so the recorder stopped without a Stop click.
+        devices.recorders[0].stop();
+        await flush();
+        assert.equal(devices.prompts[0].track.stopped, true, `${durationS} s`);
+        assert.equal(devices.timers[0].cleared, true, `${durationS} s`);
+        assert.equal(context.AppState.isRecording, false, `${durationS} s`);
+        const message = element("dialogMessage").textContent;
+        assert.match(message, new RegExp(`^The microphone stopped after ${durationS}\\.0 s: it was unplugged`));
+        if (saved) {
+            assert.deepEqual(voices, ["Kai"]);
+            assert.ok(context.AppState.customVoiceBase64.length > 0);
+            assert.match(message, /turned off\. New branded voice "Kai" has been created and selected\./);
+        } else {
+            assert.deepEqual(voices, []);
+            assert.equal(context.AppState.customVoiceBase64, "");
+            assert.match(message, /at least 10 seconds is required, so this one was discarded/);
+            // Ready for another take under the same name.
+            assert.equal(element("recordButton").disabled, false);
+            assert.equal(element("recordStatus").textContent, "");
+            assert.equal(element("newVoiceName").value, "Kai");
+        }
+    }
+});
+
 test("a take still processing when the dialog closes doesn't touch a newer recording", async () => {
     for (const outcome of ["decoded", "failed"]) {
         const devices = fakeRecordingDevices();
