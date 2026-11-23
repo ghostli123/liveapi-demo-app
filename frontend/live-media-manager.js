@@ -1218,7 +1218,9 @@ class G3RtcWebRtcManager {
             // Not `src = ""`, which makes Firefox try to load the page as media.
             videoEl.removeAttribute("src");
             videoEl.srcObject = this.remoteStream;
-            videoEl.muted = false;
+            // Leave `muted` alone: Connect unmutes in its click (script.js),
+            // and a resume renegotiates, so unmuting here would undo a mute
+            // the user set from the player's controls.
             videoEl.play().catch((err) => {
                 console.warn("[WebRTC] Auto-play warning on video_player:", err);
                 if (err.name === "NotAllowedError") this.onAutoplayBlocked();

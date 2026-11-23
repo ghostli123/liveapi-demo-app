@@ -544,6 +544,52 @@ test("completeSession after close() starts no stats polling or connect timer", a
     assert.equal(timers.size, 0);
 });
 
+test("a WebRTC renegotiation keeps the avatar muted if the user muted it", async () => {
+    class FakePeerConnection {
+        constructor() {
+            this.iceGatheringState = "complete";
+            this.connectionState = "new";
+            this.localDescription = { sdp: "v=0\r\n" };
+        }
+        createDataChannel() { return { close() {} }; }
+        addTransceiver() { return { sender: { replaceTrack: async () => {} }, receiver: { track: {} }, mid: null }; }
+        async setLocalDescription() {}
+        async setRemoteDescription() {}
+        close() {}
+    }
+    const context = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
+        document: { getElementById: () => null },
+        RTCPeerConnection: FakePeerConnection,
+        MediaStream: class { addTrack() {} },
+        crypto: { randomUUID: () => "id" },
+        setTimeout: () => ({}),
+        clearTimeout: () => {},
+        setInterval: () => ({}),
+        clearInterval: () => {},
+        performance: { now: () => 0 },
+    });
+    const video = {
+        muted: false,
+        srcObject: null,
+        plays: 0,
+        removeAttribute() {},
+        play() {
+            this.plays++;
+            return Promise.resolve();
+        },
+    };
+    const manager = new context.G3RtcWebRtcManager(video);
+    await manager.initiateSession();
+    await manager.completeSession("v=0\r\n");
+    assert.equal(video.muted, false);
+    video.muted = true; // The user mutes from the player's controls.
+    await manager.initiateSession(); // A GoAway or 1001 resume renegotiates.
+    await manager.completeSession("v=0\r\n");
+    assert.equal(video.muted, true);
+    assert.equal(video.plays, 2);
+    assert.equal(video.srcObject, manager.remoteStream);
+});
+
 // A WebRTC manager with a negotiated session whose timers the test fires.
 async function webRtcSessionWithManualTimers() {
     const timeouts = new Map();
