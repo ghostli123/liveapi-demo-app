@@ -1011,6 +1011,9 @@ class LiveVideoOutputManager {
         }
         this.chunkQueue = [];
         this.clearRecordedChunks();
+        // Derived from the ended stream's stalls; the next one starts fresh.
+        const recommendedBitrateElement = document.getElementById("recommended-video-bitrate");
+        if (recommendedBitrateElement) recommendedBitrateElement.textContent = "--";
         this.sourceBuffer = null;
         this.mediaSource = null;
         this.initialized = false;
@@ -1411,6 +1414,12 @@ class G3RtcWebRtcManager {
         if (videoEl && videoEl.srcObject) {
             videoEl.srcObject = null;
         }
+        // The speed readouts are reset by GeminiLiveAPI, which owns them for
+        // both transports; these two are WebRTC's alone.
+        const fpsEl = document.getElementById("webrtc-fps");
+        if (fpsEl) fpsEl.textContent = "--";
+        const lossEl = document.getElementById("webrtc-packet-loss");
+        if (lossEl) lossEl.textContent = "0";
         if (markClosed) G3RtcWebRtcManager.showState("closed");
     }
 

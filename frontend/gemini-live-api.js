@@ -1020,12 +1020,21 @@ class GeminiLiveAPI {
     }
 
     /**
-     * Stops the periodic bandwidth reporting interval.
+     * Stops the periodic bandwidth reporting interval and resets the speed
+     * readouts and counters, so an ended connection doesn't leave its last
+     * figures on screen or in the next connection's first reading.
      */
     stopUpdateBandwidthUsage() {
         if (this.intervalId) {
             clearInterval(this.intervalId);
             this.intervalId = null;
+        }
+        this.bytesIn = 0;
+        this.bytesOut = 0;
+        this.history = [];
+        for (const id of ["upload-speed", "download-speed"]) {
+            const element = document.getElementById(id);
+            if (element) element.textContent = "0.00";
         }
     }
 

@@ -778,10 +778,12 @@ function videoOutputWithFakeMediaSource({ codecSupported = true, addSourceBuffer
         removeAttribute(name) { if (name === "src") this.src = null; },
     };
     fake.revoked = [];
+    fake.bitrate = { textContent: "--" }; // The recommended bitrate readout.
     let urls = 0;
+    const elementsById = { video_player: video, "recommended-video-bitrate": fake.bitrate };
     const context = loadScript("live-media-manager.js", ["LiveVideoOutputManager"], {
         window: { MediaSource: FakeMediaSource, atob },
-        document: { getElementById: (id) => (id === "video_player" ? video : null) },
+        document: { getElementById: (id) => elementsById[id] ?? null },
         URL: { createObjectURL: () => `blob:${++urls}`, revokeObjectURL: (url) => fake.revoked.push(url) },
     });
     const manager = new context.LiveVideoOutputManager();
@@ -845,8 +847,10 @@ test("resetPlayer() stops the stream's playback and revokes its URL; a new strea
     manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
     assert.equal(video.src, "blob:1");
     assert.equal(video.paused, false);
+    fake.bitrate.textContent = "81920.00"; // From a stall in this stream.
 
     manager.resetPlayer(); // Disconnect.
+    assert.equal(fake.bitrate.textContent, "--");
     assert.equal(video.paused, true); // The buffered tail would keep playing.
     assert.equal(video.src, null);
     assert.equal(video.loads, 1);
@@ -1544,6 +1548,34 @@ test("stats that arrive after close() aren't shown", async () => {
     deliverStats(new Map([["in", { type: "inbound-rtp", kind: "video", bytesReceived: 4096, packetsLost: 3, framesPerSecond: 30 }]]));
     await polling;
     assert.equal(element("download-speed").textContent, "--");
-    assert.equal(element("webrtc-packet-loss").textContent, "--");
+    assert.equal(element("webrtc-packet-loss").textContent, "0"); // As close() reset it.
     assert.equal(element("webrtc-fps").textContent, "--");
+});
+
+test("close() resets the WebRTC frame rate and packet loss readouts", async () => {
+    const elements = new Map();
+    const element = (id) => {
+        if (!elements.has(id)) elements.set(id, { textContent: "" });
+        return elements.get(id);
+    };
+    const ticks = [];
+    let now = 0;
+    const context = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
+        document: { getElementById: element },
+        setInterval: (fn) => ticks.push(fn),
+        clearInterval() {},
+        clearTimeout,
+        performance: { now: () => now },
+    });
+    const manager = new context.G3RtcWebRtcManager(null);
+    const report = { type: "inbound-rtp", kind: "video", bytesReceived: 4096, packetsLost: 3, framesPerSecond: 30 };
+    manager.pc = { getStats: async () => new Map([["in", report]]), close() {} };
+    manager.startStatsPolling();
+    now = 2000;
+    await ticks[0]();
+    assert.equal(element("webrtc-fps").textContent, "30.0");
+    assert.equal(element("webrtc-packet-loss").textContent, "3");
+    manager.close();
+    assert.equal(element("webrtc-fps").textContent, "--");
+    assert.equal(element("webrtc-packet-loss").textContent, "0");
 });

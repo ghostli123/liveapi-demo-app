@@ -17,13 +17,21 @@ class FakeWebSocket {
 
 // Timeouts are recorded rather than run, so tests can fire them on demand.
 const timers = [];
+// Recorded, not run: the bandwidth meter's interval would keep the test alive.
+const intervals = [];
+// The page's elements, created on first lookup with the HTML's initial text.
+const elements = new Map();
+const element = (id) => {
+    if (!elements.has(id)) elements.set(id, { textContent: "0.00" });
+    return elements.get(id);
+};
 const { GeminiLiveAPI, GeminiLiveResponseMessage } = loadScript(
     "gemini-live-api.js",
     ["GeminiLiveAPI", "GeminiLiveResponseMessage"],
     {
         WebSocket: FakeWebSocket,
-        // Inert: the bandwidth meter's interval would keep the test alive.
-        setInterval: () => 1,
+        document: { getElementById: element },
+        setInterval: (fn) => intervals.push(fn),
         clearInterval: () => {},
         setTimeout: (fn, ms) => timers.push({ fn, ms, cleared: false }),
         clearTimeout: (id) => {
@@ -528,6 +536,7 @@ function apiWithFetch(reply) {
         fetch,
         AbortController,
         TypeError, // So the script's instanceof check sees the fetch's errors.
+        document: { getElementById: () => null },
         setInterval: () => 1,
         clearInterval: () => {},
         setTimeout: (fn, ms) => timers.push({ fn, ms, cleared: false, fired: false }),
@@ -854,6 +863,36 @@ test("a session's end marks WebRTC closed only when its media used WebRTC", () =
         ["websocket", "disconnect", false],
         ["websocket", "server close", false],
     ]);
+});
+
+test("a session's end resets the speed readouts and counters for the next session", () => {
+    const send = (api) => api.webSocket.send(JSON.stringify({ realtimeInput: { text: "x".repeat(4096) } }));
+    const receive = (api) => api.onReceiveMessage({ data: JSON.stringify({ serverContent: { turnComplete: true } }) });
+    const ends = {
+        disconnect: (api) => api.disconnect(),
+        "server close": (api) => api.webSocket.onclose({ code: 1011, reason: "Internal error" }),
+        resume: (api) => {
+            api.resume("h1").catch(() => {});
+        },
+    };
+    for (const [how, end] of Object.entries(ends)) {
+        const api = connectedApi();
+        api.webSocket.close = () => {};
+        api.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) });
+        send(api);
+        receive(api);
+        intervals[intervals.length - 1]();
+        assert.notEqual(element("upload-speed").textContent, "0.00", how);
+        assert.notEqual(element("download-speed").textContent, "0.00", how);
+        send(api); // Counted, but the session ends before the next reading.
+        receive(api);
+        end(api);
+        assert.equal(element("upload-speed").textContent, "0.00", how);
+        assert.equal(element("download-speed").textContent, "0.00", how);
+        assert.equal(api.bytesOut, 0, how);
+        assert.equal(api.bytesIn, 0, how);
+        assert.equal(api.history.length, 0, how);
+    }
 });
 
 test("Disconnect during WebRTC ICE gathering neither sends setup nor reports an error", async () => {
