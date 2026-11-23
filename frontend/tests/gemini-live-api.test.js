@@ -923,6 +923,27 @@ test("a session's end marks WebRTC closed only when its media used WebRTC", () =
     ]);
 });
 
+test("resume() closes the old WebRTC connection before prepare(), keeping local media", async () => {
+    for (const transportMode of ["webrtc", "websocket"]) {
+        const closes = [];
+        let finishPrepare;
+        const api = connectedApi();
+        api.transportMode = transportMode;
+        api.webRtcManager = { close: (options) => closes.push(options) };
+        const oldWebSocket = api.webSocket;
+        oldWebSocket.close = () => oldWebSocket.onclose?.();
+        api.prepare = () => new Promise((resolve) => (finishPrepare = resolve));
+        const resuming = api.resume("h1");
+        // Closed synchronously before prepare() finishes so the old peer
+        // connection's stats polling and failure events stop immediately.
+        assert.deepEqual(plain(closes), [
+            { keepLocalMedia: true, markClosed: transportMode === "webrtc" },
+        ]);
+        finishPrepare(false);
+        await resuming;
+    }
+});
+
 test("a session's end resets the speed readouts and counters for the next session", () => {
     const send = (api) => api.webSocket.send(JSON.stringify({ realtimeInput: { text: "x".repeat(4096) } }));
     const receive = (api) => api.onReceiveMessage({ data: JSON.stringify({ serverContent: { turnComplete: true } }) });

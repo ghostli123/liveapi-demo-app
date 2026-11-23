@@ -622,6 +622,15 @@ class GeminiLiveAPI {
         this.webSocket = null;
         this.isSetupComplete = false;
         this.stopUpdateBandwidthUsage();
+        if (this.webRtcManager) {
+            // Drop the old peer connection now (while keeping local mic/camera
+            // for renegotiation) so its stats polling and ICE failure can't
+            // overwrite metrics or abort the resume while prepare() runs.
+            this.webRtcManager.close({
+                keepLocalMedia: true,
+                markClosed: this.transportMode === "webrtc",
+            });
+        }
         const closed = oldWebSocket
             ? /** @type {Promise<void>} */ (new Promise((resolve) => {
                 oldWebSocket.onopen = null;
