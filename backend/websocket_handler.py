@@ -10,7 +10,6 @@ from collections.abc import Awaitable, Callable
 
 import certifi
 import websockets
-import websockets.proxy
 import websockets.uri
 from absl import logging
 
@@ -133,22 +132,33 @@ def connect_error_detail(error: Exception) -> str:
 def upstream_proxy(url: str) -> str | None:
     """The proxy for a wss:// URL from the environment, as the token fetch uses.
 
-    websockets reads wss_proxy, socks_proxy and https_proxy and honors
-    no_proxy; requests (google-auth) also falls back to all_proxy, so this
-    does too. An HTTP proxy gets a CONNECT tunnel, so the token stays inside
-    TLS; a SOCKS one needs the python-socks package. A proxy given without a
-    scheme (proxy.corp:3128) is an HTTP proxy, as requests and curl read it,
-    or SOCKS5 if it came from socks_proxy, as websockets reads that one.
+    Matches websockets' priority (wss_proxy, socks_proxy, https_proxy) and
+    no_proxy bypass, and also falls back to all_proxy as requests (google-auth)
+    does. An HTTP proxy gets a CONNECT tunnel, so the token stays inside TLS; a
+    SOCKS one needs the python-socks package. Whitespace-only settings are
+    treated as unset; a proxy without a scheme (proxy.corp:3128) defaults to
+    http://, or socks5h:// when it came from socks_proxy.
     """
     uri = websockets.uri.parse_uri(url)
-    proxy = websockets.proxy.get_proxy(uri)
+    if urllib.request.proxy_bypass(f"{uri.host}:{uri.port}"):
+        return None
     proxies = urllib.request.getproxies()
-    if proxy is None and not urllib.request.proxy_bypass(f"{uri.host}:{uri.port}"):
-        proxy = proxies.get("all")
-    if proxy and "://" not in proxy:
-        scheme = "socks5h" if proxy == proxies.get("socks") else "http"
-        proxy = f"{scheme}://{proxy}"
-    return proxy
+    schemes = (
+        ("wss", "socks", "https", "all")
+        if uri.secure
+        else ("ws", "socks", "https", "http", "all")
+    )
+    for scheme in schemes:
+        proxy = (proxies.get(scheme) or "").strip()
+        if not proxy:
+            continue
+        if scheme == "socks" and proxy.lower().startswith("http://"):
+            return "socks5h://" + proxy[7:]
+        if "://" not in proxy:
+            default_scheme = "socks5h" if scheme == "socks" else "http"
+            return f"{default_scheme}://{proxy}"
+        return proxy
+    return None
 
 
 def _abort_websocket(ws) -> None:

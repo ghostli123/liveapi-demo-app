@@ -377,6 +377,92 @@ class UpstreamProxyTest(TlsUpstreamTestCase):
                 websocket_handler.upstream_proxy(url), "socks5h://corp:1080"
             )
 
+    def test_upstream_proxy_ignores_whitespace_and_trims_values(self):
+        url = f"wss://{self.HOST}/ws"
+        for name in ("wss_proxy", "socks_proxy", "https_proxy", "all_proxy"):
+            with self.subTest(blank=name), self.environ(**{name: "  \t\n "}):
+                self.assertIsNone(websocket_handler.upstream_proxy(url))
+        # A whitespace-only higher-priority setting falls through to lower ones.
+        with self.environ(wss_proxy="   ", https_proxy="corp:3128"):
+            self.assertEqual(websocket_handler.upstream_proxy(url), "http://corp:3128")
+        with self.environ(socks_proxy="   ", all_proxy="all:8080"):
+            self.assertEqual(websocket_handler.upstream_proxy(url), "http://all:8080")
+        with self.environ(https_proxy="  http://corp:3128  "):
+            self.assertEqual(websocket_handler.upstream_proxy(url), "http://corp:3128")
+        with self.environ(https_proxy="  corp:3128  "):
+            self.assertEqual(websocket_handler.upstream_proxy(url), "http://corp:3128")
+        with self.environ(socks_proxy="  http://corp:1080  "):
+            self.assertEqual(
+                websocket_handler.upstream_proxy(url), "socks5h://corp:1080"
+            )
+        with self.environ(socks_proxy="  HTTP://corp:1080  "):
+            self.assertEqual(
+                websocket_handler.upstream_proxy(url), "socks5h://corp:1080"
+            )
+        with self.environ(socks_proxy="  corp:1080  "):
+            self.assertEqual(
+                websocket_handler.upstream_proxy(url), "socks5h://corp:1080"
+            )
+
+    def test_upstream_proxy_picks_scheme_by_priority_not_value(self):
+        url = f"wss://{self.HOST}/ws"
+        # wss_proxy has higher priority than socks_proxy even with the same value.
+        with self.environ(wss_proxy="proxy.corp:1080", socks_proxy="proxy.corp:1080"):
+            self.assertEqual(
+                websocket_handler.upstream_proxy(url), "http://proxy.corp:1080"
+            )
+        with self.environ(
+            wss_proxy="http://proxy.corp:1080", socks_proxy="http://proxy.corp:1080"
+        ):
+            self.assertEqual(
+                websocket_handler.upstream_proxy(url), "http://proxy.corp:1080"
+            )
+        with self.environ(socks_proxy="proxy.corp:1080", https_proxy="proxy.corp:1080"):
+            self.assertEqual(
+                websocket_handler.upstream_proxy(url), "socks5h://proxy.corp:1080"
+            )
+        with self.environ(socks_proxy="socks5://proxy.corp:1080"):
+            self.assertEqual(
+                websocket_handler.upstream_proxy(url), "socks5://proxy.corp:1080"
+            )
+        with self.environ(
+            wss_proxy="proxy.corp:1080",
+            socks_proxy="proxy.corp:1080",
+            no_proxy=self.HOST,
+        ):
+            self.assertIsNone(websocket_handler.upstream_proxy(url))
+
+    async def test_upstream_tunnels_through_padded_and_priority_wss_proxy(self):
+        async def echo(connection):
+            await connection.send(await connection.recv())
+
+        with tempfile.TemporaryDirectory() as directory:
+            server_port = await self.serve_tls(directory, echo)
+            proxy = ConnectProxy(server_port)
+            proxy_port = await self.start_proxy(proxy)
+            handler = websocket_handler.WebsocketHandler(
+                f"wss://{self.HOST}/ws", "s", None
+            )
+            # wss_proxy wins over same-value socks_proxy (HTTP CONNECT, not SOCKS)
+            # and trims surrounding whitespace.
+            addr = f"127.0.0.1:{proxy_port}"
+            for env in (
+                {"wss_proxy": addr, "socks_proxy": addr},
+                {"wss_proxy": f"  {addr}  ", "socks_proxy": addr},
+            ):
+                with self.subTest(env=env), self.environ(**env):
+                    async with handler._connect_upstream("secret-token") as connection:
+                        await connection.send("hello")
+                        self.assertEqual(await connection.recv(), "hello")
+            # Blank proxy env vars connect directly instead of failing with InvalidProxy.
+            with self.environ(https_proxy="   ", all_proxy=" \t "):
+                with mock.patch.object(
+                    websocket_handler, "_NoRedirectConnect"
+                ) as connect:
+                    handler._connect_upstream("secret-token")
+            self.assertIsNone(connect.call_args.kwargs["proxy"])
+        self.assertEqual(len(proxy.requests), 2)
+
     async def test_upstream_tunnels_through_proxy_without_scheme(self):
         async def echo(connection):
             await connection.send(await connection.recv())
