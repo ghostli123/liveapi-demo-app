@@ -3177,3 +3177,84 @@ test("a failing MediaRecorder.start() clears the limit timer and cancel handle",
     assert.equal(dialogs.length, 1);
     assert.match(dialogs[0], /encoder unavailable/);
 });
+
+test("a throw before api.resume() during resumption ends the session instead of sticking in connecting", async () => {
+    const app = loadSession();
+    const { context, element, api, dialogText } = app;
+    const chat = [];
+    element("text-chat").appendChild = (line) => chat.push([line.className, line.textContent]);
+    let resumed = 0;
+    let disconnected = 0;
+    api.transportMode = "websocket";
+    api.latestResumptionHandle = "h1";
+    api.resume = async () => resumed++;
+    reconnect(app);
+    api.disconnect = () => {
+        disconnected++;
+        api.isSetupComplete = false;
+    };
+    context.AppState.liveVideoOutputManager.initMediaSource = () => {
+        throw new Error("MediaSource failed");
+    };
+
+    // 1001 close path (via onReconnectNeeded -> handleSessionResumptionReconnect).
+    await context.handleSessionResumptionReconnect();
+
+    assert.equal(resumed, 0);
+    assert.equal(disconnected, 1);
+    assert.equal(element("connecting").hidden, true);
+    assert.equal(element("disconnected").hidden, false);
+    assert.equal(element("connectBtn").disabled, false);
+    assert.equal(element("disconnectBtn").disabled, true);
+    assert.equal(dialogText(), "Could not resume the session: MediaSource failed");
+    assert.ok(
+        chat.some(
+            ([cls, text]) =>
+                cls.includes("chat-error") && text === "Could not resume the session: MediaSource failed"
+        ),
+        `expected error line in chat, got: ${JSON.stringify(chat)}`
+    );
+
+    // GO_AWAY path: calling handleReceiveResponse(GO_AWAY) must also end cleanly without an unhandled rejection.
+    api.goAwayAction = () => "resume";
+    api.latestResumptionHandle = "h2";
+    context.setAppStatus("connected");
+    context.handleReceiveResponse({ type: "GO_AWAY", data: "10s" });
+    await flush();
+
+    assert.equal(resumed, 0);
+    assert.equal(disconnected, 2);
+    assert.equal(element("connecting").hidden, true);
+    assert.equal(element("disconnected").hidden, false);
+});
+
+test("onErrorMessage and onIdleTimeout end the session even if showModal throws", () => {
+    for (const [callback, expectedClass] of [
+        ["onErrorMessage", "chat-error"],
+        ["onIdleTimeout", "chat-system"],
+    ]) {
+        const app = loadSession();
+        const { context, element, api } = app;
+        const chat = [];
+        element("text-chat").appendChild = (line) => chat.push([line.className, line.textContent]);
+        let disconnected = 0;
+        reconnect(app);
+        api.disconnect = () => {
+            disconnected++;
+            api.isSetupComplete = false;
+        };
+        context.setAppStatus("connected");
+        element("dialog").show = () => {
+            throw new Error("dialog broken");
+        };
+
+        assert.throws(() => api[callback]("session ended"), /dialog broken/);
+        assert.equal(disconnected, 1, `${callback} should disconnect before showModal`);
+        assert.equal(element("disconnected").hidden, false, `${callback} should show disconnected`);
+        assert.equal(element("connectBtn").disabled, false, `${callback} should re-enable Connect`);
+        assert.ok(
+            chat.some(([cls, text]) => cls.includes(expectedClass) && text === "session ended"),
+            `${callback} should log message in chat before showModal`
+        );
+    }
+});

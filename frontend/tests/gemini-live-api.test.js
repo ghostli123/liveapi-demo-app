@@ -1138,6 +1138,30 @@ test("automatic resumes after 1001 are limited", () => {
     assert.equal(api.errors.length, 1);
 });
 
+test("a throwing onReconnectNeeded in 1001 onclose is reported and releases WebRTC media", () => {
+    const api = connectedApi();
+    api.transportMode = "webrtc";
+    const closeOpts = [];
+    api.webRtcManager = {
+        close: (opts) => closeOpts.push(opts),
+        completeSession: async () => {},
+    };
+    api.setResumption(true, "");
+    api.onReceiveMessage({
+        data: JSON.stringify({ setupComplete: { rtcSetupComplete: { answerSdp: "v=0" } } }),
+    });
+    api.onReceiveMessage({ data: JSON.stringify({ sessionResumptionUpdate: { newHandle: "h" } }) });
+    api.onReconnectNeeded = () => {
+        throw new Error("resume setup broke");
+    };
+    assert.doesNotThrow(() => api.webSocket.onclose({ code: 1001, reason: "" }));
+    assert.deepEqual(plain(api.errors), ["Could not resume the session: resume setup broke"]);
+    assert.deepEqual(plain(closeOpts), [
+        { keepLocalMedia: true, markClosed: true },
+        { markClosed: true },
+    ]);
+});
+
 test("GoAway resumes are limited, sharing the budget with 1001 resumes", () => {
     const api = connectedApi();
     assert.equal(api.goAwayAction(), "unavailable"); // Resumption is off.

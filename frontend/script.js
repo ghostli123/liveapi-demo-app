@@ -153,15 +153,15 @@ const AppState = {
 // --- Manager Callbacks ---
 function initApplicationManagers() {
     AppState.geminiLiveApi.onErrorMessage = (message) => {
-        AppUI.showModal(message);
-        newErrorMessage(message);
         endSession();
+        newErrorMessage(message);
+        AppUI.showModal(message);
     };
 
     AppState.geminiLiveApi.onIdleTimeout = (message) => {
-        AppUI.showModal(message);
-        newSystemMessage(message);
         endSession();
+        newSystemMessage(message);
+        AppUI.showModal(message);
     };
     // Using the page counts as activity for the idle timeout. Capture, so
     // controls that stop propagation still count.
@@ -1131,21 +1131,27 @@ async function handleSessionResumptionReconnect() {
     const api = AppState.geminiLiveApi;
     if (!api) return;
 
-    abortPendingFunctionCalls("replaced");
-    setAppStatus("connecting");
-    // The age is the old connection's, which is being dropped; the new one's
-    // starts at its SETUP COMPLETE.
-    stopConnectionTimer();
-    AppUI.setText("connection-age", "--");
-    closeTranscriptLine("input");
-    closeTranscriptLine("output");
-    setUserTurnActive(false); // The new session never saw activity_start.
-    AppState.wsAudioStreamActive = false; // The new connection has no audio stream yet.
-    showHearingUser(false); // Nor the speech: its ACTIVITY_END won't come.
-    resetLatencyTurn();
-    if (api.transportMode !== "webrtc" && AppState.liveVideoOutputManager) {
-        // The new connection streams a new MP4, which needs a fresh MediaSource.
-        AppState.liveVideoOutputManager.initMediaSource();
+    try {
+        abortPendingFunctionCalls("replaced");
+        setAppStatus("connecting");
+        // The age is the old connection's, which is being dropped; the new one's
+        // starts at its SETUP COMPLETE.
+        stopConnectionTimer();
+        AppUI.setText("connection-age", "--");
+        closeTranscriptLine("input");
+        closeTranscriptLine("output");
+        setUserTurnActive(false); // The new session never saw activity_start.
+        AppState.wsAudioStreamActive = false; // The new connection has no audio stream yet.
+        showHearingUser(false); // Nor the speech: its ACTIVITY_END won't come.
+        resetLatencyTurn();
+        if (api.transportMode !== "webrtc" && AppState.liveVideoOutputManager) {
+            // The new connection streams a new MP4, which needs a fresh MediaSource.
+            AppState.liveVideoOutputManager.initMediaSource();
+        }
+    } catch (error) {
+        console.error("Session resumption setup failed:", error);
+        api.onErrorMessage(`Could not resume the session: ${error?.message ?? error}`);
+        return;
     }
     try {
         await api.resume(api.latestResumptionHandle);

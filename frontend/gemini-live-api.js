@@ -1015,7 +1015,15 @@ class GeminiLiveAPI {
                 });
             }
             if (resumable) {
-                this.onReconnectNeeded();
+                try {
+                    this.onReconnectNeeded();
+                } catch (error) {
+                    console.error("Error resuming the session:", error);
+                    if (this.webRtcManager) {
+                        this.webRtcManager.close({ markClosed: this.transportMode === "webrtc" });
+                    }
+                    this.onErrorMessage(`Could not resume the session: ${error?.message ?? error}`);
+                }
                 return;
             }
             this.onErrorMessage(GeminiLiveAPI.describeClose(event));
