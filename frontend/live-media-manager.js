@@ -1243,6 +1243,7 @@ class G3RtcWebRtcManager {
         /** @type {number | null} */
         this.connectTimer = null;
         this.hasConnected = false;
+        this.inConnectionFailed = false;
         // Called when the peer connection fails, e.g. UDP is blocked.
         this.onConnectionFailed = () => {};
         // Called when the browser refuses to start playback without a click.
@@ -1301,6 +1302,11 @@ class G3RtcWebRtcManager {
             const state = pc.connectionState;
             console.log("[WebRTC] connectionState:", state);
             if (this.pc !== pc) return; // A newer session replaced this one.
+            if (state === "failed") {
+                this.clearConnectTimer();
+                this._failConnection();
+                return;
+            }
             G3RtcWebRtcManager.showState(state);
             if (state === "connected") {
                 this.hasConnected = true;
@@ -1308,9 +1314,6 @@ class G3RtcWebRtcManager {
                 // drop shows as "disconnected", which can recover, and then
                 // "failed" if it doesn't.
                 this.clearConnectTimer();
-            } else if (state === "failed") {
-                this.clearConnectTimer();
-                this.onConnectionFailed();
             }
         };
 
@@ -1441,9 +1444,10 @@ class G3RtcWebRtcManager {
             pc.connectionState !== "closed"
         ) {
             this.connectTimer = setTimeout(() => {
+                this.connectTimer = null;
                 if (this.pc === pc && !this.hasConnected && pc.connectionState !== "connected") {
                     console.warn("[WebRTC] Not connected after", WEBRTC_CONNECT_TIMEOUT_MS, "ms");
-                    this.onConnectionFailed();
+                    this._failConnection();
                 }
             }, WEBRTC_CONNECT_TIMEOUT_MS);
         }
@@ -1614,6 +1618,20 @@ class G3RtcWebRtcManager {
     }
 
     /**
+     * Marks the metrics state as "failed" and runs onConnectionFailed() without
+     * letting synchronous teardown close() calls overwrite "failed" with "closed".
+     */
+    _failConnection() {
+        G3RtcWebRtcManager.showState("failed");
+        this.inConnectionFailed = true;
+        try {
+            this.onConnectionFailed();
+        } finally {
+            this.inConnectionFailed = false;
+        }
+    }
+
+    /**
      * Closes the peer connection.
      * @param {{keepLocalMedia?: boolean, markClosed?: boolean}} [options] -
      *     keepLocalMedia: keep the microphone and camera tracks for the next
@@ -1660,7 +1678,7 @@ class G3RtcWebRtcManager {
         if (fpsEl) fpsEl.textContent = "--";
         const lossEl = document.getElementById("webrtc-packet-loss");
         if (lossEl) lossEl.textContent = "0";
-        if (markClosed) G3RtcWebRtcManager.showState("closed");
+        if (markClosed && !this.inConnectionFailed) G3RtcWebRtcManager.showState("closed");
     }
 
     /** Shows the connection state in the metrics panel. */

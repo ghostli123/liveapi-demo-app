@@ -826,8 +826,9 @@ async function webRtcSessionWithManualTimers({ onSetRemote } = {}) {
         }
         close() {}
     }
+    const stateEl = { textContent: "idle" };
     const context = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
-        document: { getElementById: () => null },
+        document: { getElementById: (id) => (id === "webrtc-state" ? stateEl : null) },
         RTCPeerConnection: FakePeerConnection,
         MediaStream: class { addTrack() {} },
         randomId: () => "id",
@@ -859,7 +860,7 @@ async function webRtcSessionWithManualTimers({ onSetRemote } = {}) {
             }
         }
     };
-    return { failures, setState, connectTimers, fireConnectTimeout };
+    return { manager, stateEl, failures, setState, connectTimers, fireConnectTimeout };
 }
 
 test("a WebRTC session that never connects is reported after the connect timeout", async () => {
@@ -921,6 +922,70 @@ test("completeSession doesn't arm connectTimer if failed already fired during se
     assert.equal(connectTimers().length, 0);
     fireConnectTimeout();
     assert.deepEqual(failures, ["failed"]);
+});
+
+test("connectTimer clears itself before onConnectionFailed and keeps 'failed' shown across teardown close()", async () => {
+    const { manager, stateEl, setState, fireConnectTimeout } = await webRtcSessionWithManualTimers();
+    let timerInsideCallback = "unset";
+    let stateInsideCallback = null;
+    manager.onConnectionFailed = () => {
+        timerInsideCallback = manager.connectTimer;
+        stateInsideCallback = stateEl.textContent;
+        // Mirrors GeminiLiveAPI.disconnect() followed by script.js endSession() -> disconnect().
+        manager.close({ markClosed: true });
+        manager.close({ markClosed: true });
+    };
+    setState("connecting");
+    assert.notEqual(manager.connectTimer, null);
+    fireConnectTimeout();
+    assert.equal(timerInsideCallback, null);
+    assert.equal(manager.connectTimer, null);
+    assert.equal(stateInsideCallback, "failed");
+    assert.equal(stateEl.textContent, "failed");
+
+    // A later normal session close still shows "closed".
+    await manager.initiateSession();
+    assert.equal(stateEl.textContent, "negotiating");
+    manager.close({ markClosed: true });
+    assert.equal(stateEl.textContent, "closed");
+});
+
+test("onconnectionstatechange 'failed' keeps 'failed' shown across teardown close() and recovers if callback throws", async () => {
+    const { manager, stateEl, setState } = await webRtcSessionWithManualTimers();
+    const transitions = [];
+    const origDesc = Object.getOwnPropertyDescriptor(stateEl, "textContent");
+    let current = stateEl.textContent;
+    Object.defineProperty(stateEl, "textContent", {
+        get: () => current,
+        set: (v) => {
+            current = v;
+            transitions.push(v);
+        },
+        configurable: true,
+    });
+    manager.onConnectionFailed = () => {
+        manager.close({ markClosed: true });
+        manager.close({ markClosed: true });
+    };
+    setState("connecting");
+    setState("connected");
+    setState("disconnected");
+    setState("failed");
+    assert.equal(stateEl.textContent, "failed");
+    assert.deepEqual(transitions, ["connecting", "connected", "disconnected", "failed"]);
+
+    // Even if onConnectionFailed throws synchronously, inConnectionFailed resets so
+    // subsequent normal closes still mark "closed".
+    await manager.initiateSession();
+    await manager.completeSession("v=0\r\n");
+    manager.onConnectionFailed = () => {
+        throw new Error("boom");
+    };
+    assert.throws(() => setState("failed"), /boom/);
+    assert.equal(stateEl.textContent, "failed");
+    manager.close({ markClosed: true });
+    assert.equal(stateEl.textContent, "closed");
+    if (origDesc) Object.defineProperty(stateEl, "textContent", origDesc);
 });
 
 // A LiveScreenManager whose getDisplayMedia() calls stay pending until the
