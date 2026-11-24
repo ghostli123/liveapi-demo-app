@@ -1679,3 +1679,166 @@ test("a resume that turns the idle timeout on or changes it re-arms the timer", 
     timers[api.idleTimer - 1].fn();
     assert.deepEqual(plain(api.idleMessages), ["Disconnected after 20 seconds without activity."]);
 });
+
+test("a sync throw in setupWebSocketToService() during connect() releases the session and reports an error", async () => {
+    // 1. Relative proxyUrl throws TypeError in new URL().
+    const api = new GeminiLiveAPI("/ws", "/api/control", "/api/post_endpoint");
+    const bodies = [];
+    const errors = [];
+    api.sendPostRequest = (url, body) => {
+        bodies.push(body);
+        return Promise.resolve({ project_id: "p", idle_timeout_s: 120 });
+    };
+    api.onErrorMessage = (message) => {
+        errors.push(message);
+        api.disconnect();
+    };
+    await api.connect();
+    assert.deepEqual(
+        plain(bodies.map((b) => [b.command, b.session_id])),
+        [
+            ["connect", bodies[0].session_id],
+            ["disconnect", bodies[0].session_id],
+        ]
+    );
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /^Could not open the WebSocket connection:/);
+    assert.equal(api.webSocket, null);
+    assert.equal(api.idleTimer, null);
+
+    // 2. new WebSocket() throwing SecurityError after prepare().
+    function ThrowingWebSocket() {
+        throw new DOMException("Insecure WebSocket blocked", "SecurityError");
+    }
+    ThrowingWebSocket.CONNECTING = 0;
+    ThrowingWebSocket.OPEN = 1;
+    ThrowingWebSocket.CLOSING = 2;
+    ThrowingWebSocket.CLOSED = 3;
+    const { GeminiLiveAPI: SecureAPI } = loadScript("gemini-live-api.js", ["GeminiLiveAPI"], {
+        WebSocket: ThrowingWebSocket,
+        setTimeout: () => 1,
+        clearTimeout: () => {},
+        document: { getElementById: () => null },
+    });
+    const secApi = new SecureAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    const secBodies = [];
+    const secErrors = [];
+    secApi.sendPostRequest = (url, body) => {
+        secBodies.push(body);
+        return Promise.resolve({ project_id: "p", idle_timeout_s: 120 });
+    };
+    secApi.onErrorMessage = (message) => {
+        secErrors.push(message);
+        secApi.disconnect();
+    };
+    await secApi.connect();
+    assert.deepEqual(
+        plain(secBodies.map((b) => [b.command, b.session_id])),
+        [
+            ["connect", secBodies[0].session_id],
+            ["disconnect", secBodies[0].session_id],
+        ]
+    );
+    assert.deepEqual(secErrors, ["Could not open the WebSocket connection: Insecure WebSocket blocked"]);
+    assert.equal(secApi.webSocket, null);
+    assert.equal(secApi.idleTimer, null);
+});
+
+test("a sync throw in setupWebSocketToService() during resume() releases the session, clears timers/WebRTC, and reports an error", async () => {
+    const api = await idleApi(120);
+    const oldTimer = timers[api.idleTimer - 1];
+    api.webSocket.close = () => {};
+    api.webSocket.readyState = FakeWebSocket.CLOSED;
+    api.setupWebSocketToService = GeminiLiveAPI.prototype.setupWebSocketToService;
+    api.proxyUrl = "/ws"; // Throws TypeError in new URL() after prepare().
+    api.transportMode = "webrtc";
+    const rtcCloses = [];
+    api.webRtcManager = { close: (opts) => rtcCloses.push(opts) };
+    const bodies = [];
+    const errors = [];
+    api.sendPostRequest = (url, body) => {
+        bodies.push(body);
+        return Promise.resolve({ project_id: "p", idle_timeout_s: 120 });
+    };
+    api.onErrorMessage = (message) => errors.push(message);
+
+    await assert.rejects(() => api.resume("h"), /Invalid URL/i);
+    assert.deepEqual(
+        plain(bodies.map((b) => [b.command, b.session_id])),
+        [
+            ["connect", bodies[0].session_id],
+            ["disconnect", bodies[0].session_id],
+        ]
+    );
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /^Could not open the WebSocket connection:/);
+    assert.equal(oldTimer.cleared, true);
+    assert.equal(api.idleTimer, null);
+    assert.equal(api.webSocket, null);
+    assert.deepEqual(plain(rtcCloses), [
+        { keepLocalMedia: true, markClosed: true },
+        { markClosed: true },
+    ]);
+});
+
+test("a throw after WebSocket construction in setupWebSocketToService() closes the partial socket without double-abandoning", async () => {
+    const localTimers = [];
+    const createdSockets = [];
+    class HalfBrokenWebSocket {
+        constructor(url) {
+            this.url = url;
+            this.readyState = HalfBrokenWebSocket.CONNECTING;
+            this.closedWith = null;
+            // Omit `send` so webSocket.send.bind(webSocket) throws after this.webSocket and setupTimer are set.
+            createdSockets.push(this);
+        }
+        close(code) {
+            this.closedWith = code;
+        }
+    }
+    HalfBrokenWebSocket.CONNECTING = 0;
+    HalfBrokenWebSocket.OPEN = 1;
+    HalfBrokenWebSocket.CLOSING = 2;
+    HalfBrokenWebSocket.CLOSED = 3;
+
+    const { GeminiLiveAPI: BrokenAPI } = loadScript("gemini-live-api.js", ["GeminiLiveAPI"], {
+        WebSocket: HalfBrokenWebSocket,
+        setTimeout: (fn, ms) => {
+            const entry = { fn, ms, cleared: false };
+            localTimers.push(entry);
+            return localTimers.length;
+        },
+        clearTimeout: (id) => {
+            if (localTimers[id - 1]) localTimers[id - 1].cleared = true;
+        },
+        document: { getElementById: () => null },
+    });
+    const api = new BrokenAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    const bodies = [];
+    const errors = [];
+    api.sendPostRequest = (url, body) => {
+        bodies.push(body);
+        return Promise.resolve({ project_id: "p", idle_timeout_s: 0 });
+    };
+    api.onErrorMessage = (message) => {
+        errors.push(message);
+        api.disconnect();
+    };
+
+    await api.connect();
+    assert.equal(createdSockets.length, 1);
+    assert.equal(createdSockets[0].closedWith, 1000);
+    assert.equal(createdSockets[0].onclose, null);
+    assert.equal(api.webSocket, null);
+    assert.equal(api.setupTimer, null);
+    assert.equal(localTimers[0].cleared, true);
+    assert.deepEqual(
+        plain(bodies.map((b) => [b.command, b.session_id])),
+        [
+            ["connect", bodies[0].session_id],
+            ["disconnect", bodies[0].session_id],
+        ]
+    );
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /^Could not open the WebSocket connection:/);
+});

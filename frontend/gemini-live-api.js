@@ -575,12 +575,52 @@ class GeminiLiveAPI {
     }
 
     /**
+     * Opens the WebSocket for an already-prepared session. If creating or
+     * wiring the socket throws synchronously, abandons the backend session
+     * record, clears any partial connection state, and reports the error
+     * before rethrowing.
+     * @param {string} sessionId
+     */
+    openPreparedWebSocket(sessionId) {
+        try {
+            this.setupWebSocketToService();
+        } catch (error) {
+            this.abandonSession(sessionId);
+            this.clearSetupTimer();
+            this.clearIdleTimer();
+            if (this.intervalId) {
+                this.stopUpdateBandwidthUsage();
+            }
+            if (this.webRtcManager) {
+                this.webRtcManager.close({ markClosed: this.transportMode === "webrtc" });
+            }
+            if (this.webSocket) {
+                const webSocket = this.webSocket;
+                this.webSocket = null;
+                webSocket.onopen = null;
+                webSocket.onclose = null;
+                webSocket.onerror = null;
+                webSocket.onmessage = null;
+                try {
+                    webSocket.close(1000);
+                } catch {
+                    // Best-effort cleanup of a half-initialized socket.
+                }
+            }
+            const message = error?.message || String(error);
+            this.onErrorMessage(`Could not open the WebSocket connection: ${message}`);
+            throw error;
+        }
+    }
+
+    /**
      * Initiates the overall connection process: prepares the session and establishes the WebSocket.
      */
     async connect() {
         // A fresh ID per connection, so cleanup of the previous connection on
         // the backend can't remove this one.
-        this.sessionId = randomId();
+        const sessionId = randomId();
+        this.sessionId = sessionId;
         this.latestResumptionHandle = "";
         this.cancelPrepare();
         const attempt = ++this.connectAttempt;
@@ -588,7 +628,7 @@ class GeminiLiveAPI {
         try {
             if (!(await this.prepare(attempt))) return; // Cancelled by disconnect().
             console.log("connect(): Preparation successful. Starting WebSocket connection...");
-            this.setupWebSocketToService();
+            this.openPreparedWebSocket(sessionId);
             this.startIdleTimer();
         } catch (error) {
             console.error("connect(): Connection sequence failed.", error);
@@ -636,7 +676,7 @@ class GeminiLiveAPI {
      * Replaces the current connection with one that resumes the session from
      * `handle`, e.g. after a GoAway. The old connection is closed quietly.
      * @param {string} handle - Session resumption handle.
-     * @returns {Promise<void>} Rejects if the new session could not be prepared.
+     * @returns {Promise<void>} Rejects if the new session could not be prepared or opened.
      */
     async resume(handle) {
         const oldWebSocket = this.webSocket;
@@ -681,7 +721,7 @@ class GeminiLiveAPI {
             this.abandonSession(sessionId);
             return;
         }
-        this.setupWebSocketToService();
+        this.openPreparedWebSocket(sessionId);
         // The same conversation goes on, so its last activity still counts;
         // re-arm because the server's idle_timeout_s may have changed.
         this.startIdleTimer({ keepActivity: true });

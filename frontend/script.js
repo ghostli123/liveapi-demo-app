@@ -1163,7 +1163,7 @@ async function handleSessionResumptionReconnect() {
     try {
         await api.resume(api.latestResumptionHandle);
     } catch (error) {
-        // prepare() already reported the error and ended the session.
+        // resume() already reported the error and ended the session.
         console.error("Session resumption failed: ", error);
     }
 }
