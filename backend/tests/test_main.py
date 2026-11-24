@@ -527,11 +527,22 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             "localhost#foo",
             "localhost\\foo",
             "localhost:notaport",
+            "localhost:",
+            "[::1]:",
+            "127.0.0.1:",
             "localhost:0",
             "localhost:00",
             "[::1]:0",
             "localhost:99999",
             "local host:8080",
+            ".",
+            "..",
+            ".localhost",
+            "foo..localhost",
+            "localhost..",
+            ".localhost:8080",
+            "foo..localhost:8080",
+            "localhost..:8080",
             "",
         ]
         for bad_host in malformed_hosts:
@@ -541,9 +552,19 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             ):
                 status = await self._raw_request(method, path, f"Host: {bad_host}")
                 self.assertEqual(status, 400, (method, bad_host))
-        # Malformed Origin headers (non-HTTP(S) scheme, userinfo, or path/query/
-        # fragment) must be rejected even if their hostname matches Host or
-        # --allowed_hosts.
+        # Malformed Origin headers (non-HTTP(S) scheme, userinfo, trailing empty
+        # port, malformed dot-labels, or path/query/fragment) must be rejected
+        # even if their hostname matches Host or --allowed_hosts.
+        for bad_origin in [
+            "http://.",
+            "http://..",
+            "http://.example.com",
+            "http://foo..bar",
+            "http://localhost..",
+            "http://localhost:",
+            "http://[::1]:",
+        ]:
+            self.assertIsNone(main._parse_origin(bad_origin), bad_origin)
         own_netloc = f"{self.client.host}:{self.client.port}"
         for bad_origin in [
             f"javascript://{own_netloc}",
@@ -562,6 +583,13 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 "https://demo.example/path",
                 "https://demo.example?q=1",
                 "https://demo.example#frag",
+                "https://demo.example:",
+                "https://demo.example..",
+                "https://demo.example..:443",
+                "https://.demo.example",
+                "https://foo..demo.example",
+                "https://.",
+                "https://..",
             ]:
                 resp = await self.client.post(
                     "/api/control", json=body, headers={"Origin": bad_origin}
@@ -2508,6 +2536,9 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         for entry in [
             "[",
             "demo.example:http",
+            "demo.example:",
+            "[::1]:",
+            "127.0.0.1:",
             "demo.example:0",
             "demo.example:00",
             "[::1]:0",
@@ -2518,6 +2549,15 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             "demo\\example",
             "demo example",
             ":8443",
+            ".",
+            "..",
+            ".example.com",
+            "foo..bar",
+            "demo.example..",
+            ".example.com:8443",
+            "foo..bar:8443",
+            "demo.example..:8443",
+            ".:8443",
         ]:
             with self.assertRaises(flags.IllegalFlagValueError, msg=entry):
                 with flagsaver.flagsaver(allowed_hosts=["demo.example.com", entry]):
@@ -2527,14 +2567,26 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 "myhost",
                 "min.example:1",
                 "max.example:65535",
+                "fqdn.example.:8443",
                 "[::1]:8080",
+                "[2001:db8::]",
                 "*",
                 "",
             ]
         ):
             self.assertEqual(
                 main.explicitly_allowed_hosts(),
-                frozenset({"myhost", "min.example", "max.example", "::1", "*"}),
+                frozenset(
+                    {
+                        "myhost",
+                        "min.example",
+                        "max.example",
+                        "fqdn.example",
+                        "::1",
+                        "2001:db8::",
+                        "*",
+                    }
+                ),
             )
 
     def test_server_refuses_to_start_with_invalid_allowed_hosts(self):
@@ -2555,12 +2607,36 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Serving on", result.stderr)
 
     def test_is_allowed_host(self):
-        for host in ["localhost", "127.0.0.1", "::1", "10.1.2.3", "app.localhost"]:
+        for host in [
+            "localhost",
+            "localhost.",
+            "127.0.0.1",
+            "::1",
+            "10.1.2.3",
+            "app.localhost",
+            "app.localhost.",
+        ]:
             self.assertTrue(main.is_allowed_host(host), host)
-        for host in ["evil.example", "", None, "foo.run.app"]:
+        for host in [
+            "evil.example",
+            "",
+            None,
+            "foo.run.app",
+            ".",
+            "..",
+            ".localhost",
+            "foo..localhost",
+            "localhost..",
+        ]:
             self.assertFalse(main.is_allowed_host(host), host)
         with mock.patch.dict("os.environ", {"K_SERVICE": "demo"}):
             self.assertTrue(main.is_allowed_host("demo-abc123-uc.a.run.app"))
+            self.assertTrue(main.is_allowed_host("demo-abc123-uc.a.run.app."))
+            for host in [".run.app", "demo..run.app", "demo-abc123-uc.a.run.app.."]:
+                self.assertFalse(main.is_allowed_host(host), host)
+        with flagsaver.flagsaver(allowed_hosts=["*"]):
+            for host in [".", "..", ".localhost", "foo..bar", "localhost.."]:
+                self.assertFalse(main.is_allowed_host(host), host)
 
     async def test_gethostname_oserror_does_not_500_in_reject_cross_origin(self):
         main._machine_hostnames.cache_clear()

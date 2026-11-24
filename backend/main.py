@@ -882,11 +882,23 @@ async def _get_machine_hostnames() -> frozenset[str]:
 
 
 def _normalize_hostname(hostname: str | None) -> str:
-    return (hostname or "").strip().lower().rstrip(".")
+    return (hostname or "").strip().lower().removesuffix(".")
+
+
+def _has_valid_host_labels(hostname: str) -> bool:
+    """Whether `hostname` has no empty, leading, or consecutive dot labels.
+
+    Allows at most one trailing dot (FQDN form), rejecting ".", "..",
+    ".example.com", "foo..bar", and "example.com..".
+    """
+    bare = hostname.removesuffix(".")
+    return bool(bare) and all(bare.split("."))
 
 
 def _validated_port(parts: urllib.parse.SplitResult) -> int | None:
     """Returns parts.port (1..65535) or None; raises ValueError otherwise."""
+    if parts.netloc.endswith(":"):
+        raise ValueError("empty port")
     port = parts.port  # Raises for a non-numeric or >65535 port.
     if port is not None and not (1 <= port <= 65535):
         raise ValueError(f"port out of range 1-65535: {port}")
@@ -914,6 +926,7 @@ def _allowed_host_entry(entry: str) -> tuple[str, int | None]:
         or "\\" in entry
         or any(c.isspace() for c in entry)
         or not parts.hostname
+        or not _has_valid_host_labels(parts.hostname)
     ):
         raise ValueError("not a host name")
     return _normalize_hostname(parts.hostname), port
@@ -953,14 +966,15 @@ def _parse_origin(origin: str) -> tuple[str, str, int] | None:
     """Parses an HTTP(S) Origin header into (scheme, hostname, port), or None.
 
     Rejects non-ASCII, whitespace, non-HTTP(S) schemes, userinfo, backslashes,
-    trailing empty ports, invalid ports, and path/query/fragment components.
+    trailing empty ports, invalid ports, malformed dot-labels, and
+    path/query/fragment components.
     """
     if not origin.isascii() or any(c.isspace() for c in origin):
         return None
     try:
         parts = urllib.parse.urlsplit(origin)
         explicit_port = _validated_port(parts)
-    except ValueError:  # Unparsable (e.g. unclosed IPv6) or invalid port.
+    except ValueError:  # Unparsable (e.g. unclosed IPv6) or invalid/empty port.
         return None
     scheme = parts.scheme.lower()
     if (
@@ -968,8 +982,8 @@ def _parse_origin(origin: str) -> tuple[str, str, int] | None:
         or origin[len(scheme) :] != f"://{parts.netloc}"
         or "@" in parts.netloc
         or "\\" in parts.netloc
-        or parts.netloc.endswith(":")
         or not parts.hostname
+        or not _has_valid_host_labels(parts.hostname)
     ):
         return None
     port = explicit_port if explicit_port is not None else _DEFAULT_PORTS[scheme]
@@ -1003,7 +1017,7 @@ def is_explicitly_allowed_origin(origin: str) -> bool:
 
 def _check_allowed_host_fast(hostname: str) -> bool | None:
     """Checks rules that need no DNS lookup; returns None if FQDN is needed."""
-    if not hostname:
+    if not hostname or not all(hostname.split(".")):
         return False
     extra = explicitly_allowed_hosts()
     if "*" in extra or hostname in extra:
@@ -1062,6 +1076,7 @@ def _parse_host_header(raw_host: str) -> tuple[str, int | None]:
         or "\\" in raw_host
         or any(c.isspace() for c in raw_host)
         or not parts.hostname
+        or not _has_valid_host_labels(parts.hostname)
     ):
         raise ValueError("malformed Host")
     return parts.hostname, port
