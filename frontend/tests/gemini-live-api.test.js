@@ -1506,7 +1506,8 @@ test("conversation events and user input postpone the idle timeout", async () =>
         "model text": { serverContent: { modelTurn: { parts: [{ text: "hello" }] } } },
         "turn end": { serverContent: { turnComplete: true } },
         // Speech the server detects counts even with input transcription off.
-        "voice activity": { voiceActivity: { type: "ACTIVITY_START", audioOffset: "0.200s" } },
+        "voice activity start": { voiceActivity: { type: "ACTIVITY_START", audioOffset: "0.200s" } },
+        "voice activity end": { voice_activity: { type: "ACTIVITY_END", audio_offset: "1.000s" } },
         interruption: { serverContent: { interrupted: true } },
         "function call": { toolCall: { functionCalls: [{ id: "1", name: "f", args: {} }] } },
     };
@@ -1544,6 +1545,27 @@ test("audio, avatar video and usage reports don't postpone the idle timeout", as
     ]) {
         api.onReceiveMessage({ data: JSON.stringify(raw) });
     }
+    assert.equal(api.lastActivityAt, longAgo);
+    timers[api.idleTimer - 1].fn();
+    assert.equal(api.idleMessages.length, 1);
+});
+
+test("unknown voiceActivity types don't postpone the idle timeout", async () => {
+    const api = await idleApi(60);
+    const received = [];
+    api.onReceiveResponse = (message) => received.push([message.type, message.data]);
+    const longAgo = performance.now() - 60000;
+    api.lastActivityAt = longAgo;
+    for (const raw of [
+        { voiceActivity: { type: "ACTIVITY_TYPE_UNSPECIFIED" } },
+        { voice_activity: { type: "FUTURE_SIGNAL" } },
+    ]) {
+        api.onReceiveMessage({ data: JSON.stringify(raw) });
+    }
+    assert.deepEqual(received, [
+        ["VOICE_ACTIVITY", "ACTIVITY_TYPE_UNSPECIFIED"],
+        ["VOICE_ACTIVITY", "FUTURE_SIGNAL"],
+    ]);
     assert.equal(api.lastActivityAt, longAgo);
     timers[api.idleTimer - 1].fn();
     assert.equal(api.idleMessages.length, 1);

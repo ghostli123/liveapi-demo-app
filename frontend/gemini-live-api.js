@@ -147,9 +147,10 @@ const ACTIVITY_EVENTS = new Set([
     "END_OF_TURN",
     "INTERRUPT",
     "FUNCTION_CALL",
-    // The user speaking, even with input transcription off.
-    "VOICE_ACTIVITY",
 ]);
+// Voice activity values that mean the user is speaking, for the idle timeout
+// (even with input transcription off). Unknown values are ignored by the UI too.
+const VOICE_ACTIVITY_EVENTS = new Set(["ACTIVITY_START", "ACTIVITY_END"]);
 
 /**
  * Formats a duration for messages, e.g. "15 minutes" or "90 seconds".
@@ -231,6 +232,7 @@ class GeminiLiveAPI {
         // Function Calling / Tools Settings
         this.functionCallDefinition = null;
         this.toolBehavior = "BLOCKING";
+        this.fcScheduling = "WHEN_IDLE";
 
         // Avatar Customization Settings
         // Without an image (setCustomizedAvatar()) sessions use the stock
@@ -943,7 +945,10 @@ class GeminiLiveAPI {
                 }
             } else if (message.type === "RESUMPTION") {
                 this.latestResumptionHandle = message.data;
-            } else if (ACTIVITY_EVENTS.has(message.type)) {
+            } else if (
+                ACTIVITY_EVENTS.has(message.type) ||
+                (message.type === "VOICE_ACTIVITY" && VOICE_ACTIVITY_EVENTS.has(message.data))
+            ) {
                 this.noteActivity();
             }
             if (

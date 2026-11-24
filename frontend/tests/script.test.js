@@ -2583,6 +2583,87 @@ test("endSession() after a simulator timeout still suppresses the stale chat err
     );
 });
 
+test("fcScheduling is snapshotted at Connect and ignores mid-session select changes", async () => {
+    const posts = [];
+    const app = loadApp({
+        AbortController,
+        clearInterval() {},
+        setTimeout: () => 0,
+        clearTimeout() {},
+        getAvatarVideoElement: () => null,
+        GeminiLiveAPI: class extends FakeGeminiLiveAPI {
+            constructor(...args) {
+                super(...args);
+                return new Proxy(this, { get: (target, name) => (name in target ? target[name] : () => {}) });
+            }
+        },
+    });
+    const { context, element } = app;
+    const { AppState } = context;
+    const api = AppState.geminiLiveApi;
+    AppState.liveAudioOutputManager.resume = () => {};
+    AppState.liveVideoOutputManager.clearRecordedChunks = () => {};
+    AppState.liveVideoOutputManager.getRecordings = () => [];
+    element("text-chat").appendChild = () => {};
+    element("location").value = "us-central1";
+    api.sendPostRequest = (url, data, { signal }) =>
+        new Promise((resolve) => {
+            posts.push({ name: data.functionName, signal, resolve });
+        });
+    api.sendMessage = (message) => api.sent.push(message);
+
+    // Connect with NON_BLOCKING + INTERRUPT, then change the selects mid-session.
+    element("toolBehavior").value = "NON_BLOCKING";
+    element("fcScheduling").value = "INTERRUPT";
+    context.connectBtnClick();
+
+    api.webSocket = {};
+    api.sessionId = "s-1";
+    element("fcScheduling").value = "SILENT";
+    element("toolBehavior").value = "BLOCKING";
+
+    const first = context.handleFunctionCallRequest([{ id: "c1", name: "lookup", args: {} }]);
+    posts[0].resolve({ response: "ok" });
+    await first;
+    assert.deepEqual(plainJson(api.sent[0].toolResponse.functionResponses[0].response), {
+        result: { response: "ok" },
+        scheduling: "INTERRUPT",
+    });
+    assert.equal(api.toolBehavior, "NON_BLOCKING");
+    assert.equal(api.fcScheduling, "INTERRUPT");
+
+    // Reconnecting with SILENT + NON_BLOCKING picks up the new snapshot.
+    element("toolBehavior").value = "NON_BLOCKING";
+    element("fcScheduling").value = "SILENT";
+    context.connectBtnClick();
+    api.webSocket = {};
+    api.sessionId = "s-2";
+    element("fcScheduling").value = "WHEN_IDLE";
+
+    const second = context.handleFunctionCallRequest([{ id: "c2", name: "lookup", args: {} }]);
+    posts[1].resolve({ response: "ok2" });
+    await second;
+    assert.deepEqual(plainJson(api.sent[1].toolResponse.functionResponses[0].response), {
+        result: { response: "ok2" },
+        scheduling: "SILENT",
+    });
+
+    // Reconnecting with BLOCKING omits scheduling even if the select changes mid-session.
+    element("toolBehavior").value = "BLOCKING";
+    element("fcScheduling").value = "INTERRUPT";
+    context.connectBtnClick();
+    api.webSocket = {};
+    api.sessionId = "s-3";
+    element("toolBehavior").value = "NON_BLOCKING";
+
+    const third = context.handleFunctionCallRequest([{ id: "c3", name: "lookup", args: {} }]);
+    posts[2].resolve({ response: "ok3" });
+    await third;
+    assert.deepEqual(plainJson(api.sent[2].toolResponse.functionResponses[0].response), {
+        result: { response: "ok3" },
+    });
+});
+
 /** Objects from the VM context have another realm's prototypes. */
 function plainJson(value) {
     return JSON.parse(JSON.stringify(value));

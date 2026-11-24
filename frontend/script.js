@@ -1256,8 +1256,8 @@ async function handleFunctionCallRequest(functionCalls) {
 
     // Scheduling only applies to NON_BLOCKING functions.
     const schedulingVal =
-        AppState.geminiLiveApi.toolBehavior === "NON_BLOCKING"
-            ? AppUI.getValue("fcScheduling", "WHEN_IDLE")
+        api.toolBehavior === "NON_BLOCKING"
+            ? api.fcScheduling || "WHEN_IDLE"
             : null;
     // Sequential, since the simulator is one chat session per connection.
     const responses = [];
@@ -2056,6 +2056,7 @@ function connectBtnClick() {
     AppState.geminiLiveApi.setCustomizedAvatar(AppState.customAvatar.image, AppState.customAvatar.mimeType);
     AppState.geminiLiveApi.setFunctionCall(AppState.functionCallDefinition);
     AppState.geminiLiveApi.toolBehavior = AppUI.getValue("toolBehavior", "BLOCKING");
+    AppState.geminiLiveApi.fcScheduling = AppUI.getValue("fcScheduling", "WHEN_IDLE");
     AppState.geminiLiveApi.setProactiveVideo(AppUI.getChecked("proactiveVideo"));
     AppState.geminiLiveApi.setS2ST(
         AppUI.getChecked("enableS2ST"),
