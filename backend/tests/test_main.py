@@ -2169,6 +2169,83 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resp.status, 200)
 
+    async def test_same_origin_normalizes_host_case_and_default_ports(self):
+        body = {
+            "command": "connect",
+            "session_id": "s7n",
+            "endpoint": "autopush-common",
+            "location": "us-central1",
+        }
+        allowed_cases = [
+            ("LOCALHOST:18731", "http://localhost:18731"),
+            ("localhost:18731", "http://LOCALHOST:18731"),
+            ("localhost:18731", "HTTP://LOCALHOST:18731"),
+            ("[2001:DB8::1]:18731", "http://[2001:db8::1]:18731"),
+            ("[2001:db8::1]:18731", "http://[2001:DB8::1]:18731"),
+            ("localhost:80", "http://localhost"),
+            ("localhost:443", "https://localhost"),
+            ("localhost", "http://localhost:80"),
+            ("localhost", "https://localhost:443"),
+            ("LOCALHOST:80", "http://localhost"),
+            ("LOCALHOST:443", "https://localhost"),
+            ("[2001:DB8::1]:80", "http://[2001:db8::1]"),
+            ("[2001:DB8::1]:443", "https://[2001:db8::1]"),
+            ("localhost.", "http://LOCALHOST."),
+        ]
+        for i, (host, origin) in enumerate(allowed_cases):
+            headers = {"Host": host, "Origin": origin}
+            resp = await self.client.post(
+                "/api/control",
+                json={**body, "session_id": f"s7n-ok-{i}"},
+                headers=headers,
+            )
+            self.assertEqual(resp.status, 200, headers)
+            resp = await self.client.get("/ws?session_id=none", headers=headers)
+            self.assertNotEqual(resp.status, 403, headers)
+
+        rejected_cases = [
+            ("localhost:443", "http://localhost"),
+            ("localhost:80", "https://localhost"),
+            ("localhost", "http://localhost:443"),
+            ("localhost", "https://localhost:80"),
+            ("localhost:18731", "http://localhost"),
+            ("localhost", "http://localhost:18731"),
+            ("[2001:db8::1]:443", "http://[2001:db8::1]"),
+            ("localhost:18731", "http://evil.example@localhost:18731"),
+            ("localhost:18731", "http://@localhost:18731"),
+            ("localhost:18731", "http://evil.example\\@localhost:18731"),
+            ("localhost:18731", "http://localhost:18731?"),
+            ("localhost:18731", "http://localhost:18731#"),
+            ("localhost:18731", "http://localhost:18731/"),
+            ("localhost", "http://localhost:"),
+            ("[::1]", "http://[::1]:"),
+            ("localhost", "http://localhost:0"),
+            ("localhost", "http://localhost."),
+            ("localhost.", "http://localhost"),
+            ("localhost:18731", "http://[::1]:18731"),
+        ]
+        for host, origin in rejected_cases:
+            headers = {"Host": host, "Origin": origin}
+            resp = await self.client.post("/api/control", json=body, headers=headers)
+            self.assertEqual(resp.status, 403, headers)
+            self.assertEqual(
+                await resp.text(), "Cross-origin request rejected", headers
+            )
+            resp = await self.client.get("/ws?session_id=s7n", headers=headers)
+            self.assertEqual(resp.status, 403, headers)
+
+        # Normalized same-origin headers still must not bypass the Host check.
+        for host, origin in [
+            ("EVIL.EXAMPLE:80", "http://evil.example"),
+            ("EVIL.EXAMPLE:443", "https://evil.example"),
+        ]:
+            resp = await self.client.post(
+                "/api/control", json=body, headers={"Host": host, "Origin": origin}
+            )
+            self.assertEqual(resp.status, 403, (host, origin))
+            self.assertIn("--allowed_hosts", await resp.text())
+        self.assertIsNone(await main.SESSION_MANAGER.search_item("s7n"))
+
     async def test_rejection_logs_escape_client_text(self):
         # The path is percent-decoded, so a client can put a newline in it, and
         # header values may hold bytes 0x80-0xFF (NEL, 0x85, is a line break to

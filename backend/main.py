@@ -930,6 +930,33 @@ def explicitly_allowed_hosts() -> frozenset[str]:
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
+def _parse_origin(origin: str) -> tuple[str, str, int] | None:
+    """Parses an HTTP(S) Origin header into (scheme, hostname, port), or None.
+
+    Rejects non-ASCII, whitespace, non-HTTP(S) schemes, userinfo, backslashes,
+    trailing empty ports, invalid ports, and path/query/fragment components.
+    """
+    if not origin.isascii() or any(c.isspace() for c in origin):
+        return None
+    try:
+        parts = urllib.parse.urlsplit(origin)
+        explicit_port = _validated_port(parts)
+    except ValueError:  # Unparsable (e.g. unclosed IPv6) or invalid port.
+        return None
+    scheme = parts.scheme.lower()
+    if (
+        scheme not in _DEFAULT_PORTS
+        or origin[len(scheme) :] != f"://{parts.netloc}"
+        or "@" in parts.netloc
+        or "\\" in parts.netloc
+        or parts.netloc.endswith(":")
+        or not parts.hostname
+    ):
+        return None
+    port = explicit_port if explicit_port is not None else _DEFAULT_PORTS[scheme]
+    return scheme, parts.hostname, port
+
+
 def is_explicitly_allowed_origin(origin: str) -> bool:
     """Whether an --allowed_hosts entry names the page origin `origin`.
 
@@ -939,28 +966,14 @@ def is_explicitly_allowed_origin(origin: str) -> bool:
     on any port. "*" admits nothing here: as an Origin wildcard it would let
     any website start sessions on the server's credentials.
     """
-    try:
-        parts = urllib.parse.urlsplit(origin)
-        origin_host = _normalize_hostname(parts.hostname)
-        explicit_port = _validated_port(parts)
-        origin_port = (
-            explicit_port
-            if explicit_port is not None
-            else _DEFAULT_PORTS.get(parts.scheme.lower())
-        )
-    except ValueError:  # Unparsable or invalid port, so it can't be a listed host.
+    parsed = _parse_origin(origin)
+    if parsed is None:
         return False
+    _, raw_host, origin_port = parsed
+    origin_host = _normalize_hostname(raw_host)
     # "null" has no host, and a blank entry must not match it; "http://*"
-    # must not match the "*" entry. Reject non-HTTP(S) schemes, userinfo, and
-    # path/query/fragment components that a browser Origin header never carries.
-    if (
-        parts.scheme.lower() not in _DEFAULT_PORTS
-        or "@" in parts.netloc
-        or parts.path
-        or parts.query
-        or parts.fragment
-        or origin_host in ("", "*")
-    ):
+    # must not match the "*" entry.
+    if origin_host in ("", "*"):
         return False
     for entry in ALLOWED_HOSTS.value:
         host, port = _allowed_host_entry(entry)
@@ -1016,14 +1029,14 @@ async def _is_allowed_host(hostname: str | None) -> bool:
     return normalized in await _get_machine_hostnames()
 
 
-def _parse_host_header(raw_host: str) -> str:
-    """Extracts the host name from a Host header, rejecting malformed forms."""
+def _parse_host_header(raw_host: str) -> tuple[str, int | None]:
+    """Extracts (hostname, port) from a Host header, rejecting malformed forms."""
     # Host names are ASCII on the wire (IDNs as punycode); aiohttp decodes
     # other bytes to surrogates, which the 403 reply can't encode.
     if not raw_host.isascii():
         raise ValueError("non-ASCII Host")
     parts = urllib.parse.urlsplit("//" + raw_host)  # Raises for e.g. "[".
-    _validated_port(parts)
+    port = _validated_port(parts)
     if (
         parts.netloc != raw_host
         or "@" in raw_host
@@ -1032,7 +1045,26 @@ def _parse_host_header(raw_host: str) -> str:
         or not parts.hostname
     ):
         raise ValueError("malformed Host")
-    return parts.hostname
+    return parts.hostname, port
+
+
+def _is_same_origin(host: str, host_port: int | None, origin: str) -> bool:
+    """Whether `origin` names the same host and port as a validated Host header.
+
+    Hostnames are compared case-insensitively (both are lowercased by
+    `urlsplit`). An omitted port on either side matches the Origin scheme's
+    default port (80 for http, 443 for https), so proxies that keep `:80` or
+    `:443` in Host match browser Origins that omit them, while cross-port
+    pairs such as `Host: localhost:443` with `Origin: http://localhost` fail.
+    """
+    parsed = _parse_origin(origin)
+    if parsed is None:
+        return False
+    origin_scheme, origin_host, origin_port = parsed
+    effective_host_port = (
+        host_port if host_port is not None else _DEFAULT_PORTS[origin_scheme]
+    )
+    return origin_host == host and origin_port == effective_host_port
 
 
 @web.middleware
@@ -1046,7 +1078,7 @@ async def reject_cross_origin(request: web.Request, handler):
     """
     if request.method != "GET" or request.path == "/ws":
         try:
-            host = _parse_host_header(request.host)
+            host, host_port = _parse_host_header(request.host)
         except ValueError:  # e.g. userinfo/path tricks, bad port, unclosed IPv6
             return web.Response(text="Invalid Host header", status=400)
         if not await _is_allowed_host(host):
@@ -1061,26 +1093,12 @@ async def reject_cross_origin(request: web.Request, handler):
             )
         origin = request.headers.get("Origin")
         if origin is not None:
-            try:
-                origin_parts = urllib.parse.urlsplit(origin)
-                origin_netloc = (
-                    origin_parts.netloc
-                    if (
-                        origin_parts.scheme.lower() in _DEFAULT_PORTS
-                        and not origin_parts.path
-                        and not origin_parts.query
-                        and not origin_parts.fragment
-                    )
-                    else None
-                )
-            except ValueError:  # Unparsable, so it can't be this server.
-                origin_netloc = None
-            # Only an exact match or an explicit --allowed_hosts entry: the
+            # Only a same-origin match or an explicit --allowed_hosts entry: the
             # defaults above (e.g. any IP address) are fine for Host but not
             # for the page making the request.
-            if origin_netloc != request.host and not is_explicitly_allowed_origin(
-                origin
-            ):
+            if not _is_same_origin(
+                host, host_port, origin
+            ) and not is_explicitly_allowed_origin(origin):
                 logging.warning(
                     "Rejected %s %r from origin %r",
                     request.method,
