@@ -998,10 +998,13 @@ function handleReceiveResponse(messageResponse) {
             break;
         case "VOICE_ACTIVITY":
             if (messageResponse.data === "ACTIVITY_START") {
-                markUserSpeechStart();
-                // A frame in flight at Mic off would bring the badge back after
-                // stopAudioInput() hid it, with no ACTIVITY_END to come over WebRTC.
-                showHearingUser(isMicOn());
+                // A frame in flight when the mic stopped or a manual turn ended
+                // would clear the turn's end time and bring "hearing you" back
+                // with no ACTIVITY_END to clear it (e.g. over WebRTC).
+                if (isMicOn() && (!AppState.geminiLiveApi.disableDetection || AppState.userTurnActive)) {
+                    markUserSpeechStart();
+                    showHearingUser(true);
+                }
             } else if (messageResponse.data === "ACTIVITY_END") {
                 markUserTurnEnd("end of speech");
                 showHearingUser(false);

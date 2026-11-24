@@ -14,6 +14,7 @@ class LiveAudioOutputManager {
         this.workletNode = null;
         /** @type {Promise<AudioWorkletNode> | null} */
         this.ready = null; // Resolves to workletNode; see initializeAudioContext().
+        this.generation = 0; // Invalidates an in-flight addModule() when resume() restarts it.
         // After a failed start: the rejection returned until retryAt (a
         // performance.now() time), and the current wait between retries.
         /** @type {Promise<AudioWorkletNode> | null} */
@@ -48,16 +49,21 @@ class LiveAudioOutputManager {
             console.error("Error decoding audio chunk:", error);
             return;
         }
+        const generation = this.generation;
         this.initializeAudioContext()
             .then(
                 (workletNode) => {
+                    if (this.generation !== generation) return;
                     workletNode.port.postMessage(float32Data, [float32Data.buffer]);
                 },
                 // Logged once per attempt by initializeAudioContext(); the
                 // chunk is dropped. Reported here rather than there because
                 // WebRTC sessions also start this player (on Connect) but
                 // get their audio from the peer connection.
-                () => this.reportFailure()
+                () => {
+                    if (this.generation !== generation) return;
+                    this.reportFailure();
+                }
             )
             .catch((error) => console.error("Error playing audio chunk:", error));
         this.resumeContext();
@@ -79,11 +85,20 @@ class LiveAudioOutputManager {
      * gesture (e.g. the Connect click) so autoplay rules allow it.
      */
     resume() {
-        // A new Connect retries a player that failed to start right away.
+        // A new Connect retries a player that failed to start right away, and
+        // abandons an in-flight worklet load from a prior connection so its
+        // failure can't put the new connection into backoff.
         this.failed = null;
         this.retryDelayMs = 0;
         this.crashDelayMs = 0;
         this.crashReported = false;
+        if (this.ready && !this.workletNode) {
+            this.generation++;
+            const audioContext = this.audioContext;
+            this.audioContext = null;
+            this.ready = null;
+            audioContext?.close().catch(() => {});
+        }
         this.resumeContext();
     }
 
@@ -108,6 +123,7 @@ class LiveAudioOutputManager {
     initializeAudioContext() {
         if (this.ready) return this.ready;
         if (this.failed && performance.now() < this.retryAt) return this.failed;
+        const generation = this.generation;
         let audioContext;
         try {
             audioContext = new (window.AudioContext ||
@@ -128,6 +144,10 @@ class LiveAudioOutputManager {
             ? audioContext.audioWorklet.addModule("/frontend/pcm-processor.js")
             : Promise.reject(new Error("AudioWorklet is unavailable: the page needs HTTPS or localhost"));
         const ready = loaded.then(() => {
+            if (this.generation !== generation) {
+                if (audioContext.state !== "closed") audioContext.close().catch(() => {});
+                throw new Error("Audio player initialization superseded");
+            }
             const workletNode = new AudioWorkletNode(audioContext, "pcm-processor", {
                 outputChannelCount: [1],
             });
@@ -140,6 +160,10 @@ class LiveAudioOutputManager {
             return workletNode;
         });
         ready.catch((error) => {
+            if (this.generation !== generation) {
+                if (audioContext.state !== "closed") audioContext.close().catch(() => {});
+                return;
+            }
             console.error("Could not load the audio player:", error);
             // Chrome and Firefox remember a failed module fetch per
             // context and reject a retry without fetching, so the next
@@ -412,23 +436,35 @@ class LiveAudioInputManager {
 
     disconnectMicrophone() {
         this.generation++;
-        try {
-            if (this.stream) {
-                this.stream.getTracks().forEach((track) => {
-                    track.stop();
-                });
+        if (this.stream) {
+            try {
+                for (const track of this.stream.getTracks()) {
+                    try {
+                        track.stop();
+                    } catch (error) {
+                        console.error("Error stopping microphone track", error);
+                    }
+                }
+            } catch (error) {
+                console.error("Error disconnecting microphone stream", error);
             }
-            if (this.processor) {
-                // Messages the worklet posted before this are still queued; without
-                // a handler they don't land in the next connection's pcmData.
-                this.processor.port.onmessage = null;
+        }
+        if (this.processor) {
+            // Messages the worklet posted before this are still queued; without
+            // a handler they don't land in the next connection's pcmData.
+            if (this.processor.port) this.processor.port.onmessage = null;
+            try {
                 this.processor.disconnect();
+            } catch (error) {
+                console.error("Error disconnecting microphone processor", error);
             }
-            if (this.audioContext && this.audioContext.state !== "closed") {
+        }
+        if (this.audioContext && this.audioContext.state !== "closed") {
+            try {
                 this.audioContext.close()?.catch(() => {});
+            } catch (error) {
+                console.error("Error closing microphone audio context", error);
             }
-        } catch (error) {
-            console.error("Error disconnecting microphone", error);
         }
         this.stream = null;
         this.processor = null;

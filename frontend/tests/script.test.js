@@ -899,6 +899,51 @@ test("'hearing you' clears when no ACTIVITY_END will come: Mic off, a GoAway res
     assert.equal(hearing(), false);
 });
 
+test("late ACTIVITY_START after Mic off or Done speaking doesn't clear turnEndedAt or re-show hearing you", async () => {
+    const { context, element, api, at, clock, latency } = loadLatencySession();
+    const hearing = () => !element("hearing").hidden;
+    element("hearing").hidden = true;
+    element("connected").hidden = false;
+    element("micBtn").hidden = false;
+    api.disableDetection = true;
+
+    // Manual turn ended by Mic off before the server's echoed ACTIVITY_START arrives.
+    clock.now = 1000;
+    await context.turnBtnClick();
+    clock.now = 1050;
+    context.micBtnClick();
+    at(1250, "VOICE_ACTIVITY", "ACTIVITY_START");
+    assert.equal(hearing(), false);
+    at(1450, "VOICE_ACTIVITY", "ACTIVITY_END");
+    at(1650, "TEXT", "Hi.");
+    assert.equal(latency(), "600 ms after Done speaking");
+
+    // Manual turn ended by Done speaking (mic stays on) before the echoed ACTIVITY_START arrives.
+    at(1700, "END_OF_TURN");
+    context.showMicState(true);
+    clock.now = 2000;
+    await context.turnBtnClick();
+    clock.now = 2100;
+    await context.turnBtnClick();
+    at(2250, "VOICE_ACTIVITY", "ACTIVITY_START");
+    assert.equal(hearing(), false);
+    at(2350, "VOICE_ACTIVITY", "ACTIVITY_END");
+    at(2600, "TEXT", "Sure.");
+    assert.equal(latency(), "500 ms after Done speaking");
+
+    // Automatic detection: late ACTIVITY_START after Mic off doesn't wipe a recorded transcript end.
+    at(2700, "END_OF_TURN");
+    api.disableDetection = false;
+    at(3000, "VOICE_ACTIVITY", "ACTIVITY_START");
+    at(3100, "INPUT_TRANSCRIPTION", "hello");
+    clock.now = 3150;
+    context.micBtnClick();
+    at(3200, "VOICE_ACTIVITY", "ACTIVITY_START");
+    assert.equal(hearing(), false);
+    at(3500, "TEXT", "Hey.");
+    assert.equal(latency(), "400 ms after last transcript");
+});
+
 test("connection age stops when a GoAway resume drops the connection and restarts with the new one", () => {
     const clock = { now: 0 };
     const intervals = new Map();

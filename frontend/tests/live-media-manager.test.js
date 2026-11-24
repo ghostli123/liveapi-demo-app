@@ -461,6 +461,53 @@ test("a rejecting AudioContext.close() in LiveAudioInputManager does not cause u
     }
 });
 
+test("disconnectMicrophone() still closes the audio context and cleans up if processor.disconnect() or track.stop() throws", async () => {
+    const { manager, requests, contexts, intervals } = audioInputWithPendingMic();
+    const first = manager.connectMicrophone();
+    requests[0].grant();
+    await first;
+    const oldPort = manager.processor.port;
+    manager.processor.disconnect = () => {
+        throw new Error("InvalidStateError");
+    };
+    manager.disconnectMicrophone();
+    assert.equal(requests[0].track.readyState, "ended");
+    assert.equal(oldPort.onmessage, null);
+    assert.equal(contexts[0].state, "closed");
+    assert.equal(manager.stream, null);
+    assert.equal(manager.processor, null);
+    assert.equal(manager.audioContext, null);
+    assert.equal(intervals.size, 0);
+
+    // A throwing track.stop() must still stop remaining tracks, disconnect the processor, and close the context.
+    const second = manager.connectMicrophone();
+    requests[1].grant();
+    await second;
+    let secondTrackStopped = false;
+    let processorDisconnected = false;
+    const throwingTrack = {
+        stop() {
+            throw new Error("track stop failed");
+        },
+    };
+    const otherTrack = {
+        stop() {
+            secondTrackStopped = true;
+        },
+    };
+    manager.stream = { getTracks: () => [throwingTrack, otherTrack] };
+    const port2 = manager.processor.port;
+    manager.processor.disconnect = () => {
+        processorDisconnected = true;
+    };
+    manager.disconnectMicrophone();
+    assert.equal(secondTrackStopped, true);
+    assert.equal(port2.onmessage, null);
+    assert.equal(processorDisconnected, true);
+    assert.equal(contexts[1].state, "closed");
+    assert.equal(intervals.size, 0);
+});
+
 test("a WebSocket microphone refused after it was superseded doesn't throw or touch the newer one", async () => {
     const { manager, requests, intervals } = audioInputWithPendingMic();
     const first = manager.connectMicrophone();
@@ -1378,10 +1425,11 @@ test("playVideoChunk handles null or non-string mimeType without throwing", () =
 // Firefox, a context whose load failed keeps rejecting. `fake.noWorklet` leaves
 // out `audioWorklet`, as on an insecure page. `fake.now` is the script's
 // performance.now(), `fake.wallNow` its Date.now().
-function audioOutputWithFakeContexts() {
+function audioOutputWithFakeContexts({ holdAddModule = false } = {}) {
     const fake = {
         contexts: [],
         loads: 0,
+        pendingLoads: [],
         failNextLoad: false,
         failAllLoads: false,
         refuseContexts: false,
@@ -1401,6 +1449,11 @@ function audioOutputWithFakeContexts() {
                 : {
                       addModule: async () => {
                           fake.loads++;
+                          if (holdAddModule) {
+                              return new Promise((resolve, reject) => {
+                                  fake.pendingLoads.push({ resolve, reject });
+                              });
+                          }
                           if (fake.failNextLoad || fake.failAllLoads) {
                               fake.failNextLoad = false;
                               failed = true;
@@ -1463,6 +1516,72 @@ test("a failed audio worklet load is retried on a new context", async () => {
         assert.equal(manager.workletNode.context, fake.contexts[1]);
         assert.equal(manager.workletNode.posted.length, 1);
         assert.equal(fake.contexts[1].state, "running");
+        assert.deepEqual(unhandled, []);
+    } finally {
+        process.off("unhandledRejection", onUnhandled);
+    }
+});
+
+test("resume() abandons a pending worklet load so a reconnect neither inherits its backoff nor reports a stale error", async () => {
+    const { manager, fake } = audioOutputWithFakeContexts({ holdAddModule: true });
+    const reports = [];
+    manager.onPlayerError = (message) => reports.push(message);
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+        // Connect #1 starts addModule (still in flight) and queues a chunk.
+        manager.resume();
+        manager.playAudioChunk(AUDIO_CHUNK);
+        assert.equal(fake.loads, 1);
+        assert.equal(fake.contexts[0].state, "running");
+
+        // Disconnect + immediate Connect #2 calls resume() while load #1 is still pending.
+        manager.clear();
+        manager.resume();
+        assert.equal(fake.contexts[0].state, "closed");
+        assert.equal(fake.loads, 2);
+        assert.equal(fake.contexts[1].state, "running");
+
+        // Load #1 rejects: must not put Connect #2 into backoff, log, or report an error.
+        fake.pendingLoads[0].reject(new Error("503"));
+        await settle();
+        assert.deepEqual(reports, []);
+        assert.deepEqual(fake.errors, []);
+        assert.equal(manager.failed, null);
+        assert.equal(manager.retryDelayMs, 0);
+
+        // Connect #2 queues a chunk while load #2 is pending; load #2 succeeds and plays it.
+        fake.now = 100;
+        manager.playAudioChunk(AUDIO_CHUNK);
+        fake.pendingLoads[1].resolve();
+        await settle();
+        assert.equal(manager.workletNode.context, fake.contexts[1]);
+        assert.equal(manager.workletNode.posted.length, 1);
+        assert.deepEqual(reports, []);
+
+        // Once loaded, a later resume() reuses the working context/worklet without rebuilding.
+        manager.resume();
+        assert.equal(fake.loads, 2);
+        assert.equal(manager.workletNode.context, fake.contexts[1]);
+
+        // Also test a superseded load that resolves late (not rejects): must not overwrite the newer one.
+        manager.workletNode.onprocessorerror(new Event("processorerror"));
+        manager.resume(); // Load #3 (pending).
+        assert.equal(fake.loads, 3);
+        manager.resume(); // Load #4 (supersedes #3).
+        assert.equal(fake.contexts[2].state, "closed");
+        assert.equal(fake.loads, 4);
+        fake.pendingLoads[2].resolve();
+        await settle();
+        assert.equal(manager.workletNode, null);
+        assert.equal(manager.audioContext, fake.contexts[3]);
+        fake.pendingLoads[3].resolve();
+        await settle();
+        assert.equal(manager.workletNode.context, fake.contexts[3]);
+        manager.playAudioChunk(AUDIO_CHUNK);
+        await settle();
+        assert.equal(manager.workletNode.posted.length, 1);
         assert.deepEqual(unhandled, []);
     } finally {
         process.off("unhandledRejection", onUnhandled);
