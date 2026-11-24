@@ -162,7 +162,12 @@ class FakeUpstream:
                     await connection.close(code=1008, reason="Quota exceeded")
                     return
                 # The Live API sends JSON in binary frames.
-                await connection.send(json.dumps({"echo": message}).encode())
+                if isinstance(message, bytes):
+                    await connection.send(
+                        json.dumps({"echo_bytes": message.decode("latin-1")}).encode()
+                    )
+                else:
+                    await connection.send(json.dumps({"echo": message}).encode())
         finally:
             self.close_codes.append(connection.close_code)
 
@@ -621,6 +626,25 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(resp.status, 400, session_id)
             self.assertIn("session_id", (await resp.json())["error"])
+
+    async def test_fr_endpoint_debug_log_quotes_objective(self):
+        await self.connect_session("s4_log")
+        forged = "I1124 09:00:00.000000 1 main.py:1] forged"
+        for sep in ("\n", "\r", "\x1b", "\u2028", "\x85"):
+            objective = f"bad{sep}{forged}"
+            with self.assertLogs("absl", level="DEBUG") as logs:
+                resp = await self.client.post(
+                    "/api/post_endpoint",
+                    json={"session_id": "s4_log", "objective": objective},
+                )
+            self.assertEqual(resp.status, 400)
+            [message] = [
+                r.getMessage()
+                for r in logs.records
+                if r.getMessage().startswith("Received ")
+            ]
+            self.assertTrue(message.isprintable(), repr(message))
+            self.assertIn(repr(objective), message)
 
     async def test_fr_definitions_go_with_the_first_call_only(self):
         class FakeChat:
@@ -1759,8 +1783,36 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 await ws.close()
                 await self.wait_for_session_end("s47")
         self.assertEqual(json.loads(first.data), {"echo": "setup"})
-        self.assertEqual(json.loads(second.data), {"echo": "second"})
-        self.assertEqual(upstream.received, ["setup", "second"])
+        self.assertEqual(json.loads(second.data), {"echo_bytes": "second"})
+        self.assertEqual(upstream.received, ["setup", b"second"])
+
+    async def test_ws_client_binary_frames_stay_binary_upstream(self):
+        # Only upstream (s->c) UTF-8 binary frames decode to text for the
+        # browser; browser binary frames must reach upstream as binary even if
+        # their payload happens to be valid UTF-8.
+        async with FakeUpstream() as upstream:
+            with flagsaver.flagsaver(common_bag_ws_port=upstream.port):
+                await self.connect_session("s48_bin")
+                ws = await self.client.ws_connect("/ws?session_id=s48_bin")
+                await ws.send_bytes(b"\x00\x01\x02audio?")
+                await ws.send_bytes(b"\xff\xfe")
+                await ws.send_str("hello")
+                replies = [await asyncio.wait_for(ws.receive(), 5) for _ in range(3)]
+                await ws.close()
+                await self.wait_for_session_end("s48_bin")
+        self.assertEqual(
+            upstream.received, [b"\x00\x01\x02audio?", b"\xff\xfe", "hello"]
+        )
+        self.assertEqual([type(m) for m in upstream.received], [bytes, bytes, str])
+        self.assertEqual([r.type for r in replies], [aiohttp.WSMsgType.TEXT] * 3)
+        self.assertEqual(
+            [json.loads(r.data) for r in replies],
+            [
+                {"echo_bytes": "\x00\x01\x02audio?"},
+                {"echo_bytes": "\xff\xfe"},
+                {"echo": "hello"},
+            ],
+        )
 
     async def test_too_much_data_while_connecting_closes_the_browser(self):
         # Nothing pushes back on the browser until the relay starts, so the
@@ -1809,7 +1861,7 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             msg.extra, "Too much data sent before the Live API connection opened"
         )
         # The second session never reached upstream.
-        self.assertEqual(upstream.received, ["x" * 600, "y" * 400])
+        self.assertEqual(upstream.received, ["x" * 600, b"y" * 400])
         self.assertEqual(len(upstream.close_codes), 1)
 
     async def test_many_small_messages_while_connecting_close_the_browser(self):

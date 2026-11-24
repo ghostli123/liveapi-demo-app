@@ -426,7 +426,7 @@ async def handle_fr_post_request(request: web.Request):
 
     query_object = request_body.pop("objective", None)
     query = json.dumps(request_body)
-    logging.debug("Received %s query for Gemini:\n%s", query_object, query)
+    logging.debug("Received %r query for Gemini: %s", query_object, query)
     if query_object == "fc_definition":
         chat_session.fc_definitions = query
         return web.json_response({"response": "Function definitions stored."})

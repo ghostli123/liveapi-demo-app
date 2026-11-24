@@ -587,6 +587,7 @@ class FakeConnection:
         self.recv_error = recv_error
         self.messages = list(messages)
         self.send_error = send_error
+        self.sent = []
         self.close_code = None
         self.close_reason = ""
 
@@ -600,9 +601,49 @@ class FakeConnection:
     async def send(self, message):
         if self.send_error:
             raise self.send_error
+        self.sent.append(message)
 
     async def close(self, code=1000, reason=""):
         self.close_code = code
+
+
+class ForwardFrameTypeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_client_binary_frames_stay_binary_upstream(self):
+        upstream = FakeConnection()
+        client = FakeConnection()
+        handler = websocket_handler.WebsocketHandler(
+            "ws://unused", "s", client, debug_mode=True, keepalive_s=None
+        )
+        frames = [b'{"setup": {}}', b"\x00\x01\x02audio?", b"\xff\xfe", '{"text": 1}']
+        with self.assertLogs("absl", level="DEBUG") as logs:
+            for frame in frames:
+                self.assertTrue(await handler._forward(frame, upstream, "c->s"))
+        self.assertEqual(upstream.sent, frames)
+        self.assertEqual([type(m) for m in upstream.sent], [bytes, bytes, bytes, str])
+        self.assertEqual(
+            handler.traffic["c->s"], [len(frames), sum(len(f) for f in frames)]
+        )
+        debug_lines = [
+            r.getMessage() for r in logs.records if "c->s proxying" in r.getMessage()
+        ]
+        self.assertEqual(len(debug_lines), len(frames))
+        self.assertTrue(debug_lines[0].endswith("<binary>"), debug_lines[0])
+        self.assertTrue(debug_lines[1].endswith("<binary>"), debug_lines[1])
+        self.assertTrue(debug_lines[2].endswith("<binary>"), debug_lines[2])
+        self.assertTrue(debug_lines[3].endswith('{"text": 1}'), debug_lines[3])
+
+    async def test_upstream_utf8_binary_frames_decode_to_text_for_browser(self):
+        client = FakeConnection()
+        handler = websocket_handler.WebsocketHandler(
+            "ws://unused", "s", client, keepalive_s=None
+        )
+        frames = [b'{"setupComplete": {}}', b"\xff\xfe", '{"plain": true}']
+        for frame in frames:
+            self.assertTrue(await handler._forward(frame, client, "s->c"))
+        self.assertEqual(
+            client.sent, ['{"setupComplete": {}}', b"\xff\xfe", '{"plain": true}']
+        )
+        self.assertEqual([type(m) for m in client.sent], [str, bytes, str])
 
 
 class ProxyErrorTest(unittest.IsolatedAsyncioTestCase):

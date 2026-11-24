@@ -193,9 +193,9 @@ class WebsocketHandler:
 
         Messages are forwarded as-is, without parsing: video frames are large,
         and re-encoding them cost more CPU than the rest of the proxy combined.
-        The one change is that binary frames that hold UTF-8 text (the Live API
-        sends its JSON that way) become text frames, since the browser client
-        only handles text frames.
+        The one change is that upstream (s->c) binary frames that hold UTF-8
+        text (the Live API sends its JSON that way) become text frames, since
+        the browser client only handles text frames.
         """
         for message in pending:
             if not await self._forward(message, target_websocket, service_name):
@@ -215,7 +215,7 @@ class WebsocketHandler:
 
     async def _forward(self, message, target_websocket, service_name: str) -> bool:
         """Sends one message to target; False if target has closed."""
-        if isinstance(message, bytes):
+        if service_name == "s->c" and isinstance(message, bytes):
             try:
                 message = message.decode("utf-8")
             except UnicodeDecodeError:
