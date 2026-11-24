@@ -197,7 +197,9 @@ function initApplicationManagers() {
     AppState.liveVideoOutputManager.onAutoplayBlocked = showAutoplayBlocked;
     AppState.liveVideoOutputManager.onPlaybackError = (message) => newErrorMessage(message);
     AppState.liveVideoOutputManager.onRecordingLimit = (message) => newSystemMessage(message);
-    AppState.liveAudioOutputManager.onPlayerError = (message) => newErrorMessage(message);
+    AppState.liveAudioOutputManager.onPlayerError = (message) => {
+        if (AppUI.isHidden("disconnected")) newErrorMessage(message);
+    };
     if (AppState.geminiLiveApi.webRtcManager) {
         AppState.geminiLiveApi.webRtcManager.onAutoplayBlocked = showAutoplayBlocked;
     }
@@ -1963,7 +1965,7 @@ function endSession() {
     setUserTurnActive(false); // stopAudioInput() already cancelled any pending turn start.
     closeTranscriptLine("input");
     closeTranscriptLine("output");
-    AppState.liveAudioOutputManager.clear();
+    AppState.liveAudioOutputManager.close();
     // The next Connect starts a new conversation unless the user pastes a
     // handle back in, so keep the last one where they can find it. Only a
     // handle the server sent this session counts: after a Connect that failed

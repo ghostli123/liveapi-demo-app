@@ -1026,6 +1026,7 @@ function reconnect({ context, element, api }) {
     AppState.liveVideoManager.stopWebcam = () => {};
     AppState.liveScreenManager.stopCapture = () => {};
     AppState.liveAudioOutputManager.clear = () => {};
+    AppState.liveAudioOutputManager.close = () => {};
     Object.assign(AppState.liveVideoOutputManager, {
         getRecordings: () => [],
         clearRecordedChunks() {},
@@ -1254,6 +1255,46 @@ test("a failed capture worklet turns the mic off and says why; a failed player i
 
     context.AppState.liveAudioOutputManager.onPlayerError("The audio player stopped.");
     assert.deepEqual(chat, ["The audio player stopped."]);
+
+    // Once disconnected, late player errors do not append into the ended session's chat.
+    element("disconnected").hidden = false;
+    context.AppState.liveAudioOutputManager.onPlayerError("Late post-disconnect player error.");
+    assert.deepEqual(chat, ["The audio player stopped."]);
+});
+
+test("endSession() closes the audio output manager and suppresses post-disconnect player errors", () => {
+    const app = loadSession();
+    const { context, element, api } = app;
+    const chat = [];
+    element("text-chat").appendChild = (line) => chat.push(line.textContent);
+    let closed = 0;
+    let cleared = 0;
+    api.disconnect = () => {
+        api.isSetupComplete = false;
+    };
+    const { AppState } = context;
+    AppState.micLevelMeter.stop = () => {};
+    AppState.liveVideoManager.stopWebcam = () => {};
+    AppState.liveScreenManager.stopCapture = () => {};
+    AppState.liveAudioOutputManager.clear = () => {
+        cleared++;
+    };
+    AppState.liveAudioOutputManager.close = () => {
+        closed++;
+    };
+    Object.assign(AppState.liveVideoOutputManager, {
+        getRecordings: () => [],
+        clearRecordedChunks() {},
+        resetPlayer() {},
+    });
+
+    context.endSession();
+    assert.equal(closed, 1);
+    assert.equal(cleared, 0);
+    assert.equal(element("disconnected").hidden, false);
+
+    AppState.liveAudioOutputManager.onPlayerError("The audio player stopped.");
+    assert.deepEqual(chat, []);
 });
 
 test("the avatar video recording limit is reported in the chat", () => {
@@ -2367,6 +2408,7 @@ function loadFunctionCalls({ abortRejects = true } = {}) {
     AppState.liveVideoManager.stopWebcam = () => {};
     AppState.liveScreenManager.stopCapture = () => {};
     AppState.liveAudioOutputManager.clear = () => {};
+    AppState.liveAudioOutputManager.close = () => {};
     Object.assign(AppState.liveVideoOutputManager, {
         getRecordings: () => [],
         clearRecordedChunks() {},

@@ -1648,9 +1648,13 @@ function audioOutputWithFakeContexts({ holdAddModule = false } = {}) {
         constructor(context) {
             this.context = context;
             this.posted = [];
+            this.disconnected = false;
             this.port = { postMessage: (message) => this.posted.push(message) };
         }
         connect() {}
+        disconnect() {
+            this.disconnected = true;
+        }
     }
     const context = loadScript("live-media-manager.js", ["LiveAudioOutputManager"], {
         window: { AudioContext: FakeAudioContext, atob },
@@ -2002,6 +2006,103 @@ test("a playback worklet crash long after the last start waits 1 s again", async
     assert.equal(manager.crashDelayMs, 1000);
     assert.equal(await rebuildsAt(134999 + 999), false);
     assert.ok(await rebuildsAt(134999 + 1000));
+});
+
+test("close() tears down the playback context, suppresses late crashes, and abandons in-flight worklet loads", async () => {
+    const { manager, fake } = audioOutputWithFakeContexts({ holdAddModule: true });
+    const reports = [];
+    manager.onPlayerError = (message) => reports.push(message);
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+        // Connect #1: worklet finishes loading and plays a chunk.
+        manager.resume();
+        manager.playAudioChunk(AUDIO_CHUNK);
+        fake.pendingLoads[0].resolve();
+        await settle();
+        const firstCtx = fake.contexts[0];
+        const firstNode = manager.workletNode;
+        const firstCrashHandler = firstNode.onprocessorerror;
+        assert.equal(firstCtx.state, "running");
+        assert.equal(firstNode.posted.length, 1);
+
+        // Disconnect closes the context, disconnects the node, clears pending audio, and nulls references.
+        manager.close();
+        assert.equal(firstCtx.state, "closed");
+        assert.equal(firstNode.disconnected, true);
+        assert.equal(firstNode.onprocessorerror, null);
+        assert.equal(firstNode.posted.at(-1), "clear");
+        assert.equal(manager.audioContext, null);
+        assert.equal(manager.workletNode, null);
+        assert.equal(manager.ready, null);
+        // Calling close() again is a safe no-op.
+        manager.close();
+
+        // A late processorerror from the old node after close() does not report or set backoff.
+        firstCrashHandler(new Event("processorerror"));
+        assert.deepEqual(reports, []);
+        assert.equal(manager.failed, null);
+        assert.equal(manager.crashDelayMs, 0);
+
+        // Connect #2 starts an addModule(), queues a chunk, and Disconnect runs while it is in flight.
+        manager.resume();
+        manager.playAudioChunk(AUDIO_CHUNK);
+        assert.equal(fake.loads, 2);
+        const secondCtx = fake.contexts[1];
+        manager.close();
+        assert.equal(secondCtx.state, "closed");
+        assert.equal(manager.audioContext, null);
+        assert.equal(manager.ready, null);
+
+        // Whether that superseded load rejects or resolves, it must not report, log, or install a node.
+        fake.pendingLoads[1].reject(new Error("503"));
+        await settle();
+        assert.deepEqual(reports, []);
+        assert.deepEqual(fake.errors, []);
+        assert.equal(manager.failed, null);
+        assert.equal(manager.workletNode, null);
+
+        // Same for an in-flight load that resolves after close(): still torn down cleanly.
+        manager.resume();
+        manager.playAudioChunk(AUDIO_CHUNK);
+        assert.equal(fake.loads, 3);
+        const thirdCtx = fake.contexts[2];
+        manager.close();
+        fake.pendingLoads[2].resolve();
+        await settle();
+        assert.equal(thirdCtx.state, "closed");
+        assert.equal(manager.workletNode, null);
+        assert.equal(manager.audioContext, null);
+
+        // Connect #3 starts cleanly on a brand-new context and plays audio.
+        manager.resume();
+        manager.playAudioChunk(AUDIO_CHUNK);
+        fake.pendingLoads[3].resolve();
+        await settle();
+        assert.equal(fake.contexts.length, 4);
+        assert.equal(fake.contexts[3].state, "running");
+        assert.equal(manager.workletNode.context, fake.contexts[3]);
+        assert.equal(manager.workletNode.posted.length, 1);
+        assert.deepEqual(reports, []);
+        assert.deepEqual(unhandled, []);
+    } finally {
+        process.off("unhandledRejection", onUnhandled);
+    }
+});
+
+test("close() still closes the playback context if node disconnect() throws", async () => {
+    const { manager, fake } = audioOutputWithFakeContexts();
+    manager.resume();
+    await settle();
+    manager.workletNode.disconnect = () => {
+        throw new Error("InvalidStateError");
+    };
+    manager.close();
+    assert.equal(fake.contexts[0].state, "closed");
+    assert.equal(manager.audioContext, null);
+    assert.equal(manager.workletNode, null);
+    assert.ok(fake.errors.includes("Error disconnecting audio output node:"));
 });
 
 test("a mic level meter the browser refuses throws and leaves nothing running", () => {

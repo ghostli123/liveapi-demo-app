@@ -74,9 +74,58 @@ class LiveAudioOutputManager {
         // Through the same promise as playAudioChunk(), so chunks queued
         // before this call are posted (and dropped) before the clear.
         if (this.ready) {
+            const generation = this.generation;
             this.ready
-                .then((workletNode) => workletNode.port.postMessage("clear"))
+                .then((workletNode) => {
+                    if (this.generation !== generation) return;
+                    workletNode.port.postMessage("clear");
+                })
                 .catch(() => {}); // The worklet failed to load; nothing to clear.
+        }
+    }
+
+    /**
+     * Stops playback and closes the audio context so the browser can release
+     * the output device between sessions. Also invalidates any in-flight
+     * worklet load or queued chunks so they can't start or report errors after
+     * Disconnect.
+     */
+    close() {
+        this.generation++;
+        const workletNode = this.workletNode;
+        const audioContext = this.audioContext;
+        this.workletNode = null;
+        this.audioContext = null;
+        this.ready = null;
+        this.failed = null;
+        this.retryAt = 0;
+        this.retryDelayMs = 0;
+        this.crashDelayMs = 0;
+        this.startedAt = 0;
+        this.crashReported = false;
+        if (workletNode) {
+            workletNode.onprocessorerror = null;
+            if (audioContext && audioContext.state !== "closed") {
+                try {
+                    workletNode.port.postMessage("clear");
+                } catch {
+                    // Best effort; the context is closing below.
+                }
+            }
+            if (typeof workletNode.disconnect === "function") {
+                try {
+                    workletNode.disconnect();
+                } catch (error) {
+                    console.error("Error disconnecting audio output node:", error);
+                }
+            }
+        }
+        if (audioContext && audioContext.state !== "closed") {
+            try {
+                audioContext.close()?.catch(() => {});
+            } catch (error) {
+                console.error("Error closing audio output context:", error);
+            }
         }
     }
 
@@ -192,6 +241,7 @@ class LiveAudioOutputManager {
     processorFailed(workletNode, event) {
         if (this.workletNode !== workletNode) return; // Already replaced.
         console.error("The audio player stopped:", event);
+        this.generation++;
         const audioContext = this.audioContext;
         this.audioContext = null;
         this.ready = null;
