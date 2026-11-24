@@ -2688,6 +2688,18 @@ class MainAsyncTest(unittest.IsolatedAsyncioTestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
+    async def test_invalid_port_fails_before_gateway_or_app(self):
+        with mock.patch.object(main, "create_app", wraps=main.create_app) as create_app:
+            for value in ["", "   ", "abc", "-1", "65536", "70000", "1_000", "+8080"]:
+                with self.subTest(port=value):
+                    self.popen.reset_mock()
+                    create_app.reset_mock()
+                    with mock.patch.dict("os.environ", {"PORT": value}):
+                        with self.assertRaisesRegex(ValueError, "invalid PORT"):
+                            await main.main_async()
+                    self.popen.assert_not_called()
+                    create_app.assert_not_called()
+
     async def test_gateway_stopped_when_port_is_in_use(self):
         with socket.socket() as busy:
             busy.bind(("", 0))
@@ -3088,6 +3100,57 @@ class FlagValidatorTest(unittest.TestCase):
                         self.assertEqual(
                             config.thinking_config.thinking_level, expected
                         )
+
+    def test_listen_port(self):
+        with mock.patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("PORT", None)
+            self.assertEqual(main.listen_port(), main.DEFAULT_PORT)
+        for raw, expected in [
+            ("0", 0),
+            ("80", 80),
+            ("8080", 8080),
+            ("65535", 65535),
+            (" 8080 ", 8080),
+        ]:
+            with self.subTest(port=raw):
+                with mock.patch.dict("os.environ", {"PORT": raw}):
+                    self.assertEqual(main.listen_port(), expected)
+        for raw in [
+            "",
+            "   ",
+            "abc",
+            "-1",
+            "-0",
+            "+8080",
+            "65536",
+            "70000",
+            "1_000",
+            "8080.0",
+            "80 80",
+            "\u0668\u0660\u0668\u0660",
+        ]:
+            with self.subTest(port=raw):
+                with mock.patch.dict("os.environ", {"PORT": raw}):
+                    with self.assertRaisesRegex(
+                        ValueError, "invalid PORT.*0 and 65535"
+                    ):
+                        main.listen_port()
+
+    def test_server_refuses_to_start_with_invalid_env_port(self):
+        script = os.path.join(os.path.dirname(main.__file__), "main.py")
+        for raw in ["", "abc", "-1", "70000"]:
+            with self.subTest(port=raw):
+                result = subprocess.run(
+                    [sys.executable, script],
+                    env={**os.environ, "PORT": raw},
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("invalid PORT", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertNotIn("Serving on", result.stderr)
 
     def test_server_refuses_to_start_with_invalid_port_or_heartbeat(self):
         script = os.path.join(os.path.dirname(main.__file__), "main.py")

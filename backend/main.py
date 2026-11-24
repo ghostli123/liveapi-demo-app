@@ -48,6 +48,7 @@ VERTEX_HOSTS = frozenset(
     }
 )
 DEFAULT_PROJECT_ID = "live-api-webrtc-testing"
+DEFAULT_PORT = 8080
 # Preview models are served from the global endpoint only, whatever the
 # Live API session's location.
 FR_SIMULATOR_LOCATION = "global"
@@ -271,6 +272,24 @@ def listen_host() -> str | None:
     if HOST.value is not None:
         return HOST.value
     return None if os.environ.get("K_SERVICE") else "127.0.0.1"
+
+
+def listen_port() -> int:
+    """The TCP port to bind from $PORT (default 8080; 0 lets the OS pick)."""
+    raw = os.environ.get("PORT")
+    if raw is None:
+        return DEFAULT_PORT
+    stripped = raw.strip()
+    if not stripped.isascii() or not stripped.isdigit():
+        raise ValueError(
+            f"invalid PORT {raw!r}; expected an integer between 0 and 65535"
+        )
+    port = int(stripped)
+    if not (0 <= port <= 65535):
+        raise ValueError(
+            f"invalid PORT {raw!r}; expected an integer between 0 and 65535"
+        )
+    return port
 
 
 def resolve_ws_host(endpoint: Any, location: Any) -> str:
@@ -1185,6 +1204,7 @@ async def _stop_gateway(proxy_proc: subprocess.Popen[Any]) -> None:
 
 async def main_async():
     logging.set_verbosity(logging.DEBUG if DEBUG.value else logging.INFO)
+    port = listen_port()
     proxy_proc: subprocess.Popen[Any] | None = None
     runner = None
     warmup_hostnames = None
@@ -1236,7 +1256,6 @@ async def main_async():
                 )
 
         app = await create_app()
-        port = int(os.environ.get("PORT", 8080))
 
         runner = web.AppRunner(app, shutdown_timeout=SHUTDOWN_TIMEOUT_S)
         await runner.setup()
@@ -1297,6 +1316,10 @@ async def main_async():
 def serve(argv) -> None:
     """Runs the server until SIGINT or SIGTERM, then exits the process."""
     del argv  # Unused.
+    try:
+        listen_port()
+    except ValueError as e:
+        sys.exit(str(e))
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(main_async())
