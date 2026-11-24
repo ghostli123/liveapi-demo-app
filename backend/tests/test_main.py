@@ -507,6 +507,54 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         for method, path in (("POST", "/api/control"), ("GET", "/ws?session_id=s22")):
             status = await self._raw_request(method, path, "Host: evil\xe9.example")
             self.assertEqual(status, 400, method)
+        # Userinfo, path/query/fragment, backslash, invalid port, whitespace,
+        # or empty Host headers would otherwise parse to hostname="localhost"
+        # (or None) in urlsplit() and bypass the Host check or return 403 None.
+        malformed_hosts = [
+            "evil.com@localhost:8080",
+            "evil.com\\@localhost:8080",
+            "localhost/foo",
+            "localhost?foo",
+            "localhost#foo",
+            "localhost\\foo",
+            "localhost:notaport",
+            "localhost:99999",
+            "local host:8080",
+            "",
+        ]
+        for bad_host in malformed_hosts:
+            for method, path in (
+                ("POST", "/api/control"),
+                ("GET", "/ws?session_id=s22"),
+            ):
+                status = await self._raw_request(method, path, f"Host: {bad_host}")
+                self.assertEqual(status, 400, (method, bad_host))
+        # Malformed Origin headers (non-HTTP(S) scheme, userinfo, or path/query/
+        # fragment) must be rejected even if their hostname matches Host or
+        # --allowed_hosts.
+        own_netloc = f"{self.client.host}:{self.client.port}"
+        for bad_origin in [
+            f"javascript://{own_netloc}",
+            f"http://{own_netloc}/path",
+            f"http://{own_netloc}?q=1",
+            f"http://{own_netloc}#frag",
+        ]:
+            resp = await self.client.post(
+                "/api/control", json=body, headers={"Origin": bad_origin}
+            )
+            self.assertEqual(resp.status, 403, bad_origin)
+        with flagsaver.flagsaver(allowed_hosts=["demo.example"]):
+            for bad_origin in [
+                "https://evil.com@demo.example",
+                "ftp://demo.example",
+                "https://demo.example/path",
+                "https://demo.example?q=1",
+                "https://demo.example#frag",
+            ]:
+                resp = await self.client.post(
+                    "/api/control", json=body, headers={"Origin": bad_origin}
+                )
+                self.assertEqual(resp.status, 403, bad_origin)
         self.assertIsNone(await main.SESSION_MANAGER.search_item("s22"))
 
     async def test_fr_endpoint_reports_unavailable_simulator(self):
@@ -1563,6 +1611,54 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(msg.data, 1009)
         self.assertEqual(upstream.received, [])
 
+    async def test_multibyte_utf8_messages_while_connecting_count_utf8_bytes(self):
+        # Counting len(str) (code points) let 4-byte UTF-8 characters hold up
+        # to 4x MAX_PENDING_CLIENT_BYTES in memory before upstream opened.
+        open_upstream = websocket_handler.WebsocketHandler._open_upstream
+        opened = asyncio.Event()
+
+        async def slow_open(handler):
+            await opened.wait()
+            return await open_upstream(handler)
+
+        async with FakeUpstream() as upstream:
+            with (
+                flagsaver.flagsaver(common_bag_ws_port=upstream.port),
+                mock.patch.object(
+                    websocket_handler.WebsocketHandler, "_open_upstream", slow_open
+                ),
+                # 1000 UTF-8 bytes of payload in one message.
+                mock.patch.object(
+                    websocket_handler,
+                    "MAX_PENDING_CLIENT_BYTES",
+                    1000 + websocket_handler.PENDING_MESSAGE_OVERHEAD_BYTES,
+                ),
+            ):
+                # 250 4-byte emoji = exactly 1000 UTF-8 bytes -> accepted.
+                await self.connect_session("s96")
+                ws = await self.client.ws_connect("/ws?session_id=s96")
+                await ws.send_str("\U0001f600" * 250)
+                await asyncio.sleep(0.2)
+                opened.set()
+                echo = await asyncio.wait_for(ws.receive(), 5)
+                await ws.close()
+                await self.wait_for_session_end("s96")
+                opened.clear()
+
+                # 251 4-byte emoji = 1004 UTF-8 bytes (only 251 chars) -> 1009.
+                await self.connect_session("s97")
+                ws = await self.client.ws_connect("/ws?session_id=s97")
+                await ws.send_str("\U0001f600" * 251)
+                try:
+                    msg = await asyncio.wait_for(ws.receive(), 5)
+                finally:
+                    opened.set()
+                await self.wait_for_session_end("s97")
+        self.assertEqual(json.loads(echo.data), {"echo": "\U0001f600" * 250})
+        self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(msg.data, 1009)
+        self.assertEqual(upstream.received, ["\U0001f600" * 250])
+
     async def test_upstream_handshake_times_out(self):
         async def silent(reader, writer):
             await reader.read()
@@ -1978,6 +2074,7 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             "https://demo.example",
             "demo.example/app",
             "user@demo.example",
+            "demo\\example",
             "demo example",
             ":8443",
         ]:

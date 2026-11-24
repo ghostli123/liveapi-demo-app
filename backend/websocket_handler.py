@@ -358,7 +358,12 @@ class WebsocketHandler:
             except websockets.exceptions.ConnectionClosed:
                 self.client_closed = True
                 return
-            pending_bytes += len(message) + PENDING_MESSAGE_OVERHEAD_BYTES
+            message_bytes = (
+                len(message)
+                if isinstance(message, bytes) or message.isascii()
+                else len(message.encode("utf-8"))
+            )
+            pending_bytes += message_bytes + PENDING_MESSAGE_OVERHEAD_BYTES
             if pending_bytes > MAX_PENDING_CLIENT_BYTES:
                 self.close_code = 1009
                 self.close_reason = (

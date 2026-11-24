@@ -818,6 +818,7 @@ def _allowed_host_entry(entry: str) -> tuple[str, int | None]:
     if (
         parts.netloc != entry
         or "@" in entry
+        or "\\" in entry
         or any(c.isspace() for c in entry)
         or not parts.hostname
     ):
@@ -871,8 +872,16 @@ def is_explicitly_allowed_origin(origin: str) -> bool:
     except ValueError:  # Unparsable, so it can't be a listed host.
         return False
     # "null" has no host, and a blank entry must not match it; "http://*"
-    # must not match the "*" entry.
-    if origin_host in ("", "*"):
+    # must not match the "*" entry. Reject non-HTTP(S) schemes, userinfo, and
+    # path/query/fragment components that a browser Origin header never carries.
+    if (
+        parts.scheme.lower() not in _DEFAULT_PORTS
+        or "@" in parts.netloc
+        or parts.path
+        or parts.query
+        or parts.fragment
+        or origin_host in ("", "*")
+    ):
         return False
     for entry in ALLOWED_HOSTS.value:
         host, port = _allowed_host_entry(entry)
@@ -928,6 +937,25 @@ async def _is_allowed_host(hostname: str | None) -> bool:
     return normalized in await _get_machine_hostnames()
 
 
+def _parse_host_header(raw_host: str) -> str:
+    """Extracts the host name from a Host header, rejecting malformed forms."""
+    # Host names are ASCII on the wire (IDNs as punycode); aiohttp decodes
+    # other bytes to surrogates, which the 403 reply can't encode.
+    if not raw_host.isascii():
+        raise ValueError("non-ASCII Host")
+    parts = urllib.parse.urlsplit("//" + raw_host)  # Raises for e.g. "[".
+    _ = parts.port  # Raises for a non-numeric or out-of-range port.
+    if (
+        parts.netloc != raw_host
+        or "@" in raw_host
+        or "\\" in raw_host
+        or any(c.isspace() for c in raw_host)
+        or not parts.hostname
+    ):
+        raise ValueError("malformed Host")
+    return parts.hostname
+
+
 @web.middleware
 async def reject_cross_origin(request: web.Request, handler):
     """Rejects API and WebSocket requests that other websites' pages make.
@@ -939,12 +967,8 @@ async def reject_cross_origin(request: web.Request, handler):
     """
     if request.method != "GET" or request.path == "/ws":
         try:
-            # Host names are ASCII on the wire (IDNs as punycode); aiohttp
-            # decodes other bytes to surrogates, which the reply can't encode.
-            if not request.host.isascii():
-                raise ValueError("non-ASCII Host")
-            host = urllib.parse.urlsplit("//" + request.host).hostname
-        except ValueError:  # e.g. an unclosed IPv6 bracket
+            host = _parse_host_header(request.host)
+        except ValueError:  # e.g. userinfo/path tricks, bad port, unclosed IPv6
             return web.Response(text="Invalid Host header", status=400)
         if not await _is_allowed_host(host):
             # %r: the path (percent-decoded) and headers come from the client,
@@ -959,7 +983,17 @@ async def reject_cross_origin(request: web.Request, handler):
         origin = request.headers.get("Origin")
         if origin is not None:
             try:
-                origin_netloc = urllib.parse.urlsplit(origin).netloc
+                origin_parts = urllib.parse.urlsplit(origin)
+                origin_netloc = (
+                    origin_parts.netloc
+                    if (
+                        origin_parts.scheme.lower() in _DEFAULT_PORTS
+                        and not origin_parts.path
+                        and not origin_parts.query
+                        and not origin_parts.fragment
+                    )
+                    else None
+                )
             except ValueError:  # Unparsable, so it can't be this server.
                 origin_netloc = None
             # Only an exact match or an explicit --allowed_hosts entry: the
