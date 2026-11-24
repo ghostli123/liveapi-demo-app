@@ -1039,6 +1039,113 @@ test("a microphone prompt from the last session doesn't start a turn in the next
     assert.deepEqual(api.sent, [["activity", true]]);
 });
 
+test("turning the mic off cancels a pending Start speaking prompt and ignores it if Mic On follows", async () => {
+    const { context, element, api, mic, dialogText } = loadSession();
+    api.isSetupComplete = true;
+    element("micBtn").hidden = true;
+    element("micOffBtn").hidden = false;
+
+    const first = context.turnBtnClick();
+    assert.equal(mic.starts.length, 1);
+    assert.equal(context.AppState.turnStarting, true);
+
+    // Cancelling with Mic Off clears turnStarting immediately so a new Start speaking click works.
+    context.micBtnClick();
+    assert.equal(context.AppState.turnStarting, false);
+
+    const second = context.turnBtnClick();
+    assert.equal(mic.starts.length, 2, "a new Start speaking click starts a fresh mic prompt");
+    assert.equal(context.AppState.turnStarting, true);
+
+    // The first prompt settling while the second is pending doesn't send activity_start or clear turnStarting.
+    mic.starts[0]();
+    await first;
+    assert.deepEqual(api.sent, []);
+    assert.equal(context.AppState.userTurnActive, false);
+    assert.equal(context.AppState.turnStarting, true);
+
+    // Cancel the second prompt and turn the mic on normally; the stale second prompt must not start a turn.
+    context.micBtnClick();
+    assert.equal(context.AppState.turnStarting, false);
+    context.micOffBtnClick();
+    assert.equal(mic.starts.length, 3);
+
+    mic.starts[1]();
+    await second;
+    assert.deepEqual(api.sent, []);
+    assert.equal(context.AppState.userTurnActive, false);
+    assert.equal(context.AppState.turnStarting, false);
+    assert.equal(dialogText(), undefined);
+
+    mic.starts[2]();
+    await Promise.resolve();
+    assert.deepEqual(api.sent, []);
+    assert.equal(context.AppState.userTurnActive, false);
+});
+
+test("a GoAway resume cancels a pending Start speaking prompt so it doesn't start a turn on the new connection", async () => {
+    const { context, element, api, mic, dialogText } = loadSession();
+    api.isSetupComplete = true;
+    api.resume = async () => {
+        api.isSetupComplete = false;
+    };
+    context.AppState.liveVideoOutputManager.initMediaSource = () => {};
+    element("micBtn").hidden = true;
+    element("micOffBtn").hidden = false;
+
+    const stale = context.turnBtnClick();
+    assert.equal(mic.starts.length, 1);
+    assert.equal(context.AppState.turnStarting, true);
+
+    await context.handleSessionResumptionReconnect();
+    assert.equal(context.AppState.turnStarting, false);
+
+    // New connection finishes setup before the pre-resume mic prompt is answered.
+    api.isSetupComplete = true;
+    mic.starts[0]();
+    await stale;
+    assert.deepEqual(api.sent, []);
+    assert.equal(context.AppState.userTurnActive, false);
+    assert.equal(context.AppState.turnStarting, false);
+    assert.equal(dialogText(), undefined);
+
+    // A fresh Start speaking click on the resumed connection works normally.
+    await context.turnBtnClick();
+    assert.deepEqual(api.sent, [["activity", true]]);
+    assert.equal(context.AppState.userTurnActive, true);
+});
+
+test("switching the microphone cancels a pending Start speaking prompt", async () => {
+    const { context, element, api, mic, dialogText } = loadSession();
+    api.isSetupComplete = true;
+    element("micBtn").hidden = true;
+    element("micOffBtn").hidden = false;
+
+    const stale = context.turnBtnClick();
+    assert.equal(mic.starts.length, 1);
+    assert.equal(context.AppState.turnStarting, true);
+
+    element("audioSource").value = "mic-2";
+    context.newMicSelected();
+    assert.equal(mic.starts.length, 2);
+    assert.equal(context.AppState.turnStarting, false);
+
+    // Stale prompt #0 resolves before prompt #1: must not start a turn.
+    mic.starts[0]();
+    await stale;
+    assert.deepEqual(api.sent, []);
+    assert.equal(context.AppState.userTurnActive, false);
+    assert.equal(context.AppState.turnStarting, false);
+    assert.equal(dialogText(), undefined);
+
+    // Prompt #1 resolves; a fresh Start speaking click now starts the turn.
+    mic.starts[1]();
+    await Promise.resolve();
+    await context.turnBtnClick();
+    assert.deepEqual(api.sent, [["activity", true]]);
+    assert.equal(context.AppState.userTurnActive, true);
+});
+
 test("a session's last handle moves from the field into the chat when it ends", () => {
     const app = loadSession();
     const chat = [];

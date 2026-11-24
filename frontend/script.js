@@ -136,7 +136,7 @@ const AppState = {
     /** @type {HTMLElement | null} */
     modalOpener: null, // Had focus when the branded-voice dialog opened; gets it back on close
     turnStarting: false, // "Start speaking" is waiting for the microphone
-    turnAttempt: 0, // Advanced by each "Start speaking" wait and by the end of a session
+    turnAttempt: 0, // Advanced by each "Start speaking" wait, mic stop/switch, resume, or session end
     /** @type {string | null} */
     preferredTransport: null, // The transport the user last picked
     recordingStartTime: 0, // performance.now() when the voice recording started
@@ -1141,6 +1141,7 @@ async function handleSessionResumptionReconnect() {
         closeTranscriptLine("input");
         closeTranscriptLine("output");
         setUserTurnActive(false); // The new session never saw activity_start.
+        cancelTurnStart(); // A "Start speaking" waiting on the mic belongs to the old connection.
         AppState.wsAudioStreamActive = false; // The new connection has no audio stream yet.
         showHearingUser(false); // Nor the speech: its ACTIVITY_END won't come.
         resetLatencyTurn();
@@ -1463,19 +1464,20 @@ async function startAudioInput() {
             AppState.liveAudioInputManager.recordChunk();
             AppState.liveAudioInputManager.deviceId = deviceId;
             await AppState.liveAudioInputManager.updateAudioInterval(AppUI.getValue("audioInterval"));
-            if (attempt !== AppState.micAttempt) return;
+            if (attempt !== AppState.micAttempt) return false;
             if (AppState.liveAudioInputManager.processor && AppState.geminiLiveApi.isSetupComplete) {
                 AppState.wsAudioStreamActive = true;
             }
         }
-        if (attempt !== AppState.micAttempt) return;
+        if (attempt !== AppState.micAttempt) return false;
         if (isMicOn()) {
             startMicLevelMeter(webRtcManager ? webRtcManager.micStream : AppState.liveAudioInputManager.stream);
         }
         // Device names are only visible once the user has granted access.
         refreshDeviceLists();
+        return isMicOn();
     } catch (err) {
-        if (attempt !== AppState.micAttempt) return;
+        if (attempt !== AppState.micAttempt) return false;
         console.error("Failed to start microphone:", err);
         AppUI.showModal(`Could not start the microphone: ${deviceErrorReason(err)}`);
         // E.g. switching to another mic mid-turn: like turning the mic off,
@@ -1483,6 +1485,7 @@ async function startAudioInput() {
         endUserTurn();
         stopAudioInput();
         showMicState(false);
+        return false;
     }
 }
 
@@ -1516,6 +1519,7 @@ function endAudioStream() {
 
 function stopAudioInput() {
     AppState.micAttempt++;
+    cancelTurnStart(); // A "Start speaking" waiting on this mic no longer owns a turn.
     endAudioStream();
     AppState.wsAudioStreamActive = false;
     AppState.micLevelMeter.stop();
@@ -1568,6 +1572,11 @@ function setUserTurnActive(active) {
     AppUI.setText("turnBtn", active ? "Done speaking" : "Start speaking");
 }
 
+function cancelTurnStart() {
+    AppState.turnAttempt++;
+    AppState.turnStarting = false;
+}
+
 async function turnBtnClick() {
     if (AppState.userTurnActive) {
         endUserTurn();
@@ -1583,11 +1592,10 @@ async function turnBtnClick() {
     try {
         if (!isMicOn()) {
             showMicState(true);
-            await startAudioInput();
-            // The session ended during the permission prompt; a click in the
-            // next session owns the turn now.
-            if (attempt !== AppState.turnAttempt) return;
-            if (!isMicOn()) return; // The microphone failed to start.
+            const started = await startAudioInput();
+            // The session ended, resumed, or the mic was stopped/switched during
+            // the permission prompt; this click no longer owns the turn.
+            if (attempt !== AppState.turnAttempt || !started) return;
         }
         // Over WebSocket, audio is sent every audioInterval ms; send what the mic
         // captured before the click first, or it arrives inside the turn.
@@ -1749,6 +1757,7 @@ function newCameraSelected() {
 function newMicSelected() {
     AppState.liveAudioInputManager.deviceId = AppUI.getValue("audioSource") || null;
     if (isMicOn()) {
+        cancelTurnStart();
         startAudioInput();
     }
 }
@@ -1945,10 +1954,7 @@ function endSession() {
     stopConnectionTimer();
     AppUI.setText("connection-age", "--");
     AppUI.setHidden("turnBtnWrap", true);
-    setUserTurnActive(false);
-    // A "Start speaking" still waiting for the microphone belongs to this session.
-    AppState.turnAttempt++;
-    AppState.turnStarting = false;
+    setUserTurnActive(false); // stopAudioInput() already cancelled any pending turn start.
     closeTranscriptLine("input");
     closeTranscriptLine("output");
     AppState.liveAudioOutputManager.clear();
