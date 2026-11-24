@@ -502,7 +502,11 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             "location": "us-central1",
         }
         # urlsplit raises on an unclosed IPv6 bracket; that used to be a 500.
-        for headers, status in (({"Host": "["}, 400), ({"Origin": "http://["}, 403)):
+        for headers, status in (
+            ({"Host": "["}, 400),
+            ({"Host": "localhost:0", "Origin": "http://localhost:0"}, 400),
+            ({"Origin": "http://["}, 403),
+        ):
             resp = await self.client.post("/api/control", json=body, headers=headers)
             self.assertEqual(resp.status, status, headers)
             resp = await self.client.get("/ws?session_id=s22", headers=headers)
@@ -523,6 +527,9 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             "localhost#foo",
             "localhost\\foo",
             "localhost:notaport",
+            "localhost:0",
+            "localhost:00",
+            "[::1]:0",
             "localhost:99999",
             "local host:8080",
             "",
@@ -2314,7 +2321,12 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             "location": "us-central1",
         }
         with flagsaver.flagsaver(
-            allowed_hosts=["demo.example:8443", "web.example:443", "any.example"]
+            allowed_hosts=[
+                "demo.example:8443",
+                "web.example:443",
+                "any.example",
+                "[::1]",
+            ]
         ):
             # Behind a proxy that rewrites Host: only the listed port, or the
             # scheme's default when the Origin names none, is that page.
@@ -2330,6 +2342,13 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 ("http://web.example", 403),
                 ("https://web.example:8443", 403),
                 ("https://any.example:6666", 200),
+                ("https://any.example:1", 200),
+                ("https://any.example:65535", 200),
+                ("https://any.example:0", 403),
+                ("http://any.example:0", 403),
+                ("https://any.example:00", 403),
+                ("http://[::1]:0", 403),
+                ("http://[::1]:8080", 200),
                 ("https://demo.example:99999", 403),
             ]
             for i, (origin, status) in enumerate(cases):
@@ -2360,6 +2379,9 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         for entry in [
             "[",
             "demo.example:http",
+            "demo.example:0",
+            "demo.example:00",
+            "[::1]:0",
             "demo.example:99999",
             "https://demo.example",
             "demo.example/app",
@@ -2371,9 +2393,19 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(flags.IllegalFlagValueError, msg=entry):
                 with flagsaver.flagsaver(allowed_hosts=["demo.example.com", entry]):
                     pass
-        with flagsaver.flagsaver(allowed_hosts=["myhost", "[::1]:8080", "*", ""]):
+        with flagsaver.flagsaver(
+            allowed_hosts=[
+                "myhost",
+                "min.example:1",
+                "max.example:65535",
+                "[::1]:8080",
+                "*",
+                "",
+            ]
+        ):
             self.assertEqual(
-                main.explicitly_allowed_hosts(), frozenset({"myhost", "::1", "*"})
+                main.explicitly_allowed_hosts(),
+                frozenset({"myhost", "min.example", "max.example", "::1", "*"}),
             )
 
     def test_server_refuses_to_start_with_invalid_allowed_hosts(self):

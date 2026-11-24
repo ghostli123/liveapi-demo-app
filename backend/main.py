@@ -826,6 +826,14 @@ def _normalize_hostname(hostname: str | None) -> str:
     return (hostname or "").strip().lower().rstrip(".")
 
 
+def _validated_port(parts: urllib.parse.SplitResult) -> int | None:
+    """Returns parts.port (1..65535) or None; raises ValueError otherwise."""
+    port = parts.port  # Raises for a non-numeric or >65535 port.
+    if port is not None and not (1 <= port <= 65535):
+        raise ValueError(f"port out of range 1-65535: {port}")
+    return port
+
+
 def _allowed_host_entry(entry: str) -> tuple[str, int | None]:
     """One --allowed_hosts entry as (bare host name, port or None).
 
@@ -838,7 +846,7 @@ def _allowed_host_entry(entry: str) -> tuple[str, int | None]:
     if entry in ("", "*"):
         return entry, None
     parts = urllib.parse.urlsplit("//" + entry)  # Raises for e.g. "[".
-    port = parts.port  # Raises for a non-numeric or out-of-range port.
+    port = _validated_port(parts)
     # A scheme or path ("https://demo.example") would otherwise parse to a
     # different host ("https") and silently allow nothing useful.
     if (
@@ -894,12 +902,13 @@ def is_explicitly_allowed_origin(origin: str) -> bool:
     try:
         parts = urllib.parse.urlsplit(origin)
         origin_host = _normalize_hostname(parts.hostname)
+        explicit_port = _validated_port(parts)
         origin_port = (
-            parts.port
-            if parts.port is not None
+            explicit_port
+            if explicit_port is not None
             else _DEFAULT_PORTS.get(parts.scheme.lower())
         )
-    except ValueError:  # Unparsable, so it can't be a listed host.
+    except ValueError:  # Unparsable or invalid port, so it can't be a listed host.
         return False
     # "null" has no host, and a blank entry must not match it; "http://*"
     # must not match the "*" entry. Reject non-HTTP(S) schemes, userinfo, and
@@ -974,7 +983,7 @@ def _parse_host_header(raw_host: str) -> str:
     if not raw_host.isascii():
         raise ValueError("non-ASCII Host")
     parts = urllib.parse.urlsplit("//" + raw_host)  # Raises for e.g. "[".
-    _ = parts.port  # Raises for a non-numeric or out-of-range port.
+    _validated_port(parts)
     if (
         parts.netloc != raw_host
         or "@" in raw_host
