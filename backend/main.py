@@ -238,6 +238,34 @@ def _validate_ws_heartbeat_s(value: float) -> bool:
 flags.register_validator(WS_HEARTBEAT_S, _validate_ws_heartbeat_s)
 
 
+_THINKING_LEVELS = {level.value.upper(): level for level in genai.types.ThinkingLevel}
+
+
+def _parse_thinking_level(value: str) -> genai.types.ThinkingLevel | None:
+    """Returns the ThinkingLevel enum member for a flag value, or None if empty."""
+    normalized = value.strip()
+    if not normalized:
+        return None
+    level = _THINKING_LEVELS.get(normalized.upper())
+    if level is None:
+        valid = ", ".join(m.value.lower() for m in genai.types.ThinkingLevel)
+        raise ValueError(
+            f"invalid thinking level {value!r}; expected empty or one of: {valid}"
+        )
+    return level
+
+
+def _validate_fr_simulator_thinking(value: str) -> bool:
+    try:
+        _parse_thinking_level(value)
+    except ValueError as e:
+        raise flags.ValidationError(str(e)) from e
+    return True
+
+
+flags.register_validator(FR_SIMULATOR_THINKING, _validate_fr_simulator_thinking)
+
+
 def listen_host() -> str | None:
     """The address to bind; None means every interface (IPv4 and IPv6)."""
     if HOST.value is not None:
@@ -716,16 +744,14 @@ def _genai_client() -> genai.Client:
 
 def initialize_gemini_chat_session():
     logging.info("Initializing Gemini chat session with project %s...", project_id())
-    thinking = FR_SIMULATOR_THINKING.value
+    thinking_level = _parse_thinking_level(FR_SIMULATOR_THINKING.value)
     return _genai_client().aio.chats.create(
         model=FR_SIMULATOR_MODEL.value,
         config=genai.types.GenerateContentConfig(
             system_instruction=FR_SIMULATOR_PROMPT,
             thinking_config=(
-                genai.types.ThinkingConfig(
-                    thinking_level=genai.types.ThinkingLevel(thinking)
-                )
-                if thinking
+                genai.types.ThinkingConfig(thinking_level=thinking_level)
+                if thinking_level is not None
                 else None
             ),
         ),

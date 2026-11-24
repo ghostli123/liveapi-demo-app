@@ -2972,6 +2972,46 @@ class FlagValidatorTest(unittest.TestCase):
                 with flagsaver.flagsaver(ws_heartbeat_s=value):
                     pass
 
+    def test_fr_simulator_thinking_level_flag_validator(self):
+        for value in [
+            "",
+            "   ",
+            "low",
+            "LOW",
+            " low ",
+            "minimal",
+            "medium",
+            "high",
+            "THINKING_LEVEL_UNSPECIFIED",
+        ]:
+            with flagsaver.flagsaver(fr_simulator_thinking_level=value):
+                self.assertEqual(main.FR_SIMULATOR_THINKING.value, value)
+        for value in ["bogus", "very_low", "none", "off", "0", "low high"]:
+            with self.assertRaises(flags.IllegalFlagValueError, msg=value):
+                with flagsaver.flagsaver(fr_simulator_thinking_level=value):
+                    pass
+
+    def test_initialize_gemini_chat_session_thinking_level(self):
+        fake_client = mock.Mock()
+        with mock.patch.object(main, "_genai_client", return_value=fake_client):
+            for flag_val, expected in [
+                ("", None),
+                ("   ", None),
+                ("low", main.genai.types.ThinkingLevel.LOW),
+                (" High ", main.genai.types.ThinkingLevel.HIGH),
+            ]:
+                with self.subTest(flag_val=flag_val):
+                    fake_client.aio.chats.create.reset_mock()
+                    with flagsaver.flagsaver(fr_simulator_thinking_level=flag_val):
+                        main.initialize_gemini_chat_session()
+                    config = fake_client.aio.chats.create.call_args.kwargs["config"]
+                    if expected is None:
+                        self.assertIsNone(config.thinking_config)
+                    else:
+                        self.assertEqual(
+                            config.thinking_config.thinking_level, expected
+                        )
+
     def test_server_refuses_to_start_with_invalid_port_or_heartbeat(self):
         script = os.path.join(os.path.dirname(main.__file__), "main.py")
         for flag_name, flag_arg in [
@@ -2979,6 +3019,7 @@ class FlagValidatorTest(unittest.TestCase):
             ("--common_bag_ws_port", "--common_bag_ws_port=70000"),
             ("--ws_heartbeat_s", "--ws_heartbeat_s=nan"),
             ("--ws_heartbeat_s", "--ws_heartbeat_s=inf"),
+            ("--fr_simulator_thinking_level", "--fr_simulator_thinking_level=bogus"),
         ]:
             with self.subTest(flag=flag_arg):
                 result = subprocess.run(
