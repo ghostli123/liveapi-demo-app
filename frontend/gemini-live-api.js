@@ -262,6 +262,7 @@ class GeminiLiveAPI {
                 : null;
         if (this.webRtcManager) {
             this.webRtcManager.onConnectionFailed = () => {
+                this.disconnect();
                 this.onErrorMessage(
                     "The WebRTC connection failed. UDP may be blocked on this network; " +
                     "try the WebSocket transport."
@@ -280,6 +281,7 @@ class GeminiLiveAPI {
         this.latestResumptionHandle = ""; // Last handle the server sent this session
         this.connectAttempt = 0; // Bumped to cancel a connect in progress
         this.prepareController = /** @type {AbortController | null} */ (null);
+        this.cancelResumeClose = /** @type {(() => void) | null} */ (null);
         this.autoResumeTimes = []; // When automatic resumes happened
         this.setupTimer = null;
         // From the server's --idle_timeout_s; 0 means sessions never time out.
@@ -542,6 +544,7 @@ class GeminiLiveAPI {
             if (!isCurrent()) {
                 return false;
             }
+            this._teardownSession({ abandonConnecting: false });
             this.onErrorMessage(error.message);
             throw error;
         } finally {
@@ -575,6 +578,44 @@ class GeminiLiveAPI {
     cancelPrepare() {
         this.prepareController?.abort();
         this.prepareController = null;
+        this.cancelResumeClose?.();
+        this.cancelResumeClose = null;
+    }
+
+    /**
+     * Tears down local session resources (timers, bandwidth meter, WebRTC, and
+     * WebSocket) so standalone callers whose `onErrorMessage` does not call
+     * `disconnect()` cannot leak them.
+     * @param {{abandonConnecting?: boolean, closeWebRtc?: boolean}} [options]
+     */
+    _teardownSession({ abandonConnecting = true, closeWebRtc = true } = {}) {
+        this.clearSetupTimer();
+        this.stopUpdateBandwidthUsage();
+        this.clearIdleTimer();
+        if (closeWebRtc && this.webRtcManager) {
+            this.webRtcManager.close({ markClosed: this.transportMode === "webrtc" });
+        }
+        const webSocket = this.webSocket;
+        this.webSocket = null;
+        this.isSetupComplete = false;
+        if (webSocket) {
+            webSocket.onopen = null;
+            webSocket.onclose = null;
+            webSocket.onerror = null;
+            webSocket.onmessage = null;
+            // Also reached from the setup timeout. A handshake that never
+            // finished may never have reached the server, whose record would
+            // then hold a --max_sessions slot until it expires. (this.webSocket
+            // always belongs to this.sessionId; resume() clears it first.)
+            if (abandonConnecting && webSocket.readyState === WebSocket.CONNECTING) {
+                this.abandonSession(this.sessionId);
+            }
+            try {
+                webSocket.close(1000);
+            } catch {
+                // Best-effort cleanup of a half-initialized or broken socket.
+            }
+        }
     }
 
     /**
@@ -589,27 +630,7 @@ class GeminiLiveAPI {
             this.setupWebSocketToService();
         } catch (error) {
             this.abandonSession(sessionId);
-            this.clearSetupTimer();
-            this.clearIdleTimer();
-            if (this.intervalId) {
-                this.stopUpdateBandwidthUsage();
-            }
-            if (this.webRtcManager) {
-                this.webRtcManager.close({ markClosed: this.transportMode === "webrtc" });
-            }
-            if (this.webSocket) {
-                const webSocket = this.webSocket;
-                this.webSocket = null;
-                webSocket.onopen = null;
-                webSocket.onclose = null;
-                webSocket.onerror = null;
-                webSocket.onmessage = null;
-                try {
-                    webSocket.close(1000);
-                } catch {
-                    // Best-effort cleanup of a half-initialized socket.
-                }
-            }
+            this._teardownSession({ abandonConnecting: false });
             const message = error?.message || String(error);
             this.onErrorMessage(`Could not open the WebSocket connection: ${message}`);
             throw error;
@@ -696,28 +717,54 @@ class GeminiLiveAPI {
                 markClosed: this.transportMode === "webrtc",
             });
         }
-        const closed = oldWebSocket
-            ? /** @type {Promise<void>} */ (new Promise((resolve) => {
-                oldWebSocket.onopen = null;
-                oldWebSocket.onmessage = null;
-                oldWebSocket.onclose = () => resolve();
-                oldWebSocket.onerror = () => resolve();
-                if (oldWebSocket.readyState === WebSocket.CLOSED) {
-                    resolve();
-                } else {
-                    oldWebSocket.close(1000);
-                }
-            }))
-            : Promise.resolve();
-
         this.setResumption(true, handle);
         // A new session ID keeps the backend from mixing up the two connections.
         const sessionId = randomId();
         this.sessionId = sessionId;
         this.cancelPrepare();
         const attempt = ++this.connectAttempt;
+        let finishClose = () => {};
+        let closeSettled = !oldWebSocket;
+        const closed = oldWebSocket
+            ? /** @type {Promise<void>} */ (new Promise((resolve) => {
+                finishClose = resolve;
+                const done = () => {
+                    closeSettled = true;
+                    if (this.cancelResumeClose === finishClose) {
+                        this.cancelResumeClose = null;
+                    }
+                    resolve();
+                };
+                oldWebSocket.onopen = null;
+                oldWebSocket.onmessage = null;
+                oldWebSocket.onclose = done;
+                oldWebSocket.onerror = done;
+                if (oldWebSocket.readyState === WebSocket.CLOSED) {
+                    done();
+                } else {
+                    try {
+                        oldWebSocket.close(1000);
+                    } catch {
+                        done();
+                    }
+                }
+            }))
+            : Promise.resolve();
+        if (!closeSettled) {
+            this.cancelResumeClose = finishClose;
+        }
         // Close the old connection while the backend prepares the new session.
-        const [, ready] = await Promise.all([closed, this.prepare(attempt)]);
+        // If disconnect() or a new connect/resume runs while the old socket is
+        // still closing, cancelPrepare() wakes `closed` so `abandonSession` runs
+        // immediately rather than waiting on a stalled close handshake.
+        let ready;
+        try {
+            [, ready] = await Promise.all([closed, this.prepare(attempt)]);
+        } finally {
+            if (this.cancelResumeClose === finishClose) {
+                this.cancelResumeClose = null;
+            }
+        }
         if (!ready) return; // Cancelled by disconnect().
         if (attempt !== this.connectAttempt) {
             // Cancelled while the old connection was still closing.
@@ -825,29 +872,7 @@ class GeminiLiveAPI {
     disconnect() {
         this.connectAttempt++; // Abandons a connect() or resume() in progress.
         this.cancelPrepare();
-        this.clearSetupTimer();
-        this.stopUpdateBandwidthUsage();
-        this.clearIdleTimer();
-        if (this.webRtcManager) {
-            this.webRtcManager.close({ markClosed: this.transportMode === "webrtc" });
-        }
-        const webSocket = this.webSocket;
-        this.webSocket = null;
-        this.isSetupComplete = false;
-        if (webSocket) {
-            webSocket.onopen = null;
-            webSocket.onclose = null;
-            webSocket.onerror = null;
-            webSocket.onmessage = null;
-            // Also reached from the setup timeout. A handshake that never
-            // finished may never have reached the server, whose record would
-            // then hold a --max_sessions slot until it expires. (this.webSocket
-            // always belongs to this.sessionId; resume() clears it first.)
-            if (webSocket.readyState === WebSocket.CONNECTING) {
-                this.abandonSession(this.sessionId);
-            }
-            webSocket.close(1000);
-        }
+        this._teardownSession();
     }
 
     /**
@@ -939,6 +964,8 @@ class GeminiLiveAPI {
                         this.fallBackToWebSocketMedia();
                     } catch (error) {
                         console.error("Error switching media to the WebSocket:", error);
+                        // fallBackToWebSocketMedia() already closed webRtcManager.
+                        this._teardownSession({ closeWebRtc: false });
                         this.onErrorMessage(`Could not switch media to the WebSocket: ${error.message}`);
                         return; // The session has ended; drop the rest.
                     }
@@ -969,6 +996,7 @@ class GeminiLiveAPI {
                             "[WebRTC] Failed to complete session with answerSdp:",
                             err
                         );
+                        this._teardownSession();
                         this.onErrorMessage(
                             `WebRTC answer negotiation failed: ${err.message}`
                         );
@@ -987,6 +1015,7 @@ class GeminiLiveAPI {
                     this.onConnectionStarted();
                 } catch (error) {
                     console.error("Error starting the connection:", error);
+                    this._teardownSession();
                     this.onErrorMessage(`Could not start the session: ${error.message}`);
                     return; // The session has ended; drop the rest.
                 }
@@ -1045,6 +1074,7 @@ class GeminiLiveAPI {
         this.setupTimer = setTimeout(() => {
             this.setupTimer = null;
             if (this.webSocket === webSocket && !this.isSetupComplete) {
+                this._teardownSession();
                 this.onErrorMessage("Timed out waiting for the server to set up the session.");
             }
         }, SETUP_TIMEOUT_MS);
@@ -1108,6 +1138,7 @@ class GeminiLiveAPI {
             } catch (err) {
                 if (this.webSocket !== webSocket) return; // Cancelled meanwhile.
                 console.error("Failed during initial setup:", err);
+                this._teardownSession();
                 this.onErrorMessage(`Setup failed: ${err.message}`);
             }
         };

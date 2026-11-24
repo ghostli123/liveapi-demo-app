@@ -1911,3 +1911,181 @@ test("a throw after WebSocket construction in setupWebSocketToService() closes t
     assert.equal(errors.length, 1);
     assert.match(errors[0], /^Could not open the WebSocket connection:/);
 });
+
+test("disconnect() while a resume waits on a stalled old WebSocket releases the new session immediately", async () => {
+    const api = connectedApi();
+    const oldWebSocket = api.webSocket;
+    oldWebSocket.close = () => {}; // Never emits onclose (e.g. half-open TCP).
+    const bodies = [];
+    api.sendPostRequest = (url, body) => {
+        bodies.push(body);
+        return Promise.resolve({ project_id: "p" });
+    };
+    let opened = 0;
+    api.setupWebSocketToService = () => opened++;
+
+    const resuming = api.resume("h");
+    await new Promise((resolve) => setImmediate(resolve)); // prepare() finishes while oldWebSocket is still closing.
+    api.disconnect();
+    await resuming; // Resolves without waiting for oldWebSocket.onclose.
+
+    assert.equal(opened, 0);
+    assert.deepEqual(plain(bodies.map((b) => b.command)), ["connect", "disconnect"]);
+    assert.equal(bodies[1].session_id, bodies[0].session_id);
+});
+
+test("resume() finishes cleanly if oldWebSocket.close() throws synchronously", async () => {
+    const api = connectedApi();
+    const oldWebSocket = api.webSocket;
+    oldWebSocket.close = () => {
+        throw new Error("close failed");
+    };
+    const bodies = [];
+    let resolveConnect;
+    api.sendPostRequest = (url, body) => {
+        bodies.push(body);
+        if (body.command === "connect") {
+            return new Promise((resolve) => (resolveConnect = resolve));
+        }
+        return Promise.resolve({});
+    };
+    let opened = 0;
+    api.setupWebSocketToService = () => opened++;
+
+    const resuming = api.resume("h");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(bodies.length, 1);
+    assert.equal(bodies[0].command, "connect");
+    resolveConnect({ project_id: "p", idle_timeout_s: 0 });
+    await resuming;
+
+    assert.equal(opened, 1);
+    assert.equal(bodies.length, 1);
+});
+
+test("prepare() failure during resume() clears idleTimer even if onErrorMessage does not call disconnect()", async () => {
+    const api = await idleApi(120);
+    const oldTimer = timers[api.idleTimer - 1];
+    api.webSocket.close = () => {};
+    api.webSocket.readyState = FakeWebSocket.CLOSED;
+    api.sendPostRequest = () => Promise.reject(Object.assign(new Error("HTTP 400: bad"), { status: 400 }));
+    const errors = [];
+    api.onErrorMessage = (message) => errors.push(message); // Standalone caller: no disconnect().
+
+    await assert.rejects(() => api.resume("h"), /Could not start the session/);
+    assert.equal(errors.length, 1);
+    assert.equal(oldTimer.cleared, true);
+    assert.equal(api.idleTimer, null);
+});
+
+test("setupTimer timeout, onopen setup failure, and setup-callback errors tear down resources without caller disconnect()", async () => {
+    // 1. setupTimer timeout
+    const onTimeout = await idleApi(120);
+    onTimeout.setupWebSocketToService = GeminiLiveAPI.prototype.setupWebSocketToService;
+    onTimeout.setupWebSocketToService();
+    const timeoutIdle = timers[onTimeout.idleTimer - 1];
+    const timeoutSetup = timers[onTimeout.setupTimer - 1];
+    let closedCount = 0;
+    onTimeout.webSocket.close = () => closedCount++;
+    onTimeout.errors = [];
+    onTimeout.onErrorMessage = (message) => onTimeout.errors.push(message);
+    timeoutSetup.fn();
+    assert.equal(onTimeout.errors.length, 1);
+    assert.equal(onTimeout.webSocket, null);
+    assert.equal(closedCount, 1);
+    assert.equal(timeoutIdle.cleared, true);
+    assert.equal(onTimeout.idleTimer, null);
+    assert.equal(onTimeout.intervalId, null);
+
+    // 2. webSocket.onopen setup failure
+    const onOpenFail = await idleApi(120);
+    onOpenFail.setupWebSocketToService = GeminiLiveAPI.prototype.setupWebSocketToService;
+    onOpenFail.setupWebSocketToService();
+    const openIdle = timers[onOpenFail.idleTimer - 1];
+    const openSetup = timers[onOpenFail.setupTimer - 1];
+    let openClosed = 0;
+    onOpenFail.webSocket.close = () => openClosed++;
+    onOpenFail.sendInitialSetupMessages = async () => {
+        throw new Error("ICE failed");
+    };
+    onOpenFail.errors = [];
+    onOpenFail.onErrorMessage = (message) => onOpenFail.errors.push(message);
+    await onOpenFail.webSocket.onopen();
+    assert.deepEqual(plain(onOpenFail.errors), ["Setup failed: ICE failed"]);
+    assert.equal(onOpenFail.webSocket, null);
+    assert.equal(openClosed, 1);
+    assert.equal(openSetup.cleared, true);
+    assert.equal(onOpenFail.setupTimer, null);
+    assert.equal(openIdle.cleared, true);
+    assert.equal(onOpenFail.idleTimer, null);
+
+    // 3. completeSession rejection after setupComplete
+    const onRtcFail = await idleApi(120);
+    onRtcFail.transportMode = "webrtc";
+    onRtcFail.setupWebSocketToService = GeminiLiveAPI.prototype.setupWebSocketToService;
+    onRtcFail.setupWebSocketToService();
+    const rtcIdle = timers[onRtcFail.idleTimer - 1];
+    let rtcWsClosed = 0;
+    let rtcClosed = 0;
+    onRtcFail.webSocket.close = () => rtcWsClosed++;
+    onRtcFail.webRtcManager = {
+        close: () => rtcClosed++,
+        completeSession: () => Promise.reject(new Error("bad SDP")),
+    };
+    onRtcFail.onConnectionStarted = () => {};
+    onRtcFail.errors = [];
+    onRtcFail.onErrorMessage = (message) => onRtcFail.errors.push(message);
+    onRtcFail.webSocket.onmessage({
+        data: JSON.stringify({ setupComplete: { rtcSetupComplete: { answerSdp: "v=0" } } }),
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(plain(onRtcFail.errors), ["WebRTC answer negotiation failed: bad SDP"]);
+    assert.equal(onRtcFail.webSocket, null);
+    assert.equal(rtcWsClosed, 1);
+    assert.equal(rtcClosed, 1);
+    assert.equal(rtcIdle.cleared, true);
+    assert.equal(onRtcFail.idleTimer, null);
+
+    // 4. onConnectionStarted throw
+    const onStartFail = await idleApi(120);
+    onStartFail.setupWebSocketToService = GeminiLiveAPI.prototype.setupWebSocketToService;
+    onStartFail.setupWebSocketToService();
+    const startIdle = timers[onStartFail.idleTimer - 1];
+    let startWsClosed = 0;
+    onStartFail.webSocket.close = () => startWsClosed++;
+    onStartFail.onConnectionStarted = () => {
+        throw new Error("UI crashed");
+    };
+    onStartFail.errors = [];
+    onStartFail.onErrorMessage = (message) => onStartFail.errors.push(message);
+    onStartFail.webSocket.onmessage({ data: JSON.stringify({ setupComplete: {} }) });
+    assert.deepEqual(plain(onStartFail.errors), ["Could not start the session: UI crashed"]);
+    assert.equal(onStartFail.webSocket, null);
+    assert.equal(startWsClosed, 1);
+    assert.equal(startIdle.cleared, true);
+    assert.equal(onStartFail.idleTimer, null);
+
+    // 5. onTransportFallback throw
+    const onFallbackFail = await idleApi(120);
+    onFallbackFail.transportMode = "webrtc";
+    onFallbackFail.setupWebSocketToService = GeminiLiveAPI.prototype.setupWebSocketToService;
+    onFallbackFail.setupWebSocketToService();
+    const fbIdle = timers[onFallbackFail.idleTimer - 1];
+    let fbWsClosed = 0;
+    let fbRtcClosed = 0;
+    onFallbackFail.webSocket.close = () => fbWsClosed++;
+    onFallbackFail.webRtcManager = { close: () => fbRtcClosed++ };
+    onFallbackFail.onTransportFallback = () => {
+        throw new Error("fallback crashed");
+    };
+    onFallbackFail.errors = [];
+    onFallbackFail.onErrorMessage = (message) => onFallbackFail.errors.push(message);
+    onFallbackFail.webSocket.onmessage({ data: JSON.stringify({ setupComplete: {} }) });
+    assert.deepEqual(plain(onFallbackFail.errors), ["Could not switch media to the WebSocket: fallback crashed"]);
+    assert.equal(onFallbackFail.webSocket, null);
+    assert.equal(fbWsClosed, 1);
+    assert.equal(fbRtcClosed, 1);
+    assert.equal(fbIdle.cleared, true);
+    assert.equal(onFallbackFail.idleTimer, null);
+    assert.equal(onFallbackFail.intervalId, null);
+});
