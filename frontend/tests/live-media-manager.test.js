@@ -924,15 +924,30 @@ function videoOutputWithFakeMediaSource({ codecSupported = true, addSourceBuffer
     fake.bitrate = { textContent: "--" }; // The recommended bitrate readout.
     let urls = 0;
     const elementsById = { video_player: video, "recommended-video-bitrate": fake.bitrate };
+    video.parentElement = {
+        appendChild(child) {
+            if (child.id) elementsById[child.id] = child;
+            return child;
+        },
+    };
     const context = loadScript("live-media-manager.js", ["LiveVideoOutputManager"], {
         window: { MediaSource: FakeMediaSource, atob },
-        document: { getElementById: (id) => elementsById[id] ?? null },
+        document: {
+            getElementById: (id) => elementsById[id] ?? null,
+            createElement: (tag) => ({
+                tagName: tag.toUpperCase(),
+                id: "",
+                style: {},
+                src: null,
+                removeAttribute(name) { if (name === "src") this.src = null; },
+            }),
+        },
         URL: { createObjectURL: () => `blob:${++urls}`, revokeObjectURL: (url) => fake.revoked.push(url) },
     });
     const manager = new context.LiveVideoOutputManager();
     const errors = [];
     manager.onPlaybackError = (message) => errors.push(message);
-    return { manager, fake, video, errors };
+    return { manager, fake, video, elementsById, errors };
 }
 
 const VIDEO_CHUNK = Buffer.from("fake mp4 fragment").toString("base64");
@@ -1078,6 +1093,47 @@ test("resetPlayer() leaves a video that isn't playing its stream alone", () => {
     assert.equal(video.paused, false);
     assert.equal(video.loads, 0);
     assert.equal(manager.objectUrl, null);
+});
+
+test("initMediaSource() hides and clears the JPEG avatar frame on resume", () => {
+    const { manager, video, elementsById } = videoOutputWithFakeMediaSource();
+    manager.initMediaSource();
+    manager.playVideoChunk(VIDEO_CHUNK, "image/jpeg");
+    const img = elementsById.avatar_frame_img;
+    assert.ok(img);
+    assert.equal(video.style.display, "none");
+    assert.equal(img.style.display, "block");
+    assert.equal(img.src, `data:image/jpeg;base64,${VIDEO_CHUNK}`);
+
+    // A WebSocket resume starts a fresh stream; the stale JPEG frame must not stay beside <video>.
+    manager.initMediaSource();
+    assert.equal(video.style.display, "block");
+    assert.equal(img.style.display, "none");
+    assert.equal(img.src, null);
+
+    // Later JPEG frames on the resumed connection show the image again; Disconnect hides and clears it.
+    manager.playVideoChunk(VIDEO_CHUNK, "video/jpeg");
+    assert.equal(video.style.display, "none");
+    assert.equal(img.style.display, "block");
+    assert.equal(img.src, `data:image/jpeg;base64,${VIDEO_CHUNK}`);
+
+    manager.resetPlayer();
+    assert.equal(video.style.display, "block");
+    assert.equal(img.style.display, "none");
+    assert.equal(img.src, null);
+});
+
+test("initMediaSource() still hides the JPEG avatar frame when MSE is unsupported", () => {
+    const { manager, elementsById, errors } = videoOutputWithFakeMediaSource({ codecSupported: false });
+    manager.initMediaSource();
+    manager.playVideoChunk(VIDEO_CHUNK, "image/jpeg");
+    const img = elementsById.avatar_frame_img;
+    assert.equal(img.style.display, "block");
+
+    manager.initMediaSource();
+    assert.equal(img.style.display, "none");
+    assert.equal(img.src, null);
+    assert.deepEqual(errors, []);
 });
 
 test("a failed addSourceBuffer() is reported once and chunks aren't queued", () => {

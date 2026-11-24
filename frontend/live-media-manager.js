@@ -727,6 +727,16 @@ class LiveVideoOutputManager {
         this.onPlaybackError = () => {};
     }
 
+    /** Hides and clears the JPEG avatar frame image, if one was created. */
+    hideAvatarFrame() {
+        const imgEl = getAvatarFrameElement();
+        if (imgEl) {
+            imgEl.style.display = "none";
+            // Not `src = ""`, which resolves to the page URL and fires an image error event.
+            imgEl.removeAttribute("src");
+        }
+    }
+
     /** Starts a new stream. Each connection sends its own MP4 init segment. */
     initMediaSource() {
         // Chunks of the previous stream can't be appended to the new one, and
@@ -738,6 +748,7 @@ class LiveVideoOutputManager {
         this.initialized = false;
         this.playbackFailed = false;
         this.unplayableDetail = null;
+        this.hideAvatarFrame();
 
         const video = getAvatarVideoElement();
         if (!video) {
@@ -1034,11 +1045,7 @@ class LiveVideoOutputManager {
                 console.warn("resetPlayer endOfStream warning:", e);
             }
         }
-        const imgEl = getAvatarFrameElement();
-        if (imgEl) {
-            imgEl.style.display = "none";
-            imgEl.src = "";
-        }
+        this.hideAvatarFrame();
         const video = getAvatarVideoElement();
         if (video) {
             video.style.display = "block";
