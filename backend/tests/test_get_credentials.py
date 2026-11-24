@@ -300,6 +300,110 @@ class GetAccessTokenTest(unittest.TestCase):
                 token = get_credentials._token_from_gcloud()
         self.assertEqual((token.token, token.source), ("eof-gcloud-tok", "gcloud"))
 
+    def test_gcloud_rejects_non_dict_json_and_invalid_tokens(self):
+        non_dict_payloads = ("null", "[]", '["tok"]', '"tok"', "123", "true")
+        for payload in non_dict_payloads:
+            with self.subTest(non_dict=payload):
+                completed = subprocess.CompletedProcess(
+                    args=["gcloud"], returncode=0, stdout=payload, stderr=""
+                )
+                with (
+                    mock.patch.object(
+                        get_credentials.shutil, "which", return_value="/usr/bin/gcloud"
+                    ),
+                    mock.patch.object(
+                        get_credentials.subprocess, "run", return_value=completed
+                    ),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "unexpected JSON"):
+                        get_credentials._token_from_gcloud()
+
+        invalid_token_objects = (
+            {"refresh_token": "secret-should-not-leak"},
+            {"token": None, "refresh_token": "secret-should-not-leak"},
+            {"token": ""},
+            {"token": "   \t\n  "},
+            {"token": 123},
+            {"token": True},
+            {"token": ["tok"]},
+            {"token": {"nested": "tok"}},
+        )
+        for obj in invalid_token_objects:
+            with self.subTest(invalid_token=obj):
+                completed = subprocess.CompletedProcess(
+                    args=["gcloud"],
+                    returncode=0,
+                    stdout=json.dumps(obj),
+                    stderr="",
+                )
+                with (
+                    mock.patch.object(
+                        get_credentials.shutil, "which", return_value="/usr/bin/gcloud"
+                    ),
+                    mock.patch.object(
+                        get_credentials.subprocess, "run", return_value=completed
+                    ),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "no token") as ctx:
+                        get_credentials._token_from_gcloud()
+                self.assertNotIn("secret-should-not-leak", str(ctx.exception))
+
+        # Surrounding whitespace on a valid token is trimmed.
+        completed = subprocess.CompletedProcess(
+            args=["gcloud"],
+            returncode=0,
+            stdout=json.dumps({"token": "  gcloud-tok \n"}),
+            stderr="",
+        )
+        with (
+            mock.patch.object(
+                get_credentials.shutil, "which", return_value="/usr/bin/gcloud"
+            ),
+            mock.patch.object(
+                get_credentials.subprocess, "run", return_value=completed
+            ),
+        ):
+            token = get_credentials._token_from_gcloud()
+        self.assertEqual((token.token, token.source), ("gcloud-tok", "gcloud"))
+
+    def test_gcloud_invalid_token_falls_through_and_is_not_cached(self):
+        for payload in ('{"token": ""}', '{"token": null}', '{"token": "   "}', "null"):
+            with self.subTest(payload=payload):
+                get_credentials._cached_token = None
+                completed = subprocess.CompletedProcess(
+                    args=["gcloud"], returncode=0, stdout=payload, stderr=""
+                )
+                with (
+                    mock.patch.object(
+                        get_credentials.shutil, "which", return_value="/usr/bin/gcloud"
+                    ),
+                    mock.patch.object(
+                        get_credentials.subprocess, "run", return_value=completed
+                    ),
+                ):
+                    self.use_sources(
+                        get_credentials._token_from_gcloud,
+                        lambda: _token(60, "loas"),
+                    )
+                    token = get_credentials.get_access_token()
+                self.assertEqual(token.source, "loas")
+                self.assertEqual(get_credentials._cached_token, token)
+
+                # With no fallback source, nothing is cached and RuntimeError is raised.
+                get_credentials._cached_token = None
+                with (
+                    mock.patch.object(
+                        get_credentials.shutil, "which", return_value="/usr/bin/gcloud"
+                    ),
+                    mock.patch.object(
+                        get_credentials.subprocess, "run", return_value=completed
+                    ),
+                ):
+                    self.use_sources(get_credentials._token_from_gcloud)
+                    with self.assertRaises(RuntimeError):
+                        get_credentials.get_access_token()
+                self.assertIsNone(get_credentials._cached_token)
+
     def test_loas_token_closes_stdin_and_captures_stderr_on_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             helper = os.path.join(tmpdir, "common_bag_ws_proxy.par")

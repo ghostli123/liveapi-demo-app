@@ -131,12 +131,17 @@ def _token_from_gcloud() -> AccessToken:
         stderr = result.stderr.strip().splitlines()
         raise RuntimeError(stderr[-1] if stderr else f"exit code {result.returncode}")
     data = json.loads(result.stdout)
+    if not isinstance(data, dict):
+        raise RuntimeError("gcloud returned unexpected JSON")
+    token = data.get("token")
+    if not isinstance(token, str) or not token.strip():
+        raise RuntimeError("gcloud returned no token")
     expiry = None
     try:
         expiry = datetime.datetime.fromisoformat(data["expiry"]["datetime"])
     except (KeyError, TypeError, ValueError):
         pass
-    return AccessToken(data["token"], _as_utc(expiry), "gcloud")
+    return AccessToken(token.strip(), _as_utc(expiry), "gcloud")
 
 
 def _token_from_loas() -> AccessToken:
