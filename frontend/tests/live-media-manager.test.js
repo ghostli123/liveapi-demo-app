@@ -148,6 +148,44 @@ test("startMicrophone returns when the connection closes during its replaceTrack
     assert.equal(requests[0].track.readyState, "live");
 });
 
+test("startMicrophone stops micStream if replaceTrack() rejects and stays quiet if superseded", async () => {
+    const { manager, requests } = webRtcManagerWithPendingMic();
+    manager.audioSender = { replaceTrack: () => Promise.reject(new Error("InvalidModificationError")) };
+    const direct = manager.startMicrophone("a");
+    requests[0].grant();
+    await assert.rejects(direct, /InvalidModificationError/);
+    assert.equal(manager.micStream, null);
+    assert.equal(requests[0].track.readyState, "ended");
+
+    // If a newer start replaces a pending replaceTrack() that then rejects,
+    // the superseded call must not throw or stop the newer microphone.
+    let rejectFirst;
+    let calls = 0;
+    manager.audioSender = {
+        replaceTrack: (track) => {
+            if (track === null) return Promise.resolve();
+            calls++;
+            if (calls === 1) {
+                return new Promise((_, reject) => {
+                    rejectFirst = reject;
+                });
+            }
+            return Promise.resolve();
+        },
+    };
+    const first = manager.startMicrophone("a");
+    requests[1].grant();
+    await settle();
+    const second = manager.startMicrophone("b");
+    requests[2].grant();
+    await second;
+    rejectFirst(new Error("InvalidModificationError"));
+    await first;
+    assert.equal(manager.micStream.getAudioTracks()[0], requests[2].track);
+    assert.equal(requests[1].track.readyState, "ended");
+    assert.equal(requests[2].track.readyState, "live");
+});
+
 test("attachVideoStream returns when the connection closes during its replaceTrack()", async () => {
     const { manager } = webRtcManagerWithPendingMic();
     // Firefox never settles a videoSender.replaceTrack() that is pending when pc.close() runs.
@@ -1777,6 +1815,7 @@ function audioOutputWithFakeContexts({ holdAddModule = false } = {}) {
         refuseContexts: false,
         noWorklet: false,
         errors: [],
+        warnings: [],
         now: 0,
         wallNow: 0,
     };
@@ -1831,7 +1870,11 @@ function audioOutputWithFakeContexts({ holdAddModule = false } = {}) {
         AudioWorkletNode: FakeWorkletNode,
         performance: { now: () => fake.now },
         Date: { now: () => fake.wallNow },
-        console: { log() {}, warn() {}, error: (message) => fake.errors.push(message) },
+        console: {
+            log() {},
+            warn: (message) => fake.warnings.push(message),
+            error: (message) => fake.errors.push(message),
+        },
     });
     return { manager: new context.LiveAudioOutputManager(), fake };
 }
@@ -2299,6 +2342,52 @@ test("resume() handles audioContext.close() returning undefined or throwing sync
     assert.equal(manager.workletNode.context, fake.contexts[2]);
 });
 
+test("resume() rebuilds the playback context when audioContext was closed externally", async () => {
+    const { manager, fake } = audioOutputWithFakeContexts();
+    manager.resume();
+    await settle();
+    const firstNode = manager.workletNode;
+    assert.ok(firstNode);
+    assert.equal(fake.contexts.length, 1);
+
+    // Externally close the AudioContext without calling manager.close().
+    fake.contexts[0].state = "closed";
+    manager.resume();
+    await settle();
+    assert.equal(firstNode.disconnected, true);
+    assert.equal(firstNode.onprocessorerror, null);
+    assert.equal(fake.contexts.length, 2);
+    assert.equal(manager.audioContext, fake.contexts[1]);
+    assert.equal(manager.audioContext.state, "running");
+    assert.equal(manager.workletNode.context, fake.contexts[1]);
+
+    manager.playAudioChunk(AUDIO_CHUNK);
+    await settle();
+    assert.equal(firstNode.posted.length, 0);
+    assert.equal(manager.workletNode.posted.length, 1);
+});
+
+test("resumeContext() handles audioContext.resume() returning undefined or throwing synchronously", async () => {
+    const { manager: m1, fake: f1 } = audioOutputWithFakeContexts();
+    m1.initializeAudioContext();
+    await settle();
+    f1.contexts[0].state = "suspended";
+    f1.contexts[0].resume = () => undefined;
+    assert.doesNotThrow(() => m1.resume());
+    assert.doesNotThrow(() => m1.playAudioChunk(AUDIO_CHUNK));
+    await settle();
+
+    const { manager: m2, fake: f2 } = audioOutputWithFakeContexts();
+    m2.initializeAudioContext();
+    await settle();
+    f2.contexts[0].state = "suspended";
+    f2.contexts[0].resume = () => {
+        throw new Error("sync resume error");
+    };
+    assert.doesNotThrow(() => m2.resume());
+    assert.ok(f2.warnings.includes("Could not resume audio playback:"));
+});
+
 test("playAudioChunk drops non-string chunks without coercing numbers or null to PCM", () => {
     const { manager, fake } = audioOutputWithFakeContexts();
     for (const bad of [null, undefined, 12345678, true, {}]) {
@@ -2441,6 +2530,73 @@ test("MicLevelMeter.stop() called re-entrantly from onLevel does not recurse or 
     assert.equal(restartMeter.frame, queued[0].id);
     restartMeter.stop();
     assert.equal(queued.length, 0);
+});
+
+test("MicLevelMeter.start() closes its AudioContext if onLevel throws on the initial tick", () => {
+    const contexts = [];
+    let queued = [];
+    let nextId = 1;
+    class FakeAudioContext {
+        constructor() {
+            this.state = "running";
+            this.closed = 0;
+            contexts.push(this);
+        }
+        createAnalyser() {
+            return {
+                fftSize: 512,
+                getFloatTimeDomainData(arr) {
+                    arr.fill(0.5);
+                },
+            };
+        }
+        createMediaStreamSource() {
+            return { connect() {} };
+        }
+        close() {
+            this.closed++;
+            this.state = "closed";
+            return Promise.resolve();
+        }
+    }
+    const { MicLevelMeter } = loadScript("live-media-manager.js", ["MicLevelMeter"], {
+        window: { AudioContext: FakeAudioContext },
+        requestAnimationFrame: (fn) => {
+            const id = nextId++;
+            queued.push({ id, fn });
+            return id;
+        },
+        cancelAnimationFrame: (id) => {
+            queued = queued.filter((entry) => entry.id !== id);
+        },
+    });
+
+    const levels = [];
+    const meter = new MicLevelMeter((level) => {
+        levels.push(level);
+        if (level > 0) throw new Error("boom in onLevel");
+    });
+    assert.throws(() => meter.start({}), /boom in onLevel/);
+    assert.equal(contexts.length, 1);
+    assert.equal(contexts[0].closed, 1);
+    assert.equal(contexts[0].state, "closed");
+    assert.equal(meter.context, null);
+    assert.equal(meter.frame, null);
+    assert.equal(queued.length, 0);
+    assert.equal(levels.at(-1), 0);
+
+    // Even if rollback's onLevel(0) also throws, context is closed and the original error propagates.
+    let calls = 0;
+    const meter2 = new MicLevelMeter(() => {
+        calls++;
+        if (calls === 2) throw new Error("initial tick boom");
+        if (calls === 3) throw new Error("rollback zero boom");
+    });
+    assert.throws(() => meter2.start({}), /initial tick boom/);
+    assert.equal(contexts.length, 2);
+    assert.equal(contexts[1].closed, 1);
+    assert.equal(meter2.context, null);
+    assert.equal(meter2.stopping, false);
 });
 
 test("recordChunk sends the buffered samples as base64 16-bit little-endian PCM", () => {

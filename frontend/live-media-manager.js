@@ -140,18 +140,15 @@ class LiveAudioOutputManager {
      */
     resume() {
         // A new Connect retries a player that failed to start right away, and
-        // abandons an in-flight worklet load from a prior connection so its
-        // failure can't put the new connection into backoff.
-        this.failed = null;
-        this.retryDelayMs = 0;
-        this.crashDelayMs = 0;
-        this.crashReported = false;
-        if (this.ready && !this.workletNode) {
-            this.generation++;
-            const audioContext = this.audioContext;
-            this.audioContext = null;
-            this.ready = null;
-            this._closeAudioContext(audioContext);
+        // abandons an in-flight worklet load or externally closed context from
+        // a prior connection so it starts cleanly.
+        if (this.audioContext?.state === "closed" || (this.ready && !this.workletNode)) {
+            this.close();
+        } else {
+            this.failed = null;
+            this.retryDelayMs = 0;
+            this.crashDelayMs = 0;
+            this.crashReported = false;
         }
         this.resumeContext();
     }
@@ -160,9 +157,13 @@ class LiveAudioOutputManager {
         // Failures are logged where they happen; Connect goes on without sound.
         this.initializeAudioContext().catch(() => {});
         if (this.audioContext?.state === "suspended") {
-            this.audioContext.resume().catch((error) => {
+            try {
+                this.audioContext.resume()?.catch((error) => {
+                    console.warn("Could not resume audio playback:", error);
+                });
+            } catch (error) {
                 console.warn("Could not resume audio playback:", error);
-            });
+            }
         }
     }
 
@@ -559,7 +560,6 @@ class MicLevelMeter {
     start(stream) {
         this.stop();
         if (!stream) return;
-        let analyser;
         try {
             this.context = new (window.AudioContext || window.webkitAudioContext)();
             // Created after awaiting getUserMedia, i.e. possibly without a user
@@ -567,29 +567,33 @@ class MicLevelMeter {
             if (this.context.state === "suspended") {
                 this.context.resume()?.catch(() => {});
             }
-            analyser = this.context.createAnalyser();
+            const analyser = this.context.createAnalyser();
             analyser.fftSize = 512;
             this.context.createMediaStreamSource(stream).connect(analyser);
+            const context = this.context;
+            const samples = new Float32Array(analyser.fftSize);
+            const tick = () => {
+                if (this.context !== context) return;
+                analyser.getFloatTimeDomainData(samples);
+                let sum = 0;
+                for (const sample of samples) sum += sample * sample;
+                // Map -60..0 dBFS to 0..1: perceived loudness is logarithmic,
+                // and a linear scale pins loud microphones at the top.
+                const dbfs = 10 * Math.log10(sum / samples.length + 1e-12);
+                this.onLevel(Math.min(1, Math.max(0, (dbfs + 60) / 60)));
+                if (this.context === context) {
+                    this.frame = requestAnimationFrame(tick);
+                }
+            };
+            tick();
         } catch (error) {
-            this.stop();
+            try {
+                this.stop();
+            } catch {
+                // Keep the original start() error if onLevel(0) also throws.
+            }
             throw error;
         }
-        const context = this.context;
-        const samples = new Float32Array(analyser.fftSize);
-        const tick = () => {
-            if (this.context !== context) return;
-            analyser.getFloatTimeDomainData(samples);
-            let sum = 0;
-            for (const sample of samples) sum += sample * sample;
-            // Map -60..0 dBFS to 0..1: perceived loudness is logarithmic,
-            // and a linear scale pins loud microphones at the top.
-            const dbfs = 10 * Math.log10(sum / samples.length + 1e-12);
-            this.onLevel(Math.min(1, Math.max(0, (dbfs + 60) / 60)));
-            if (this.context === context) {
-                this.frame = requestAnimationFrame(tick);
-            }
-        };
-        tick();
     }
 
     stop() {
@@ -1529,7 +1533,16 @@ class G3RtcWebRtcManager {
         });
         const audioTrack = this.micStream.getAudioTracks()[0] || null;
         if (this.audioSender && audioTrack) {
-            await this._replaceTrack(this.audioSender, audioTrack);
+            try {
+                await this._replaceTrack(this.audioSender, audioTrack);
+            } catch (error) {
+                if (this.micStream === stream) {
+                    this.micStream = null;
+                }
+                stream.getTracks().forEach((t) => t.stop());
+                if (generation !== this.micGeneration) return;
+                throw error;
+            }
         }
     }
 

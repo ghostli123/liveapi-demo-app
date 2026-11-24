@@ -6,11 +6,10 @@ class InputProcessor extends AudioWorkletProcessor {
   /** @param {Float32Array[][]} inputs */
   process(inputs) {
     // Get the audio data from the first input channel.
-    const input = inputs[0];
-    const channelData = input[0];
+    const channelData = inputs?.[0]?.[0];
 
     // If there's no audio data, do nothing.
-    if (!channelData) return true;
+    if (!channelData || channelData.length === 0) return true;
 
     // Convert the 32-bit float audio data to 16-bit PCM.
     const pcm16Data = new Int16Array(channelData.length);

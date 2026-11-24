@@ -29,7 +29,10 @@ test("converts each quantum to 16-bit PCM, clamping out-of-range samples", () =>
 
 test("posts nothing and stays alive while the input has no channels", () => {
     const processor = new registered.cls();
-    // An unconnected input arrives as an empty channel list.
+    // An unconnected input arrives as an empty channel list; guard empty or missing inputs too.
     assert.equal(processor.process([[]], [], {}), true);
+    assert.equal(processor.process([], [], {}), true);
+    assert.equal(processor.process(null, [], {}), true);
+    assert.equal(processor.process([[new Float32Array(0)]], [], {}), true);
     assert.deepEqual(processor.posted, []);
 });
