@@ -1130,8 +1130,11 @@ function stopConnectionTimer() {
 }
 
 function showUsage(usage) {
-    const prompt = usage.promptTokenCount ?? usage.prompt_token_count ?? 0;
-    const total = usage.totalTokenCount ?? usage.total_token_count ?? 0;
+    if (!usage || typeof usage !== "object" || Array.isArray(usage)) return;
+    const rawPrompt = usage.promptTokenCount ?? usage.prompt_token_count;
+    const rawTotal = usage.totalTokenCount ?? usage.total_token_count;
+    const prompt = typeof rawPrompt === "number" && Number.isFinite(rawPrompt) ? rawPrompt : 0;
+    const total = typeof rawTotal === "number" && Number.isFinite(rawTotal) ? rawTotal : 0;
     AppUI.setText("usage-tokens", `${prompt.toLocaleString()} in / ${total.toLocaleString()} total`);
 }
 
@@ -1196,10 +1199,13 @@ function abortPendingFunctionCalls(reason) {
 
 /** Handles a toolCallCancellation: the calls with these IDs get no response. */
 function cancelFunctionCalls(ids) {
-    for (const id of ids) {
+    if (!Array.isArray(ids)) return;
+    const validIds = ids.filter((id) => typeof id === "string" && id.length > 0);
+    if (!validIds.length) return;
+    for (const id of validIds) {
         pendingFunctionCalls.get(id)?.abort("cancelled");
     }
-    newSystemMessage("Function calls cancelled: " + ids.join(", "));
+    newSystemMessage("Function calls cancelled: " + validIds.join(", "));
 }
 
 /**

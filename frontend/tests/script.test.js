@@ -3655,3 +3655,67 @@ test("onErrorMessage and onIdleTimeout end the session even if showModal throws"
         );
     }
 });
+
+test("showUsage formats finite counts and ignores malformed usage payloads", () => {
+    const { context, element } = loadSession();
+    const usageText = () => element("usage-tokens").textContent;
+
+    context.handleReceiveResponse({ type: "USAGE", data: { promptTokenCount: 1200, totalTokenCount: 3450 } });
+    assert.equal(usageText(), `${(1200).toLocaleString()} in / ${(3450).toLocaleString()} total`);
+
+    context.handleReceiveResponse({ type: "USAGE", data: { prompt_token_count: 10, total_token_count: 25 } });
+    assert.equal(usageText(), "10 in / 25 total");
+
+    for (const bad of [null, undefined, "bad", 42, [1, 2]]) {
+        assert.doesNotThrow(() => context.handleReceiveResponse({ type: "USAGE", data: bad }));
+        assert.equal(usageText(), "10 in / 25 total");
+    }
+
+    assert.doesNotThrow(() =>
+        context.handleReceiveResponse({
+            type: "USAGE",
+            data: { promptTokenCount: { toLocaleString: 123 }, totalTokenCount: 5 },
+        })
+    );
+    assert.equal(usageText(), "0 in / 5 total");
+
+    assert.doesNotThrow(() =>
+        context.handleReceiveResponse({
+            type: "USAGE",
+            data: { promptTokenCount: Number.NaN, totalTokenCount: Number.POSITIVE_INFINITY },
+        })
+    );
+    assert.equal(usageText(), "0 in / 0 total");
+
+    assert.doesNotThrow(() =>
+        context.handleReceiveResponse({
+            type: "USAGE",
+            data: { promptTokenCount: "100", totalTokenCount: null },
+        })
+    );
+    assert.equal(usageText(), "0 in / 0 total");
+});
+
+test("cancelFunctionCalls filters non-string IDs and ignores empty or non-array payloads", async () => {
+    const { context, api, posts, chat } = loadFunctionCalls();
+    const done = context.handleFunctionCallRequest([{ id: "c1", name: "slow", args: {} }]);
+    assert.equal(posts.length, 1);
+    const initialChatCount = chat.length;
+
+    for (const bad of [null, undefined, "c1", {}, [], [{ toString: null }, null, 123, ""]]) {
+        assert.doesNotThrow(() => context.handleReceiveResponse({ type: "FUNCTION_CALL_CANCELLATION", data: bad }));
+    }
+    assert.equal(posts[0].signal.aborted, false);
+    assert.equal(chat.length, initialChatCount);
+
+    assert.doesNotThrow(() =>
+        context.handleReceiveResponse({
+            type: "FUNCTION_CALL_CANCELLATION",
+            data: [{ toString: null }, null, 123, "", "c1"],
+        })
+    );
+    assert.equal(posts[0].signal.aborted, true);
+    assert.equal(chat[chat.length - 1], "Function calls cancelled: c1");
+    await done;
+    assert.equal(api.sent.length, 0);
+});
