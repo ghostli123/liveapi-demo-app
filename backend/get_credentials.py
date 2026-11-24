@@ -264,9 +264,11 @@ class ChainCredentials(google.auth.credentials.Credentials):
     """google-auth credentials backed by get_access_token(), for the genai client.
 
     The genai client caches one instance for the process and checks `expired`
-    (and `token`) before each request. Keeping `expired` tied to the shared
-    cache lets `invalidate()` — from a Live API 1008/401 or a simulator 401 —
-    force the next request to refresh instead of re-sending the rejected token.
+    (and `token`) before each request. Keeping `expired` and `token_state` tied
+    to the shared cache and `_EXPIRY_MARGIN` lets `invalidate()` — from a Live
+    API 1008/401 or a simulator 401 — force the next request to refresh instead
+    of re-sending the rejected token, and avoids redundant refreshes in the
+    window between google-auth's 3m45s REFRESH_THRESHOLD and `_EXPIRY_MARGIN`.
     """
 
     def _stale_in_cache(self) -> bool:
@@ -277,15 +279,20 @@ class ChainCredentials(google.auth.credentials.Credentials):
 
     @property
     def expired(self) -> bool:
-        if self._stale_in_cache():
-            return True
-        return super().expired
+        return self.token_state != google.auth.credentials.TokenState.FRESH
 
     @property
     def token_state(self):
         if self._stale_in_cache():
             return google.auth.credentials.TokenState.INVALID
-        return super().token_state
+        if self.expiry is None:
+            return google.auth.credentials.TokenState.FRESH
+        remaining = _as_utc(self.expiry) - _utcnow()
+        if remaining <= datetime.timedelta(0):
+            return google.auth.credentials.TokenState.INVALID
+        if remaining <= _EXPIRY_MARGIN:
+            return google.auth.credentials.TokenState.STALE
+        return google.auth.credentials.TokenState.FRESH
 
     def refresh(self, request) -> None:
         del request  # Unused; get_access_token() picks its own transport.

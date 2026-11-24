@@ -579,12 +579,13 @@ async def _send_simulator_message(chat, content, session_id: str):
         # A call whose token was fetched inside send_message() had no cached
         # token before the call; read the cache again to catch it too.
         rejected = get_credentials.cached_token() or token_before
-        if rejected is None:
-            raise
         # If another caller already replaced the cached token while this call
-        # was in flight, invalidate() is a no-op and fetch_access_token()
-        # immediately returns the replacement without refetching.
-        if token_before is not None and token_before.token != rejected.token:
+        # was in flight, retry directly with the newer cached token.
+        if (
+            rejected is not None
+            and token_before is not None
+            and token_before.token != rejected.token
+        ):
             logging.warning(
                 "Simulator rejected an earlier access token (HTTP 401) for session %s; "
                 "retrying with the newer cached token from %s",
@@ -592,13 +593,22 @@ async def _send_simulator_message(chat, content, session_id: str):
                 rejected.source,
             )
             return await chat.send_message(content)
-        get_credentials.invalidate(rejected)
-        logging.warning(
-            "Simulator rejected the access token from %s (HTTP 401) for session %s; "
-            "dropped it from the cache",
-            rejected.source,
-            session_id,
-        )
+        if rejected is not None:
+            get_credentials.invalidate(rejected)
+            logging.warning(
+                "Simulator rejected the access token from %s (HTTP 401) for session %s; "
+                "dropped it from the cache",
+                rejected.source,
+                session_id,
+            )
+        else:
+            # token_before was None, send_message() fetched and cached a token,
+            # and another caller invalidated it before the 401 returned.
+            logging.warning(
+                "Simulator returned HTTP 401 for session %s after its access token "
+                "was invalidated in flight; fetching a replacement",
+                session_id,
+            )
         try:
             replacement = await get_credentials.fetch_access_token()
         except Exception as fetch_err:
@@ -608,7 +618,7 @@ async def _send_simulator_message(chat, content, session_id: str):
                 fetch_err,
             )
             raise e from None
-        if replacement.token == rejected.token:
+        if rejected is not None and replacement.token == rejected.token:
             logging.warning(
                 "Token sources returned the rejected token again for simulator (session %s)",
                 session_id,

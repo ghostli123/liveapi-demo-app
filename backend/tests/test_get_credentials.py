@@ -294,6 +294,46 @@ class GetAccessTokenTest(unittest.TestCase):
         self.assertEqual(creds.token, "token-third")
         self.assertEqual(fetch.call_count, 2)
 
+    def test_chain_credentials_expiry_matches_expiry_margin(self):
+        token_state = get_credentials.google.auth.credentials.TokenState
+        # Between _EXPIRY_MARGIN (2m) and google-auth's REFRESH_THRESHOLD (3m45s),
+        # _fresh_cached_token() reuses the token, so ChainCredentials must treat it
+        # as fresh instead of triggering redundant refresh() calls.
+        three_min = _token(3, "three-min")
+        fetch = mock.Mock(return_value=three_min)
+        self.use_sources(fetch)
+        creds = get_credentials.ChainCredentials()
+        creds.refresh(None)
+        self.assertIsNotNone(get_credentials._fresh_cached_token())
+        self.assertFalse(creds.expired)
+        self.assertTrue(creds.valid)
+        self.assertEqual(creds.token_state, token_state.FRESH)
+
+        # Within _EXPIRY_MARGIN (1.5m left): stale and expired, matching cache.
+        near_expiry = _token(1.5, "three-min")
+        get_credentials._cached_token = near_expiry
+        creds.expiry = near_expiry.expiry.replace(tzinfo=None)
+        self.assertIsNone(get_credentials._fresh_cached_token())
+        self.assertTrue(creds.expired)
+        self.assertFalse(creds.valid)
+        self.assertEqual(creds.token_state, token_state.STALE)
+
+        # Past expiry: invalid and expired.
+        past = _token(-1, "three-min")
+        get_credentials._cached_token = past
+        creds.expiry = past.expiry.replace(tzinfo=None)
+        self.assertTrue(creds.expired)
+        self.assertFalse(creds.valid)
+        self.assertEqual(creds.token_state, token_state.INVALID)
+
+        # No expiry set while matching cache: fresh and valid.
+        no_expiry = get_credentials.ChainCredentials()
+        no_expiry.token = past.token
+        self.assertIsNone(no_expiry.expiry)
+        self.assertFalse(no_expiry.expired)
+        self.assertTrue(no_expiry.valid)
+        self.assertEqual(no_expiry.token_state, token_state.FRESH)
+
 
 class FetchAccessTokenTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
