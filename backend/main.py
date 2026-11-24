@@ -1129,21 +1129,37 @@ async def reject_cross_origin(request: web.Request, handler):
 
 
 async def close_sessions_on_shutdown(app: web.Application) -> None:
-    """Ends open sessions with 1001 (going away), so browsers can reconnect.
+    """Ends open sessions with 1001 (going away) and drops pending ones.
 
-    Otherwise aiohttp waits shutdown_timeout for them and then drops the
-    connections, which browsers see as an abnormal close (1006).
+    Otherwise aiohttp waits shutdown_timeout for open WebSockets and then
+    drops them (browsers see 1006), and pending sessions' expiry tasks stay
+    running until the loop closes.
     """
     sessions = await SESSION_MANAGER.all_items()
     if sessions:
         logging.info("Closing %d session(s) for shutdown", len(sessions))
+    pending_expiry_tasks: list[asyncio.Task[None]] = []
+    websockets_to_close = []
+    for session in sessions:
+        if session.websocket_handler:
+            websockets_to_close.append(session.websocket_handler.client_websocket)
+            continue
+        if await SESSION_MANAGER.delete_if_pending(
+            session.session_id, session, reason="was pending at shutdown"
+        ):
+            if session.expiry_task is not None:
+                pending_expiry_tasks.append(session.expiry_task)
+        elif session.websocket_handler:
+            # Claimed by /ws while we waited on SESSION_MANAGER._lock.
+            websockets_to_close.append(session.websocket_handler.client_websocket)
+    if pending_expiry_tasks:
+        await asyncio.gather(*pending_expiry_tasks, return_exceptions=True)
+    if not websockets_to_close:
+        return
     closing = asyncio.gather(
         *(
-            session.websocket_handler.client_websocket.close(
-                code=1001, reason="Server restarting"
-            )
-            for session in sessions
-            if session.websocket_handler
+            ws.close(code=1001, reason="Server restarting")
+            for ws in websockets_to_close
         ),
         return_exceptions=True,
     )

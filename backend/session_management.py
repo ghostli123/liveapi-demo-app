@@ -219,12 +219,17 @@ class SessionManager:
             self._abandoned.popitem(last=False)
 
     async def delete_if_pending(
-        self, session_id: str, record: SessionBaseModel
+        self,
+        session_id: str,
+        record: SessionBaseModel,
+        *,
+        reason: str = "never opened a WebSocket",
     ) -> bool:
         """Removes and ends record only if it is still stored and unclaimed.
 
-        Used by the pending-session expiry timer so a lock-contention race with
-        claim_websocket() can never tear down a newly connected session.
+        Used by the pending-session expiry timer and server shutdown so a
+        lock-contention race with claim_websocket() can never tear down a newly
+        connected session.
         """
         async with self._lock:
             if (
@@ -233,7 +238,7 @@ class SessionManager:
             ):
                 return False
             del self._sessions[session_id]
-        logging.info("Session %s never opened a WebSocket; removing it", session_id)
+        logging.info("Session %s %s; removing it", session_id, reason)
         await record.del_session()
         return True
 

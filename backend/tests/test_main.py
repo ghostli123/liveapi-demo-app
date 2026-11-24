@@ -1155,6 +1155,58 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(msg.data, 1001)
         self.assertEqual(msg.extra, "Server restarting")
 
+    async def test_shutdown_removes_pending_sessions_and_cancels_expiry_tasks(self):
+        async with FakeUpstream() as upstream:
+            with flagsaver.flagsaver(common_bag_ws_port=upstream.port):
+                await self.connect_session("s10-active")
+                ws = await self.client.ws_connect("/ws?session_id=s10-active")
+                await ws.send_str("ping")
+                await asyncio.wait_for(ws.receive(), 5)
+
+                await self.connect_session("s10-pending")
+                pending = await main.SESSION_MANAGER.search_item("s10-pending")
+                assert pending is not None and pending.expiry_task is not None
+                pending.fr_session = mock.Mock()
+                self.assertFalse(pending.expiry_task.done())
+
+                await main.close_sessions_on_shutdown(self.client.app)
+
+                self.assertIsNone(await main.SESSION_MANAGER.search_item("s10-pending"))
+                self.assertTrue(pending.expiry_task.done())
+                self.assertTrue(pending.expiry_task.cancelled())
+                self.assertIsNone(pending.fr_session)
+
+                msg = await asyncio.wait_for(ws.receive(), 5)
+        self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(msg.data, 1001)
+        self.assertEqual(msg.extra, "Server restarting")
+
+    async def test_shutdown_closes_session_claimed_during_pending_cleanup(self):
+        await self.connect_session("s10-race")
+        pending = await main.SESSION_MANAGER.search_item("s10-race")
+        assert pending is not None and pending.expiry_task is not None
+        fake_ws = mock.AsyncMock()
+        fake_handler = mock.Mock(
+            client_websocket=fake_ws, end_websocket=mock.AsyncMock()
+        )
+        orig_delete = main.SESSION_MANAGER.delete_if_pending
+
+        async def claim_before_delete(session_id, record, **kwargs):
+            claimed = await main.SESSION_MANAGER.claim_websocket(
+                session_id, record, fake_handler
+            )
+            self.assertTrue(claimed)
+            return await orig_delete(session_id, record, **kwargs)
+
+        with mock.patch.object(
+            main.SESSION_MANAGER, "delete_if_pending", side_effect=claim_before_delete
+        ):
+            await main.close_sessions_on_shutdown(self.client.app)
+
+        fake_ws.close.assert_awaited_once_with(code=1001, reason="Server restarting")
+        self.assertIs(await main.SESSION_MANAGER.search_item("s10-race"), pending)
+        await main.SESSION_MANAGER.delete_item("s10-race", pending)
+
     async def test_session_without_websocket_expires(self):
         with mock.patch.object(main, "PENDING_SESSION_TTL_S", 0.3):
             await self.connect_session("s5")
