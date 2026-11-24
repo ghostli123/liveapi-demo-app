@@ -2953,6 +2953,46 @@ class MainAsyncTest(unittest.IsolatedAsyncioTestCase):
                     pass
 
 
+class FlagValidatorTest(unittest.TestCase):
+    def test_common_bag_ws_port_flag_validator(self):
+        for value in [1, 8765, 65535]:
+            with flagsaver.flagsaver(common_bag_ws_port=value):
+                self.assertEqual(main.COMMON_BAG_WS_PORT.value, value)
+        for value in [-1, 0, 65536, 70000]:
+            with self.assertRaises(flags.IllegalFlagValueError, msg=value):
+                with flagsaver.flagsaver(common_bag_ws_port=value):
+                    pass
+
+    def test_ws_heartbeat_s_flag_validator(self):
+        for value in [0, 0.0, 0.5, 20.0]:
+            with flagsaver.flagsaver(ws_heartbeat_s=value):
+                self.assertEqual(main.WS_HEARTBEAT_S.value, value)
+        for value in [-1.0, float("-inf"), float("inf"), float("nan")]:
+            with self.assertRaises(flags.IllegalFlagValueError, msg=value):
+                with flagsaver.flagsaver(ws_heartbeat_s=value):
+                    pass
+
+    def test_server_refuses_to_start_with_invalid_port_or_heartbeat(self):
+        script = os.path.join(os.path.dirname(main.__file__), "main.py")
+        for flag_name, flag_arg in [
+            ("--common_bag_ws_port", "--common_bag_ws_port=0"),
+            ("--common_bag_ws_port", "--common_bag_ws_port=70000"),
+            ("--ws_heartbeat_s", "--ws_heartbeat_s=nan"),
+            ("--ws_heartbeat_s", "--ws_heartbeat_s=inf"),
+        ]:
+            with self.subTest(flag=flag_arg):
+                result = subprocess.run(
+                    [sys.executable, script, flag_arg],
+                    env={**os.environ, "PORT": "0"},
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(flag_name, result.stderr)
+                self.assertNotIn("Serving on", result.stderr)
+
+
 def _non_loopback_ipv4():
     """An IPv4 address of this machine other than loopback, or None."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:

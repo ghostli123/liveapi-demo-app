@@ -4,6 +4,7 @@ import asyncio
 import functools
 import ipaddress
 import json
+import math
 import os
 import re
 import signal
@@ -94,6 +95,8 @@ COMMON_BAG_WS_PORT = flags.DEFINE_integer(
     "common_bag_ws_port",
     8765,
     "Local WebSocket port for the Beyond common BAG Stubby gateway.",
+    lower_bound=1,
+    upper_bound=65535,
 )
 ALLOWED_HOST_SUFFIXES = flags.DEFINE_list(
     "allowed_host_suffixes",
@@ -222,6 +225,17 @@ def _validate_host(value: str | None) -> bool:
 
 
 flags.register_validator(HOST, _validate_host)
+
+
+def _validate_ws_heartbeat_s(value: float) -> bool:
+    if not math.isfinite(value):
+        raise flags.ValidationError(
+            f"invalid heartbeat interval {value!r}; expected a finite number >= 0"
+        )
+    return True
+
+
+flags.register_validator(WS_HEARTBEAT_S, _validate_ws_heartbeat_s)
 
 
 def listen_host() -> str | None:
