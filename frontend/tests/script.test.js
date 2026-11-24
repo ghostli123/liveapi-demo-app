@@ -236,15 +236,20 @@ test("bufferToWave writes a 16-bit PCM WAV, clamping samples", async () => {
  * records what happens to it; for the branded-voice recording dialog.
  * `timers` holds the callbacks script.js scheduled.
  */
-function fakeRecordingDevices() {
+function fakeRecordingDevices({ deferStop = false } = {}) {
     const prompts = [];
     const recorders = [];
     const timers = [];
     const getUserMedia = () =>
-        new Promise((resolve) => {
+        new Promise((resolve, reject) => {
             const track = { stopped: false, stop() { this.stopped = true; } };
             const stream = { track, getTracks: () => [track] };
-            prompts.push({ track, grant: () => resolve(stream) });
+            prompts.push({
+                track,
+                grant: () => resolve(stream),
+                deny: (err = Object.assign(new Error("Permission denied"), { name: "NotAllowedError" })) =>
+                    reject(err),
+            });
         });
     class FakeMediaRecorder {
         constructor(stream) {
@@ -257,7 +262,10 @@ function fakeRecordingDevices() {
         }
         stop() {
             this.state = "inactive";
-            queueMicrotask(() => this.onstop());
+            if (!deferStop) queueMicrotask(() => this.onstop());
+        }
+        finishStop() {
+            return this.onstop();
         }
     }
     return {
@@ -2698,4 +2706,135 @@ test("a take still processing when the dialog closes doesn't touch a newer recor
         await flush();
         assert.equal(devices.prompts[1].track.stopped, true, outcome);
     }
+});
+
+test("an abandoned recording's delayed stop doesn't break or mix chunks into a newer recording", async () => {
+    // Closing the modal cancels rec1, but its async ondataavailable/onstop arrive
+    // after rec2 has already started: rec2 must still cancel cleanly on close.
+    {
+        const devices = fakeRecordingDevices({ deferStop: true });
+        const { context, element } = loadApp(devices.globals);
+        context.openModal();
+        element("newVoiceName").value = "First";
+        const first = context.handleRecordClick();
+        devices.prompts[0].grant();
+        await first;
+
+        context.closeModal();
+        context.openModal();
+        element("newVoiceName").value = "Second";
+        const second = context.handleRecordClick();
+        devices.prompts[1].grant();
+        await second;
+
+        devices.recorders[0].ondataavailable({ data: new Blob(["old"]) });
+        await devices.recorders[0].finishStop();
+
+        assert.equal(context.AppState.isRecording, true);
+        assert.equal(context.AppState.mediaRecorder, devices.recorders[1]);
+        context.closeModal();
+        assert.equal(devices.recorders[1].state, "inactive");
+        await devices.recorders[1].finishStop();
+        assert.equal(devices.prompts[1].track.stopped, true);
+    }
+
+    // And if rec2 finishes normally after rec1's delayed stop, rec2 decodes only its own chunks.
+    {
+        const devices = fakeRecordingDevices({ deferStop: true });
+        const decodedTexts = [];
+        const OfflineAudioContext = class extends fakeOfflineAudioContext(12) {
+            async decodeAudioData(buffer) {
+                decodedTexts.push(Buffer.from(buffer).toString("utf8"));
+                return { duration: 12 };
+            }
+        };
+        const { context, element } = loadApp({
+            ...devices.globals,
+            OfflineAudioContext,
+            FileReader: FakeFileReader,
+            Blob,
+        });
+        context.openModal();
+        element("newVoiceName").value = "First";
+        const first = context.handleRecordClick();
+        devices.prompts[0].grant();
+        await first;
+
+        context.closeModal();
+        context.openModal();
+        element("newVoiceName").value = "Second";
+        const second = context.handleRecordClick();
+        devices.prompts[1].grant();
+        await second;
+
+        devices.recorders[1].ondataavailable({ data: new Blob(["new-audio"]) });
+        devices.recorders[0].ondataavailable({ data: new Blob(["old-audio"]) });
+        await devices.recorders[0].finishStop();
+
+        context.AppState.recordingStartTime -= 11000;
+        await context.handleRecordClick();
+        await devices.recorders[1].finishStop();
+        await flush();
+        assert.deepEqual(decodedTexts, ["new-audio"]);
+    }
+});
+
+test("a superseded or closed recording prompt rejection shows no error dialog", async () => {
+    // Closed before denial.
+    {
+        const devices = fakeRecordingDevices();
+        const { context, element } = loadApp(devices.globals);
+        const dialogs = recordDialogs(context);
+        context.openModal();
+        element("newVoiceName").value = "Closed";
+        const click = context.handleRecordClick();
+        context.closeModal();
+        devices.prompts[0].deny();
+        await click;
+        assert.deepEqual(dialogs, []);
+    }
+
+    // Superseded by a second Record click that succeeds before the first rejects.
+    {
+        const devices = fakeRecordingDevices();
+        const { context, element } = loadApp(devices.globals);
+        const dialogs = recordDialogs(context);
+        context.openModal();
+        element("newVoiceName").value = "Double";
+        const first = context.handleRecordClick();
+        const second = context.handleRecordClick();
+        devices.prompts[1].grant();
+        await second;
+        devices.prompts[0].deny();
+        await first;
+        assert.deepEqual(dialogs, []);
+        assert.equal(context.AppState.isRecording, true);
+        context.closeModal();
+        await flush();
+        assert.equal(devices.prompts[1].track.stopped, true);
+    }
+});
+
+test("a failing MediaRecorder.start() clears the limit timer and cancel handle", async () => {
+    const devices = fakeRecordingDevices();
+    class ThrowingMediaRecorder extends devices.globals.MediaRecorder {
+        start() {
+            throw new Error("encoder unavailable");
+        }
+    }
+    const { context, element } = loadApp({ ...devices.globals, MediaRecorder: ThrowingMediaRecorder });
+    const dialogs = recordDialogs(context);
+    context.openModal();
+    element("newVoiceName").value = "Broken";
+    const click = context.handleRecordClick();
+    devices.prompts[0].grant();
+    await click;
+
+    assert.equal(devices.prompts[0].track.stopped, true);
+    assert.equal(devices.timers[0].cleared, true);
+    assert.equal(context.AppState.cancelRecording, null);
+    assert.equal(context.AppState.mediaRecorder, null);
+    assert.equal(context.AppState.isRecording, false);
+    assert.equal(dialogs.length, 1);
+    assert.match(dialogs[0], /encoder unavailable/);
 });

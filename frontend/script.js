@@ -127,8 +127,6 @@ const AppState = {
     functionCallDefinition: null,
     /** @type {MediaRecorder | null} */
     mediaRecorder: null,
-    /** @type {Blob[]} */
-    audioChunks: [],
     isRecording: false,
     userTurnActive: false, // Between "Start speaking" and "Done speaking"
     wsAudioStreamActive: false, // WebSocket mic capture started on the current connection
@@ -2078,7 +2076,6 @@ function openModal() {
     resetRecordButton();
 
     AppState.isRecording = false;
-    AppState.audioChunks = [];
 }
 
 /** Shows the Record button ready for a new take. */
@@ -2094,7 +2091,9 @@ function closeModal() {
     // Closing the dialog abandons a recording in progress, or one still
     // waiting for the microphone.
     AppState.recordingAttempt++;
-    if (AppState.cancelRecording) AppState.cancelRecording();
+    const cancel = AppState.cancelRecording;
+    AppState.cancelRecording = null;
+    if (cancel) cancel();
     AppState.isRecording = false;
 }
 
@@ -2122,6 +2121,12 @@ async function handleRecordClick() {
 
         /** @type {MediaStream | null} */
         let stream = null;
+        /** @type {MediaRecorder | null} */
+        let recorder = null;
+        /** @type {number | null} */
+        let limitTimer = null;
+        /** @type {(() => void) | null} */
+        let cancel = null;
         // A second click while the first waits for the microphone supersedes it.
         const attempt = ++AppState.recordingAttempt;
         try {
@@ -2133,35 +2138,45 @@ async function handleRecordClick() {
             }
             // Let the browser choose the format (Safari records audio/mp4,
             // not WAV or WebM); toVoiceSample() decodes whatever it is.
-            const recorder = new MediaRecorder(stream);
+            recorder = new MediaRecorder(stream);
             AppState.mediaRecorder = recorder;
-            AppState.audioChunks = [];
+            // Kept local to this take so an older recorder's async ondataavailable
+            // / onstop can neither mix chunks into nor clear a newer take.
+            /** @type {Blob[]} */
+            const chunks = [];
             let cancelled = false;
             let reachedLimit = false;
             // Stop at the sample limit rather than refuse the whole recording
             // once the user stops it.
-            const limitTimer = setTimeout(() => {
+            limitTimer = setTimeout(() => {
                 if (attempt !== AppState.recordingAttempt || !AppState.isRecording) return;
                 reachedLimit = true;
                 stopRecording();
             }, MAX_VOICE_SAMPLE_S * 1000);
-            AppState.cancelRecording = () => {
+            const activeRecorder = recorder;
+            cancel = () => {
                 cancelled = true;
-                recorder.stop();
+                activeRecorder.stop();
             };
+            AppState.cancelRecording = cancel;
 
             recorder.ondataavailable = (event) => {
-                AppState.audioChunks.push(event.data);
+                chunks.push(event.data);
             };
 
             recorder.onstop = async () => {
                 // Release the microphone; otherwise the browser keeps showing
                 // it as in use.
-                recorder.stream.getTracks().forEach((track) => track.stop());
-                clearTimeout(limitTimer);
-                AppState.cancelRecording = null;
-                if (cancelled) {
-                    AppState.audioChunks = [];
+                activeRecorder.stream.getTracks().forEach((track) => track.stop());
+                if (limitTimer !== null) clearTimeout(limitTimer);
+                if (AppState.cancelRecording === cancel) AppState.cancelRecording = null;
+                if (AppState.mediaRecorder === activeRecorder) AppState.mediaRecorder = null;
+                // Closing the dialog while the take is stopping or processing
+                // abandons it, and the dialog may since hold a newer recording,
+                // which the closeModal()/openModal() below would stop or orphan.
+                const abandoned = () => attempt !== AppState.recordingAttempt;
+                if (cancelled || abandoned()) {
+                    chunks.length = 0;
                     return;
                 }
                 // Stop and the sample limit end the take through stopRecording();
@@ -2169,12 +2184,8 @@ async function handleRecordClick() {
                 // turned off) and the recorder stopped by itself.
                 const micEnded = AppState.isRecording;
                 if (micEnded) showRecordingProcessing();
-                const audioBlob = new Blob(AppState.audioChunks, { type: recorder.mimeType });
-                AppState.audioChunks = [];
-                // Closing the dialog while the take is processed abandons it
-                // too, and the dialog may since hold a newer recording, which
-                // the closeModal()/openModal() below would stop or orphan.
-                const abandoned = () => attempt !== AppState.recordingAttempt;
+                const audioBlob = new Blob(chunks, { type: activeRecorder.mimeType });
+                chunks.length = 0;
                 try {
                     // The encoder can add a few milliseconds past the limit.
                     const { base64, durationS } = await toVoiceSample(await audioBlob.arrayBuffer(), { clip: true });
@@ -2221,7 +2232,11 @@ async function handleRecordClick() {
             );
         } catch (error) {
             console.error("Could not start the reference voice recording:", error);
+            if (limitTimer !== null) clearTimeout(limitTimer);
+            if (cancel && AppState.cancelRecording === cancel) AppState.cancelRecording = null;
+            if (recorder && AppState.mediaRecorder === recorder) AppState.mediaRecorder = null;
             if (stream) stream.getTracks().forEach((track) => track.stop());
+            if (attempt !== AppState.recordingAttempt) return;
             AppUI.showModal(
                 error.name === "NotAllowedError"
                     ? "Could not access the microphone. Please check your browser permissions."
