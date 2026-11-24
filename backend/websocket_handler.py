@@ -151,6 +151,27 @@ def upstream_proxy(url: str) -> str | None:
     return proxy
 
 
+def _abort_websocket(ws) -> None:
+    """Closes a websockets connection's transport immediately without awaiting."""
+    transport = getattr(ws, "transport", None)
+    if transport is not None:
+        transport.abort()
+
+
+def _upstream_close_info(ws, *, aborted: bool) -> tuple[int | None, str]:
+    """Reads the upstream close code and reason, even right after abort()."""
+    code = ws.close_code
+    reason = ws.close_reason or ""
+    if code is None:
+        close_rcvd = getattr(getattr(ws, "protocol", None), "close_rcvd", None)
+        if close_rcvd is not None:
+            code = close_rcvd.code
+            reason = close_rcvd.reason or ""
+        elif aborted:
+            code = 1006
+    return code, reason
+
+
 class WebsocketHandler:
     """Relays messages between the browser and the Live API for one session."""
 
@@ -390,14 +411,32 @@ class WebsocketHandler:
             # Cancelling recv() loses no message, in aiohttp or websockets.
             for task in (watch, connect):
                 task.cancel()
-            await asyncio.gather(watch, connect, return_exceptions=True)
+            try:
+                await asyncio.gather(watch, connect, return_exceptions=True)
+            except BaseException:
+                for task in (watch, connect):
+                    if task.done() and not task.cancelled():
+                        task.exception()
+                if (
+                    connect.done()
+                    and not connect.cancelled()
+                    and connect.exception() is None
+                ):
+                    upstream = connect.result()
+                    if upstream is not None:
+                        _abort_websocket(upstream)
+                raise
             upstream = None
             if not connect.cancelled() and connect.exception() is None:
                 upstream = connect.result()
             # Keep it only if the browser was still there when it opened
             # (watch had to be cancelled) and this task isn't being cancelled.
             if upstream is not None and not (waited and watch.cancelled()):
-                await upstream.close(1001)
+                try:
+                    await upstream.close(1001)
+                except BaseException:
+                    _abort_websocket(upstream)
+                    raise
                 upstream = None
         if self.client_closed:
             logging.info(
@@ -460,35 +499,59 @@ class WebsocketHandler:
         finally:
             for task in (client_to_server, server_to_client):
                 task.cancel()
-            # Retrieves an unexpected error from either direction, which would
-            # otherwise vanish and end the session as a clean 1000.
-            for result in await asyncio.gather(
-                client_to_server, server_to_client, return_exceptions=True
-            ):
-                if isinstance(result, Exception) and error is None:
-                    error = result
-                    upstream_close_code = 1011
-                    logging.error(
-                        "Proxy failed for session %s",
-                        self.session_id,
-                        exc_info=result,
-                    )
-            # Completes the closing handshake, so the upstream close code is
-            # known afterwards.
-            await server_websocket.close(upstream_close_code)
-            self.server_websocket = None
-            self.close_code = server_websocket.close_code
-            self.close_reason = server_websocket.close_reason or ""
-            if (
-                self.upstream_token is not None
-                and self.close_code == 1008
-                and _INVALID_TOKEN_REASON in self.close_reason.lower()
-            ):
-                self._drop_rejected_token(self.upstream_token, "close code 1008")
-            if error is not None:
-                self.close_code = 1011
-                self.close_reason = f"Proxy error: {type(error).__name__}"
-            self._log_summary(time.monotonic() - started_at)
+            aborted = False
+            try:
+                # Retrieves an unexpected error from either direction, which would
+                # otherwise vanish and end the session as a clean 1000.
+                for result in await asyncio.gather(
+                    client_to_server, server_to_client, return_exceptions=True
+                ):
+                    if isinstance(result, Exception) and error is None:
+                        error = result
+                        upstream_close_code = 1011
+                        logging.error(
+                            "Proxy failed for session %s",
+                            self.session_id,
+                            exc_info=result,
+                        )
+                # Completes the closing handshake, so the upstream close code is
+                # known afterwards.
+                await server_websocket.close(upstream_close_code)
+            except BaseException:
+                # A second cancel (e.g. end_websocket() during shutdown while
+                # upstream close is awaiting) interrupts close() before
+                # websockets aborts the socket; tear it down immediately so it
+                # cannot leak open.
+                aborted = True
+                _abort_websocket(server_websocket)
+                raise
+            finally:
+                # If cancellation interrupted gather(), still retrieve any
+                # finished relay task's exception so it is logged and not lost.
+                for task in (client_to_server, server_to_client):
+                    if task.done() and not task.cancelled():
+                        exc = task.exception()
+                        if isinstance(exc, Exception) and error is None:
+                            error = exc
+                            logging.error(
+                                "Proxy failed for session %s",
+                                self.session_id,
+                                exc_info=exc,
+                            )
+                self.server_websocket = None
+                self.close_code, self.close_reason = _upstream_close_info(
+                    server_websocket, aborted=aborted
+                )
+                if (
+                    self.upstream_token is not None
+                    and self.close_code == 1008
+                    and _INVALID_TOKEN_REASON in self.close_reason.lower()
+                ):
+                    self._drop_rejected_token(self.upstream_token, "close code 1008")
+                if error is not None:
+                    self.close_code = 1011
+                    self.close_reason = f"Proxy error: {type(error).__name__}"
+                self._log_summary(time.monotonic() - started_at)
 
     def _log_summary(self, duration_s: float) -> None:
         (up_messages, up_chars), (down_messages, down_chars) = (

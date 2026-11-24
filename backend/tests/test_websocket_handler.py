@@ -1,9 +1,12 @@
 import asyncio
+import base64
 import datetime
+import hashlib
 import json
 import logging
 import os
 import ssl
+import struct
 import tempfile
 import types
 import unittest
@@ -583,10 +586,11 @@ class UpstreamUnauthorizedTest(TlsUpstreamTestCase):
 
 
 class FakeConnection:
-    def __init__(self, recv_error=None, messages=(), send_error=None):
+    def __init__(self, recv_error=None, messages=(), send_error=None, transport=None):
         self.recv_error = recv_error
         self.messages = list(messages)
         self.send_error = send_error
+        self.transport = transport
         self.sent = []
         self.close_code = None
         self.close_reason = ""
@@ -708,6 +712,268 @@ class ProxyErrorTest(unittest.IsolatedAsyncioTestCase):
             handler = await self.run_proxy(FakeConnection(messages=["hi"]), upstream)
         self.assertFalse(handler.client_closed)
         self.assertEqual(upstream.close_code, 1000)
+
+
+async def _handshake_raw_ws(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    """Completes a minimal RFC 6455 upgrade so the test controls close frames."""
+    req = await reader.readuntil(b"\r\n\r\n")
+    key = ""
+    for line in req.decode("latin1").split("\r\n"):
+        if line.lower().startswith("sec-websocket-key:"):
+            key = line.split(":", 1)[1].strip()
+            break
+    accept = base64.b64encode(
+        hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()
+    ).decode()
+    writer.write(
+        (
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
+        ).encode()
+    )
+    await writer.drain()
+
+
+class ProxyCancellationCleanupTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self._saved_cached_token = get_credentials._cached_token
+
+    async def asyncTearDown(self):
+        get_credentials._cached_token = self._saved_cached_token
+
+    async def _start_raw_server(self, client_cb):
+        writers = []
+
+        async def wrapped(reader, writer):
+            writers.append(writer)
+            try:
+                await client_cb(reader, writer)
+            finally:
+                writer.close()
+
+        server = await asyncio.start_server(wrapped, "127.0.0.1", 0)
+
+        async def stop():
+            server.close()
+            for w in writers:
+                w.close()
+            await server.wait_closed()
+
+        self.addAsyncCleanup(stop)
+        return server.sockets[0].getsockname()[1]
+
+    async def test_second_cancel_during_upstream_close_aborts_socket_and_cleans_up(
+        self,
+    ):
+        close_frame_seen = asyncio.Event()
+        eof_seen = asyncio.Event()
+
+        async def unresponsive_close(reader, writer):
+            await _handshake_raw_ws(reader, writer)
+            data = await reader.read(1024)
+            if data:
+                close_frame_seen.set()
+            # Keep TCP open without replying until the client aborts.
+            while await reader.read(1024):
+                pass
+            eof_seen.set()
+
+        port = await self._start_raw_server(unresponsive_close)
+        handler = websocket_handler.WebsocketHandler(
+            f"ws://127.0.0.1:{port}/ws", "s-cancel", FakeConnection(), keepalive_s=None
+        )
+        with self.assertLogs("absl", level="INFO") as logs:
+            session = asyncio.create_task(handler.start_websocket())
+            async with asyncio.timeout(5):
+                while handler.server_websocket is None:
+                    await asyncio.sleep(0.02)
+                # First cancel enters create_proxy()'s finally: and sends Close(1001).
+                assert handler.connection_handler is not None
+                handler.connection_handler.cancel()
+                await close_frame_seen.wait()
+                # Second cancel interrupts await server_websocket.close(1001).
+                await handler.end_websocket()
+                with self.assertRaises(asyncio.CancelledError):
+                    await session
+                await eof_seen.wait()
+
+        self.assertIsNone(handler.server_websocket)
+        self.assertEqual(handler.close_code, 1006)
+        self.assertTrue(
+            any("Session s-cancel ended after" in line for line in logs.output),
+            logs.output,
+        )
+
+    async def test_cancel_during_upstream_close_still_drops_rejected_token(self):
+        close_frame_sent = asyncio.Event()
+        eof_seen = asyncio.Event()
+
+        async def close_1008_then_hang(reader, writer):
+            await _handshake_raw_ws(reader, writer)
+            # Send Close(1008, invalid credentials) and keep TCP open so the
+            # client's close() waits for TCP EOF while close_rcvd is set.
+            reason = b"Request had invalid authentication credentials."
+            payload = struct.pack("!H", 1008) + reason
+            writer.write(bytes([0x88, len(payload)]) + payload)
+            await writer.drain()
+            close_frame_sent.set()
+            while await reader.read(1024):
+                pass
+            eof_seen.set()
+
+        port = await self._start_raw_server(close_1008_then_hang)
+        token = _access_token("revoked")
+        get_credentials._cached_token = token
+        handler = websocket_handler.WebsocketHandler(
+            f"ws://127.0.0.1:{port}/ws", "s-token", FakeConnection(), keepalive_s=None
+        )
+
+        close_entered = asyncio.Event()
+        orig_open = handler._open_upstream
+
+        async def open_with_token():
+            ws = await orig_open()
+            assert ws is not None
+            handler.upstream_token = token
+            orig_close = ws.close
+
+            async def tracked_close(*args, **kwargs):
+                close_entered.set()
+                return await orig_close(*args, **kwargs)
+
+            ws.close = tracked_close
+            return ws
+
+        with (
+            mock.patch.object(handler, "_open_upstream", side_effect=open_with_token),
+            self.assertLogs("absl", level="INFO") as logs,
+        ):
+            session = asyncio.create_task(handler.start_websocket())
+            async with asyncio.timeout(5):
+                while handler.server_websocket is None:
+                    await asyncio.sleep(0.02)
+                await close_frame_sent.wait()
+                # Wait until websockets has parsed the server's 1008 Close frame.
+                while (
+                    getattr(
+                        getattr(handler.server_websocket, "protocol", None),
+                        "close_rcvd",
+                        None,
+                    )
+                    is None
+                ):
+                    await asyncio.sleep(0.02)
+                # First cancel starts close(); second cancel interrupts it.
+                assert handler.connection_handler is not None
+                handler.connection_handler.cancel()
+                await close_entered.wait()
+                await handler.end_websocket()
+                with self.assertRaises(asyncio.CancelledError):
+                    await session
+                await eof_seen.wait()
+
+        self.assertIsNone(handler.server_websocket)
+        self.assertEqual(handler.close_code, 1008)
+        self.assertIn(
+            "invalid authentication credentials", handler.close_reason.lower()
+        )
+        self.assertIsNone(get_credentials._cached_token)
+        self.assertTrue(
+            any("Session s-token ended after" in line for line in logs.output),
+            logs.output,
+        )
+
+    async def test_second_cancel_during_relay_gather_aborts_upstream_and_records_error(
+        self,
+    ):
+        in_client_cleanup = asyncio.Event()
+        release_client_cleanup = asyncio.Event()
+        self.addCleanup(release_client_cleanup.set)
+
+        class SlowCancelClient(FakeConnection):
+            async def recv(self):
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    # Only pause during the relay phase (not the pre-connect watch).
+                    if handler.server_websocket is not None:
+                        in_client_cleanup.set()
+                        await release_client_cleanup.wait()
+
+        upstream = FakeConnection(recv_error=RuntimeError("boom"))
+        upstream.transport = mock.Mock()
+        handler = websocket_handler.WebsocketHandler(
+            "ws://unused", "s-gather", SlowCancelClient(), keepalive_s=None
+        )
+        with (
+            mock.patch.object(
+                handler, "_connect_upstream", return_value=asyncio.sleep(0, upstream)
+            ),
+            self.assertLogs("absl", level="INFO") as logs,
+        ):
+            task = asyncio.create_task(handler.create_proxy())
+            async with asyncio.timeout(5):
+                await in_client_cleanup.wait()
+                # Interrupt create_proxy()'s finally: while it awaits gather().
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+        upstream.transport.abort.assert_called_once()
+        self.assertIsNone(handler.server_websocket)
+        self.assertEqual(
+            handler.client_close_frame(), (1011, "Proxy error: RuntimeError")
+        )
+        output = "\n".join(logs.output)
+        self.assertIn("boom", output)
+        self.assertIn("Session s-gather ended after", output)
+
+    async def test_second_cancel_during_connect_close_aborts_unused_upstream(self):
+        close_frame_seen = asyncio.Event()
+        eof_seen = asyncio.Event()
+
+        async def unresponsive_close(reader, writer):
+            await _handshake_raw_ws(reader, writer)
+            data = await reader.read(1024)
+            if data:
+                close_frame_seen.set()
+            while await reader.read(1024):
+                pass
+            eof_seen.set()
+
+        port = await self._start_raw_server(unresponsive_close)
+        # Browser leaves in the same turn upstream opens, so
+        # _connect_while_watching_client's finally: closes the unused upstream.
+        browser_closed = asyncio.Event()
+
+        class ClosingClient(FakeConnection):
+            async def recv(self):
+                await browser_closed.wait()
+                raise websockets.exceptions.ConnectionClosedOK(None, None)
+
+        handler = websocket_handler.WebsocketHandler(
+            f"ws://127.0.0.1:{port}/ws", "s-conn", ClosingClient(), keepalive_s=None
+        )
+        orig_open = handler._open_upstream
+
+        async def open_then_let_browser_leave():
+            ws = await orig_open()
+            browser_closed.set()
+            return ws
+
+        with mock.patch.object(
+            handler, "_open_upstream", side_effect=open_then_let_browser_leave
+        ):
+            task = asyncio.create_task(handler.create_proxy())
+            async with asyncio.timeout(5):
+                await close_frame_seen.wait()
+                # Interrupt await upstream.close(1001) in _connect_while_watching_client.
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                await eof_seen.wait()
 
 
 if __name__ == "__main__":
