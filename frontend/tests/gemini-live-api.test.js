@@ -646,6 +646,30 @@ test("setupComplete cancels the setup timeout", () => {
     const timer = timers[timers.length - 1];
     api.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) });
     assert.equal(timer.cleared, true);
+    assert.equal(api.setupTimer, null);
+});
+
+test("disconnect(), resume(), and webSocket.onclose clear the pending setup timeout", async () => {
+    const onDisconnect = connectedApi();
+    const disconnectTimer = timers[timers.length - 1];
+    onDisconnect.webSocket.close = () => {};
+    onDisconnect.disconnect();
+    assert.equal(disconnectTimer.cleared, true);
+    assert.equal(onDisconnect.setupTimer, null);
+
+    const onClose = connectedApi();
+    const closeTimer = timers[timers.length - 1];
+    onClose.webSocket.onclose({ code: 1011, reason: "boom" });
+    assert.equal(closeTimer.cleared, true);
+    assert.equal(onClose.setupTimer, null);
+
+    const onResume = connectedApi();
+    const resumeTimer = timers[timers.length - 1];
+    onResume.webSocket.readyState = FakeWebSocket.CLOSED;
+    onResume.sendPostRequest = () => new Promise(() => {}); // Hang in prepare() so no new timer is armed.
+    onResume.resume("h");
+    assert.equal(resumeTimer.cleared, true);
+    assert.equal(onResume.setupTimer, null);
 });
 
 test("disconnect() during connect() stops it from opening a WebSocket", async () => {
@@ -1558,6 +1582,50 @@ test("disconnect() stops the idle timer, and idle_timeout_s 0 disables it", asyn
     const off = await idleApi(0);
     assert.equal(off.idleTimeoutMs, 0);
     assert.equal(off.idleTimer, null);
+});
+
+test("webSocket.onclose clears the idle timer when ending the session, but keeps it for a 1001 resume", async () => {
+    // Non-resumable close: idle timer is cleared even if onErrorMessage does not call disconnect().
+    const ended = await idleApi(120);
+    ended.setupWebSocketToService = GeminiLiveAPI.prototype.setupWebSocketToService;
+    ended.setupWebSocketToService();
+    const endedTimer = timers[ended.idleTimer - 1];
+    ended.onErrorMessage = (message) => ended.errors.push(message);
+    ended.errors = [];
+    ended.webSocket.onclose({ code: 1011, reason: "boom" });
+    assert.equal(endedTimer.cleared, true);
+    assert.equal(ended.idleTimer, null);
+
+    // Resumable 1001 close: idle timer stays armed while onReconnectNeeded resumes;
+    // if onReconnectNeeded throws, it is cleared.
+    const resuming = await idleApi(120);
+    resuming.setupWebSocketToService = GeminiLiveAPI.prototype.setupWebSocketToService;
+    resuming.setupWebSocketToService();
+    resuming.setResumption(true, "");
+    resuming.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) });
+    resuming.onReceiveMessage({ data: JSON.stringify({ sessionResumptionUpdate: { newHandle: "h" } }) });
+    const resumingTimer = timers[resuming.idleTimer - 1];
+    let reconnected = 0;
+    resuming.onReconnectNeeded = () => reconnected++;
+    resuming.webSocket.onclose({ code: 1001, reason: "" });
+    assert.equal(reconnected, 1);
+    assert.equal(resumingTimer.cleared, false);
+    assert.ok(resuming.idleTimer !== null);
+
+    const brokenResume = await idleApi(120);
+    brokenResume.setupWebSocketToService = GeminiLiveAPI.prototype.setupWebSocketToService;
+    brokenResume.setupWebSocketToService();
+    brokenResume.setResumption(true, "");
+    brokenResume.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) });
+    brokenResume.onReceiveMessage({ data: JSON.stringify({ sessionResumptionUpdate: { newHandle: "h" } }) });
+    const brokenTimer = timers[brokenResume.idleTimer - 1];
+    brokenResume.onErrorMessage = () => {};
+    brokenResume.onReconnectNeeded = () => {
+        throw new Error("resume setup broke");
+    };
+    brokenResume.webSocket.onclose({ code: 1001, reason: "" });
+    assert.equal(brokenTimer.cleared, true);
+    assert.equal(brokenResume.idleTimer, null);
 });
 
 // Resumes `api` from a server that now sets --idle_timeout_s=idleS.

@@ -642,6 +642,7 @@ class GeminiLiveAPI {
         const oldWebSocket = this.webSocket;
         this.webSocket = null;
         this.isSetupComplete = false;
+        this.clearSetupTimer();
         this.stopUpdateBandwidthUsage();
         if (this.webRtcManager) {
             // Drop the old peer connection now (while keeping local mic/camera
@@ -761,6 +762,18 @@ class GeminiLiveAPI {
         }
     }
 
+    /** Stops any pending setup timeout. */
+    clearSetupTimer() {
+        clearTimeout(this.setupTimer);
+        this.setupTimer = null;
+    }
+
+    /** Stops the idle-inactivity timer, if one is armed. */
+    clearIdleTimer() {
+        clearTimeout(this.idleTimer);
+        this.idleTimer = null;
+    }
+
     /**
      * Closes the connection at the user's request. Unlike a close initiated by
      * the server, this doesn't report an error.
@@ -768,9 +781,9 @@ class GeminiLiveAPI {
     disconnect() {
         this.connectAttempt++; // Abandons a connect() or resume() in progress.
         this.cancelPrepare();
+        this.clearSetupTimer();
         this.stopUpdateBandwidthUsage();
-        clearTimeout(this.idleTimer);
-        this.idleTimer = null;
+        this.clearIdleTimer();
         if (this.webRtcManager) {
             this.webRtcManager.close({ markClosed: this.transportMode === "webrtc" });
         }
@@ -809,8 +822,7 @@ class GeminiLiveAPI {
      *     the last noteActivity() (a resume) instead of from now (a connect).
      */
     startIdleTimer({ keepActivity = false } = {}) {
-        clearTimeout(this.idleTimer);
-        this.idleTimer = null;
+        this.clearIdleTimer();
         // Even with the timeout off, so a resume that turns it on has a start.
         if (!keepActivity) this.noteActivity();
         if (!this.idleTimeoutMs) return;
@@ -875,7 +887,7 @@ class GeminiLiveAPI {
             if (!isCurrent()) return;
             if (message.type === "SETUP COMPLETE") {
                 this.isSetupComplete = true;
-                clearTimeout(this.setupTimer);
+                this.clearSetupTimer();
                 if (this.transportMode === "webrtc" && !message.answerSdp) {
                     // Like onConnectionStarted below: a throw here would skip
                     // it and leave the UI "connecting" with the timer cleared.
@@ -982,8 +994,9 @@ class GeminiLiveAPI {
         this.webSocket = webSocket;
         let opened = false;
         this.isSetupComplete = false;
-        clearTimeout(this.setupTimer);
+        this.clearSetupTimer();
         this.setupTimer = setTimeout(() => {
+            this.setupTimer = null;
             if (this.webSocket === webSocket && !this.isSetupComplete) {
                 this.onErrorMessage("Timed out waiting for the server to set up the session.");
             }
@@ -997,6 +1010,7 @@ class GeminiLiveAPI {
             const wasSetUp = this.isSetupComplete;
             this.webSocket = null;
             this.isSetupComplete = false;
+            this.clearSetupTimer();
             this.stopUpdateBandwidthUsage();
             if (!opened) {
                 // The handshake failed (e.g. a proxy that drops upgrades), so
@@ -1008,6 +1022,9 @@ class GeminiLiveAPI {
             // one worked and we aren't already resuming in a loop.
             const resumable =
                 event.code === 1001 && wasSetUp && this.canResume() && this.takeAutoResume();
+            if (!resumable) {
+                this.clearIdleTimer();
+            }
             if (this.webRtcManager) {
                 this.webRtcManager.close({
                     keepLocalMedia: resumable,
@@ -1019,6 +1036,7 @@ class GeminiLiveAPI {
                     this.onReconnectNeeded();
                 } catch (error) {
                     console.error("Error resuming the session:", error);
+                    this.clearIdleTimer();
                     if (this.webRtcManager) {
                         this.webRtcManager.close({ markClosed: this.transportMode === "webrtc" });
                     }
