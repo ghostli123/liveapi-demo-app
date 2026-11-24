@@ -719,6 +719,9 @@ const VIDEO_STOPPED_MESSAGE =
 // per second even while the avatar is idle, so it stops at this size (about
 // 8-10 minutes) rather than let a long session run the tab out of memory.
 const MAX_RECORDED_VIDEO_BYTES = 512 * 1024 * 1024;
+// Cap pending MP4 chunks waiting for sourceopen or a busy SourceBuffer (~16 s
+// at ~1 MB/s) so a stalled player can't grow tab memory without bound.
+const MAX_QUEUED_VIDEO_BYTES = 16 * 1024 * 1024;
 
 /** @returns {HTMLVideoElement | null} The avatar's <video>, shared by both transports. */
 function getAvatarVideoElement() {
@@ -736,7 +739,10 @@ class LiveVideoOutputManager {
         this.mediaSource = null;
         this.sourceBuffer = null;
         this.objectUrl = null;
+        /** @type {ArrayBuffer[]} */
         this.chunkQueue = [];
+        this.queuedBytes = 0;
+        this.maxQueuedBytes = MAX_QUEUED_VIDEO_BYTES;
         this.initialized = false;
         this.codec = 'video/mp4; codecs="avc1.42c020, mp4a.40.2"';
         // Received video is kept for download only when this is set, since it
@@ -787,6 +793,7 @@ class LiveVideoOutputManager {
         // can't share a file with it either.
         this.finishRecording();
         this.chunkQueue = [];
+        this.queuedBytes = 0;
         this.mediaSource = null;
         this.sourceBuffer = null;
         this.initialized = false;
@@ -813,10 +820,20 @@ class LiveVideoOutputManager {
         const mediaSource = new MediaSourceClass();
         this.mediaSource = mediaSource;
         mediaSource.addEventListener('sourceopen', () => {
-            if (this.mediaSource !== mediaSource) return;
+            if (
+                this.mediaSource !== mediaSource ||
+                this.sourceBuffer ||
+                this.playbackFailed ||
+                this.unplayableDetail
+            ) {
+                return;
+            }
             try {
-                this.sourceBuffer = mediaSource.addSourceBuffer(this.codec);
-                this.sourceBuffer.addEventListener('updateend', () => this.processQueue());
+                const sourceBuffer = mediaSource.addSourceBuffer(this.codec);
+                this.sourceBuffer = sourceBuffer;
+                sourceBuffer.addEventListener('updateend', () => {
+                    if (this.sourceBuffer === sourceBuffer) this.processQueue();
+                });
                 this.initialized = true;
                 this.processQueue();
             } catch (e) {
@@ -901,7 +918,13 @@ class LiveVideoOutputManager {
             }
             return;
         }
-        const arrayBuffer = LiveVideoOutputManager.base64ToArrayBuffer(base64Chunk);
+        let arrayBuffer;
+        try {
+            arrayBuffer = LiveVideoOutputManager.base64ToArrayBuffer(base64Chunk);
+        } catch (error) {
+            console.error("Error decoding video chunk:", error);
+            return;
+        }
         // Recording is the user's choice and doesn't need the player.
         if (this.recordingEnabled && !this.recordingLimitReached) this.recordChunk(arrayBuffer);
         if (this.playbackFailed) return;
@@ -909,7 +932,16 @@ class LiveVideoOutputManager {
             this.failPlayback(this.unplayableDetail, VIDEO_UNSUPPORTED_MESSAGE);
             return;
         }
+        if (this.queuedBytes + arrayBuffer.byteLength > this.maxQueuedBytes) {
+            const detail = this.initialized
+                ? `Video buffer queue exceeded ${this.maxQueuedBytes} bytes`
+                : `MediaSource did not open before queued video exceeded ${this.maxQueuedBytes} bytes`;
+            const userMessage = this.initialized ? VIDEO_STOPPED_MESSAGE : VIDEO_UNSUPPORTED_MESSAGE;
+            this.failPlayback(detail, userMessage);
+            return;
+        }
         this.chunkQueue.push(arrayBuffer);
+        this.queuedBytes += arrayBuffer.byteLength;
         this.processQueue();
     }
 
@@ -931,6 +963,7 @@ class LiveVideoOutputManager {
      */
     failPlayback(detail, userMessage) {
         this.chunkQueue = [];
+        this.queuedBytes = 0;
         if (this.playbackFailed) return;
         this.playbackFailed = true;
         console.error(detail);
@@ -986,15 +1019,19 @@ class LiveVideoOutputManager {
      */
     appendNextChunk(sourceBuffer) {
         const chunk = this.chunkQueue.shift();
+        if (!chunk) return;
+        this.queuedBytes = Math.max(0, this.queuedBytes - chunk.byteLength);
         try {
             sourceBuffer.appendBuffer(chunk);
         } catch (e) {
             if (e.name !== "QuotaExceededError") throw e;
             // Make room and retry the same chunk on updateend.
             this.chunkQueue.unshift(chunk);
+            this.queuedBytes += chunk.byteLength;
             if (!this.trimBuffer(1) && !this.dropStaleBuffer()) {
                 console.error("Video buffer full and nothing to trim; dropping chunk.");
-                this.chunkQueue.shift();
+                const dropped = this.chunkQueue.shift();
+                if (dropped) this.queuedBytes = Math.max(0, this.queuedBytes - dropped.byteLength);
             }
         }
     }
@@ -1109,6 +1146,7 @@ class LiveVideoOutputManager {
             this.objectUrl = null;
         }
         this.chunkQueue = [];
+        this.queuedBytes = 0;
         this.clearRecordedChunks();
         // Derived from the ended stream's stalls; the next one starts fresh.
         const recommendedBitrateElement = document.getElementById("recommended-video-bitrate");

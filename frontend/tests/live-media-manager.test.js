@@ -1420,6 +1420,149 @@ test("playVideoChunk handles null or non-string mimeType without throwing", () =
     assert.equal(sourceBuffer.appended.length, 2);
 });
 
+test("playVideoChunk catches invalid base64 without throwing or breaking later chunks", () => {
+    const { manager, fake, errors } = videoOutputWithFakeMediaSource();
+    manager.recordingEnabled = true;
+    manager.initMediaSource();
+    fake.mediaSources[0].open();
+    const sourceBuffer = fake.mediaSources[0].sourceBuffer;
+    assert.doesNotThrow(() => manager.playVideoChunk("***not base64***", "video/mp4"));
+    assert.doesNotThrow(() => manager.playVideoChunk(undefined, "video/mp4"));
+    assert.equal(sourceBuffer.appended.length, 0);
+    assert.equal(manager.chunkQueue.length, 0);
+    assert.equal(manager.queuedBytes, 0);
+    assert.equal(manager.recordedChunks.length, 0);
+    assert.equal(manager.playbackFailed, false);
+    assert.deepEqual(errors, []);
+
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(sourceBuffer.appended.length, 1);
+    assert.equal(manager.recordedChunks.length, 1);
+});
+
+test("chunkQueue is capped before sourceopen and reports playback failure once", () => {
+    const { manager, fake, errors } = videoOutputWithFakeMediaSource();
+    const chunkBytes = Buffer.from(VIDEO_CHUNK, "base64").length;
+    manager.recordingEnabled = true;
+    manager.maxQueuedBytes = 3 * chunkBytes;
+    manager.initMediaSource();
+    for (let i = 0; i < 3; i++) manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(manager.chunkQueue.length, 3);
+    assert.equal(manager.queuedBytes, 3 * chunkBytes);
+    assert.deepEqual(errors, []);
+
+    // The next chunk pushes the queue over the cap and fails playback once.
+    for (let i = 0; i < 5; i++) manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(manager.playbackFailed, true);
+    assert.equal(manager.chunkQueue.length, 0);
+    assert.equal(manager.queuedBytes, 0);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /can't play the avatar video/);
+    // Recording doesn't depend on MSE playback.
+    assert.equal(manager.recordedChunks.length, 8);
+
+    // A late sourceopen after failure does not attach a SourceBuffer or revive the failed stream.
+    let addSourceBufferCalls = 0;
+    const ms = fake.mediaSources[0];
+    const origAdd = ms.addSourceBuffer.bind(ms);
+    ms.addSourceBuffer = (...args) => {
+        addSourceBufferCalls++;
+        return origAdd(...args);
+    };
+    ms.open();
+    assert.equal(addSourceBufferCalls, 0);
+    assert.equal(manager.sourceBuffer, null);
+    assert.equal(manager.initialized, false);
+});
+
+test("chunkQueue is capped when SourceBuffer stays busy and resets on next stream", () => {
+    const { manager, fake, errors } = videoOutputWithFakeMediaSource();
+    const chunkBytes = Buffer.from(VIDEO_CHUNK, "base64").length;
+    manager.maxQueuedBytes = 2 * chunkBytes;
+    manager.initMediaSource();
+    fake.mediaSources[0].open();
+    const sb = fake.mediaSources[0].sourceBuffer;
+    sb.updating = true;
+
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(manager.chunkQueue.length, 2);
+    assert.equal(manager.queuedBytes, 2 * chunkBytes);
+    assert.equal(errors.length, 0);
+
+    // Overflowing while initialized reports the playback-stopped message and drops queued chunks.
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(manager.playbackFailed, true);
+    assert.equal(manager.chunkQueue.length, 0);
+    assert.equal(manager.queuedBytes, 0);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /stopped after a playback error/);
+
+    // A new stream resets queuedBytes and plays normally.
+    manager.initMediaSource();
+    fake.mediaSources[1].open();
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(fake.mediaSources[1].sourceBuffer.appended.length, 1);
+    assert.equal(manager.queuedBytes, 0);
+});
+
+test("the video queue cap defaults to 16 MiB and drains queuedBytes as chunks append", () => {
+    const { manager, fake } = videoOutputWithFakeMediaSource();
+    const chunkBytes = Buffer.from(VIDEO_CHUNK, "base64").length;
+    assert.equal(manager.maxQueuedBytes, 16 * 1024 * 1024);
+    manager.initMediaSource();
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(manager.queuedBytes, 2 * chunkBytes);
+
+    fake.mediaSources[0].open();
+    assert.equal(fake.mediaSources[0].sourceBuffer.appended.length, 1);
+    assert.equal(manager.queuedBytes, chunkBytes);
+    fake.mediaSources[0].sourceBuffer.finishUpdate();
+    assert.equal(fake.mediaSources[0].sourceBuffer.appended.length, 2);
+    assert.equal(manager.queuedBytes, 0);
+});
+
+test("sourceopen is idempotent and ignores a second firing on the same MediaSource", () => {
+    const { manager, fake, errors } = videoOutputWithFakeMediaSource();
+    let addSourceBufferCalls = 0;
+    manager.initMediaSource();
+    const ms = fake.mediaSources[0];
+    const origAdd = ms.addSourceBuffer.bind(ms);
+    ms.addSourceBuffer = (...args) => {
+        addSourceBufferCalls++;
+        return origAdd(...args);
+    };
+    ms.open();
+    const firstBuffer = manager.sourceBuffer;
+    assert.equal(addSourceBufferCalls, 1);
+
+    // Seeking after ended re-opens the MediaSource and fires sourceopen again.
+    ms.open();
+    assert.equal(addSourceBufferCalls, 1);
+    assert.equal(manager.sourceBuffer, firstBuffer);
+    assert.deepEqual(errors, []);
+
+    manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+    assert.equal(firstBuffer.appended.length, 1);
+});
+
+test("sourceopen does not retry addSourceBuffer after unplayableDetail was already recorded", () => {
+    const error = Object.assign(new Error("unsupported"), { name: "NotSupportedError" });
+    const { manager, fake } = videoOutputWithFakeMediaSource({ addSourceBufferError: error });
+    let addSourceBufferCalls = 0;
+    manager.initMediaSource();
+    const ms = fake.mediaSources[0];
+    const origAdd = ms.addSourceBuffer.bind(ms);
+    ms.addSourceBuffer = (...args) => {
+        addSourceBufferCalls++;
+        return origAdd(...args);
+    };
+    ms.open();
+    ms.open();
+    assert.equal(addSourceBufferCalls, 1);
+});
+
 // A LiveAudioOutputManager on fake AudioContexts. `fake.failNextLoad` makes the
 // next addModule() reject (`fake.failAllLoads` every one); like Chrome and
 // Firefox, a context whose load failed keeps rejecting. `fake.noWorklet` leaves
