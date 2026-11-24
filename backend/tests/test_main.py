@@ -16,6 +16,7 @@ import threading
 import unittest
 from unittest import mock
 import urllib.parse
+import urllib.request
 
 import aiohttp
 from aiohttp import test_utils, web
@@ -2205,6 +2206,90 @@ class MainAsyncTest(unittest.IsolatedAsyncioTestCase):
             os.kill(os.getpid(), signal.SIGTERM)
             await asyncio.wait_for(server, timeout=10)
         self.gateway.terminate.assert_called_once()
+        self.gateway.wait.assert_called_once_with(
+            timeout=main.GATEWAY_SHUTDOWN_TIMEOUT_S
+        )
+        self.gateway.kill.assert_not_called()
+
+    async def test_gateway_escalates_to_kill_when_sigterm_times_out(self):
+        self.gateway.wait.side_effect = [
+            subprocess.TimeoutExpired("gw", main.GATEWAY_SHUTDOWN_TIMEOUT_S),
+            -9,
+        ]
+        with socket.socket() as probe:
+            probe.bind(("", 0))
+            port = probe.getsockname()[1]
+        with (
+            mock.patch.dict("os.environ", {"PORT": str(port)}),
+            self.assertLogs("absl", level="WARNING") as logs,
+        ):
+            server = asyncio.create_task(main.main_async())
+            async with aiohttp.ClientSession() as session:
+                for _ in range(100):
+                    try:
+                        async with session.get(
+                            f"http://127.0.0.1:{port}/healthz"
+                        ) as resp:
+                            self.assertEqual(resp.status, 200)
+                            break
+                    except aiohttp.ClientConnectionError:
+                        self.assertFalse(server.done())
+                        await asyncio.sleep(0.05)
+                else:
+                    self.fail("server didn't start")
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.wait_for(server, timeout=10)
+        self.gateway.terminate.assert_called_once()
+        self.gateway.kill.assert_called_once()
+        self.assertEqual(self.gateway.wait.call_count, 2)
+        self.assertIn("killing it", "\n".join(logs.output))
+
+    async def test_gateway_already_exited_not_terminated_on_shutdown(self):
+        self.gateway.poll.return_value = 0
+        with socket.socket() as probe:
+            probe.bind(("", 0))
+            port = probe.getsockname()[1]
+        with mock.patch.dict("os.environ", {"PORT": str(port)}):
+            server = asyncio.create_task(main.main_async())
+            async with aiohttp.ClientSession() as session:
+                for _ in range(100):
+                    try:
+                        async with session.get(
+                            f"http://127.0.0.1:{port}/healthz"
+                        ) as resp:
+                            self.assertEqual(resp.status, 200)
+                            break
+                    except aiohttp.ClientConnectionError:
+                        self.assertFalse(server.done())
+                        await asyncio.sleep(0.05)
+                else:
+                    self.fail("server didn't start")
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.wait_for(server, timeout=10)
+        self.gateway.terminate.assert_not_called()
+        self.gateway.wait.assert_not_called()
+        self.gateway.kill.assert_not_called()
+
+    async def test_sigterm_during_startup_skips_binding_and_stops_gateway(self):
+        orig_setup = web.AppRunner.setup
+
+        async def setup_with_sigterm(runner_self):
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.sleep(0.02)
+            return await orig_setup(runner_self)
+
+        with (
+            mock.patch.dict("os.environ", {"PORT": "0"}),
+            mock.patch.object(web.AppRunner, "setup", setup_with_sigterm),
+            mock.patch.object(web.TCPSite, "start") as site_start,
+        ):
+            await asyncio.wait_for(main.main_async(), timeout=10)
+        site_start.assert_not_called()
+        self.gateway.terminate.assert_called_once()
+        self.gateway.wait.assert_called_once_with(
+            timeout=main.GATEWAY_SHUTDOWN_TIMEOUT_S
+        )
+        self.gateway.kill.assert_not_called()
 
     async def _assert_starts_without_gateway(self, gateway_path: str) -> list[str]:
         """Runs main_async with the real Popen against a failing gateway file."""
@@ -2463,6 +2548,172 @@ class ShutdownTest(unittest.TestCase):
                     proc.communicate()
             self.assertEqual(proc.returncode, 0, stderr)
             self.assertIn("Shutting down", stderr)
+
+    def test_sigterm_kills_gateway_that_ignores_sigterm(self):
+        # A wedged gateway that ignores SIGTERM used to outlive the server
+        # because main_async called terminate() without waiting or killing it.
+        with tempfile.TemporaryDirectory() as tmp:
+            gw_pid_path = os.path.join(tmp, "gw.pid")
+            gateway = os.path.join(tmp, "common_bag_ws_proxy.par")
+            with open(gateway, "w") as f:
+                f.write(
+                    "#!/bin/sh\n"
+                    'trap "" TERM\n'
+                    f"echo $$ > {gw_pid_path}.tmp && mv {gw_pid_path}.tmp {gw_pid_path}\n"
+                    "exec sleep 300\n"
+                )
+            os.chmod(gateway, 0o755)
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            runner_code = (
+                "import sys\n"
+                f"sys.path.insert(0, {os.path.dirname(main.__file__)!r})\n"
+                "import main\n"
+                f"main.COMMON_BAG_PROXY_PAR = {gateway!r}\n"
+                "main.app.run(main.serve)\n"
+            )
+            stderr_path = os.path.join(tmp, "stderr.log")
+            env = {
+                "HOME": tmp,
+                "PATH": "/usr/bin:/bin",
+                "NO_GCE_CHECK": "true",
+                "PORT": str(port),
+            }
+            with open(stderr_path, "w") as stderr_file:
+                proc = subprocess.Popen(
+                    [sys.executable, "-c", runner_code, "--common_bag_ws_port=1"],
+                    env=env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_file,
+                )
+                gw_pid = None
+                try:
+                    for _ in range(200):
+                        if os.path.exists(gw_pid_path):
+                            try:
+                                with urllib.request.urlopen(
+                                    f"http://127.0.0.1:{port}/healthz", timeout=1
+                                ) as resp:
+                                    if resp.status == 200:
+                                        break
+                            except OSError:
+                                pass
+                        self.assertIsNone(proc.poll(), "server exited early")
+                        threading.Event().wait(0.05)
+                    else:
+                        self.fail("server or gateway never became ready")
+                    with open(gw_pid_path) as f:
+                        gw_pid = int(f.read().strip())
+                    self.addCleanup(_kill_if_running, gw_pid)
+                    # Let main_async finish registering signal handlers on old code
+                    # so this test specifically exercises terminate -> kill.
+                    threading.Event().wait(0.1)
+                    proc.send_signal(signal.SIGTERM)
+                    try:
+                        proc.wait(timeout=8)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                        self.fail("server still running 8 s after SIGTERM")
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.wait(timeout=5)
+            with open(stderr_path) as f:
+                stderr = f.read()
+            self.assertEqual(proc.returncode, 0, stderr)
+            self.assertIn("Shutting down", stderr)
+            with self.assertRaises(
+                ProcessLookupError,
+                msg=f"gateway pid {gw_pid} still alive after server exit",
+            ):
+                os.kill(gw_pid, 0)
+            self.assertIn("killing it", stderr)
+
+    def test_sigterm_during_startup_stops_gateway(self):
+        # SIGTERM arriving between spawning the gateway and registering signal
+        # handlers used to kill Python without running finally, orphaning the
+        # gateway.
+        with tempfile.TemporaryDirectory() as tmp:
+            gw_pid_path = os.path.join(tmp, "gw.pid")
+            in_setup = os.path.join(tmp, "in_setup")
+            release = os.path.join(tmp, "release")
+            stderr_path = os.path.join(tmp, "stderr.log")
+            gateway = os.path.join(tmp, "common_bag_ws_proxy.par")
+            with open(gateway, "w") as f:
+                f.write(
+                    "#!/bin/sh\n"
+                    f"echo $$ > {gw_pid_path}.tmp && mv {gw_pid_path}.tmp {gw_pid_path}\n"
+                    "exec sleep 300\n"
+                )
+            os.chmod(gateway, 0o755)
+            runner_code = (
+                "import asyncio, os, sys\n"
+                f"sys.path.insert(0, {os.path.dirname(main.__file__)!r})\n"
+                "from aiohttp import web\n"
+                "import main\n"
+                f"main.COMMON_BAG_PROXY_PAR = {gateway!r}\n"
+                "orig_setup = web.AppRunner.setup\n"
+                "async def slow_setup(self):\n"
+                f"    open({in_setup!r}, 'w').close()\n"
+                "    for _ in range(500):\n"
+                f"        if os.path.exists({release!r}):\n"
+                "            break\n"
+                "        await asyncio.sleep(0.02)\n"
+                "    return await orig_setup(self)\n"
+                "web.AppRunner.setup = slow_setup\n"
+                "main.app.run(main.serve)\n"
+            )
+            env = {
+                "HOME": tmp,
+                "PATH": "/usr/bin:/bin",
+                "NO_GCE_CHECK": "true",
+                "PORT": "0",
+            }
+            with open(stderr_path, "w") as stderr_file:
+                proc = subprocess.Popen(
+                    [sys.executable, "-c", runner_code, "--common_bag_ws_port=1"],
+                    env=env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_file,
+                )
+                gw_pid = None
+                try:
+                    for _ in range(200):
+                        if os.path.exists(gw_pid_path) and os.path.exists(in_setup):
+                            break
+                        self.assertIsNone(proc.poll(), "server exited early")
+                        threading.Event().wait(0.05)
+                    else:
+                        self.fail("server never reached AppRunner.setup with gateway")
+                    with open(gw_pid_path) as f:
+                        gw_pid = int(f.read().strip())
+                    self.addCleanup(_kill_if_running, gw_pid)
+                    proc.send_signal(signal.SIGTERM)
+                    # Keep setup paused briefly so SIGTERM is delivered during setup.
+                    threading.Event().wait(0.2)
+                    open(release, "w").close()
+                    try:
+                        proc.wait(timeout=8)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                        self.fail("server still running 8 s after startup SIGTERM")
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.wait(timeout=5)
+            with open(stderr_path) as f:
+                stderr = f.read()
+            self.assertEqual(proc.returncode, 0, stderr)
+            self.assertIn("Shutting down", stderr)
+            self.assertNotIn("killing it", stderr)
+            with self.assertRaises(
+                ProcessLookupError,
+                msg=f"gateway pid {gw_pid} still alive after startup SIGTERM",
+            ):
+                os.kill(gw_pid, 0)
 
 
 def _kill_if_running(pid):

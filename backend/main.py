@@ -70,6 +70,10 @@ PENDING_SESSION_TTL_S = 60
 # How long shutdown waits for handlers after closing sessions. Cloud Run sends
 # SIGKILL 10 s after SIGTERM.
 SHUTDOWN_TIMEOUT_S = 5
+# How long shutdown waits for the local Common BAG gateway to exit after
+# SIGTERM before escalating to SIGKILL (fits inside Cloud Run's 10 s budget
+# alongside SHUTDOWN_TIMEOUT_S).
+GATEWAY_SHUTDOWN_TIMEOUT_S = 2
 
 _LOCATION_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
 _HOSTNAME_RE = re.compile(
@@ -1018,14 +1022,65 @@ async def create_app():
     return app
 
 
+async def _stop_gateway(proxy_proc: subprocess.Popen[Any]) -> None:
+    """Stops the local gateway subprocess, escalating from SIGTERM to SIGKILL."""
+    if proxy_proc.poll() is not None:
+        return
+    try:
+        proxy_proc.terminate()
+    except OSError:
+        return
+    try:
+        await asyncio.to_thread(proxy_proc.wait, timeout=GATEWAY_SHUTDOWN_TIMEOUT_S)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    logging.warning(
+        "Common BAG Stubby gateway didn't exit within %s s after SIGTERM; killing it",
+        GATEWAY_SHUTDOWN_TIMEOUT_S,
+    )
+    try:
+        proxy_proc.kill()
+    except OSError:
+        return
+    try:
+        await asyncio.to_thread(proxy_proc.wait, timeout=GATEWAY_SHUTDOWN_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        logging.warning(
+            "Common BAG Stubby gateway still running %s s after SIGKILL",
+            GATEWAY_SHUTDOWN_TIMEOUT_S,
+        )
+
+
 async def main_async():
     logging.set_verbosity(logging.DEBUG if DEBUG.value else logging.INFO)
-    proxy_proc = None
+    proxy_proc: subprocess.Popen[Any] | None = None
     runner = None
     warmup_hostnames = None
-    # Everything after the gateway starts is inside the try, so a failed start
-    # (e.g. the port is in use) doesn't leave the gateway running.
+    stop = asyncio.Event()
+
+    def on_signal():
+        if stop.is_set():
+            # A second Ctrl-C quits without waiting.
+            if proxy_proc is not None and proxy_proc.poll() is None:
+                try:
+                    proxy_proc.kill()
+                except OSError:
+                    pass
+            os._exit(1)
+        stop.set()
+
+    loop = asyncio.get_running_loop()
+    registered_signals = []
+    # Register signal handlers before spawning the gateway so a signal during
+    # startup runs the finally block instead of orphaning the child. Everything
+    # after the gateway starts is inside the try so a failed start (e.g. the
+    # port is in use) also stops it.
     try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, on_signal)
+            registered_signals.append(sig)
+
         if os.path.exists(COMMON_BAG_PROXY_PAR):
             logging.info(
                 "Starting local Common BAG Stubby gateway (%s) on port %d...",
@@ -1052,62 +1107,57 @@ async def main_async():
 
         runner = web.AppRunner(app, shutdown_timeout=SHUTDOWN_TIMEOUT_S)
         await runner.setup()
-        host = listen_host()
-        site = web.TCPSite(runner, host, port)
-        await site.start()
-
-        logging.info(
-            "Serving on %s port %d; project %s; allowed upstream hosts: %s",
-            host or "all interfaces,",
-            port,
-            project_id(),
-            ", ".join(ALLOWED_HOST_SUFFIXES.value),
-        )
-        # Warm the machine FQDN cache in a worker thread so a slow reverse DNS
-        # resolver doesn't delay startup or block the event loop on requests.
-        if not _machine_hostnames.cache_info().currsize:
-            warmup_hostnames = _ensure_machine_hostnames_task()
-        # Fetch a token now so the first session doesn't wait for it (seconds
-        # when it comes from the gcloud fallback). Failures are retried per
-        # session.
-        prefetch = asyncio.create_task(
-            get_credentials.fetch_access_token(bounded=False)
-        )
-        prefetch.add_done_callback(
-            lambda task: (
-                task.cancelled()
-                or task.exception() is None
-                or logging.warning("Token prefetch failed: %s", task.exception())
-            )
-        )
-        stop = asyncio.Event()
-
-        def on_signal():
-            if stop.is_set():
-                # A second Ctrl-C quits without waiting.
-                if proxy_proc is not None and proxy_proc.poll() is None:
-                    proxy_proc.terminate()
-                os._exit(1)
-            stop.set()
-
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, on_signal)
-        await stop.wait()
+        if not stop.is_set():
+            host = listen_host()
+            site = web.TCPSite(runner, host, port)
+            await site.start()
+            if not stop.is_set():
+                logging.info(
+                    "Serving on %s port %d; project %s; allowed upstream hosts: %s",
+                    host or "all interfaces,",
+                    port,
+                    project_id(),
+                    ", ".join(ALLOWED_HOST_SUFFIXES.value),
+                )
+                # Warm the machine FQDN cache in a worker thread so a slow
+                # reverse DNS resolver doesn't delay startup or block the event
+                # loop on requests.
+                if not _machine_hostnames.cache_info().currsize:
+                    warmup_hostnames = _ensure_machine_hostnames_task()
+                # Fetch a token now so the first session doesn't wait for it
+                # (seconds when it comes from the gcloud fallback). Failures are
+                # retried per session.
+                prefetch = asyncio.create_task(
+                    get_credentials.fetch_access_token(bounded=False)
+                )
+                prefetch.add_done_callback(
+                    lambda task: (
+                        task.cancelled()
+                        or task.exception() is None
+                        or logging.warning(
+                            "Token prefetch failed: %s", task.exception()
+                        )
+                    )
+                )
+                await stop.wait()
         logging.info("Shutting down...")
     finally:
         try:
-            if runner is not None:
-                await runner.cleanup()
+            try:
+                if runner is not None:
+                    await runner.cleanup()
+            finally:
+                if warmup_hostnames is not None and not warmup_hostnames.done():
+                    warmup_hostnames.cancel()
+                    try:
+                        await warmup_hostnames
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                if proxy_proc is not None:
+                    await _stop_gateway(proxy_proc)
         finally:
-            if warmup_hostnames is not None and not warmup_hostnames.done():
-                warmup_hostnames.cancel()
-                try:
-                    await warmup_hostnames
-                except (asyncio.CancelledError, Exception):
-                    pass
-            if proxy_proc is not None and proxy_proc.poll() is None:
-                proxy_proc.terminate()
+            for sig in registered_signals:
+                loop.remove_signal_handler(sig)
 
 
 def serve(argv) -> None:
