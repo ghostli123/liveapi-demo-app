@@ -2588,6 +2588,7 @@ class MainAsyncTest(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(OSError):
                     await main.main_async()
         self.popen.assert_called_once()
+        self.assertEqual(self.popen.call_args.kwargs.get("stdin"), subprocess.DEVNULL)
         self.gateway.terminate.assert_called_once()
 
     async def test_gateway_stopped_on_sigterm(self):

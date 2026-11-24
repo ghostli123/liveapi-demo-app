@@ -1157,7 +1157,8 @@ async def main_async():
                     [
                         COMMON_BAG_PROXY_PAR,
                         f"--port={COMMON_BAG_WS_PORT.value}",
-                    ]
+                    ],
+                    stdin=subprocess.DEVNULL,
                 )
             except OSError as e:
                 logging.warning(

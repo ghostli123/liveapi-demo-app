@@ -121,6 +121,7 @@ def _token_from_gcloud() -> AccessToken:
         raise RuntimeError("gcloud CLI not found on PATH")
     result = subprocess.run(
         [gcloud, "auth", "application-default", "print-access-token", "--format=json"],
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=30,
@@ -141,9 +142,18 @@ def _token_from_gcloud() -> AccessToken:
 def _token_from_loas() -> AccessToken:
     if not os.path.exists(_PROXY_PAR):
         raise RuntimeError(f"helper not found at {_PROXY_PAR}")
-    out = subprocess.check_output(
-        [_PROXY_PAR, "--print_oauth_token"], text=True, timeout=15.0
-    ).strip()
+    result = subprocess.run(
+        [_PROXY_PAR, "--print_oauth_token"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=15.0,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip().splitlines()
+        raise RuntimeError(stderr[-1] if stderr else f"exit code {result.returncode}")
+    out = result.stdout.strip()
     token = out.splitlines()[-1].strip() if out else ""
     if not token:
         raise RuntimeError("helper printed an empty token")

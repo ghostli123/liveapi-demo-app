@@ -1,5 +1,9 @@
 import asyncio
 import datetime
+import json
+import os
+import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -250,6 +254,106 @@ class GetAccessTokenTest(unittest.TestCase):
         # A caller's own timeout (the metadata server's, say) still wins.
         request("http://metadata.google.internal", timeout=3)
         self.assertEqual(session.request.call_args.kwargs["timeout"], 3)
+
+    def test_gcloud_token_closes_stdin_and_parses_expiry(self):
+        payload = json.dumps(
+            {
+                "token": "gcloud-tok",
+                "expiry": {"datetime": "2030-01-01T00:00:00+00:00"},
+            }
+        )
+        completed = subprocess.CompletedProcess(
+            args=["gcloud"], returncode=0, stdout=payload, stderr=""
+        )
+        with (
+            mock.patch.object(
+                get_credentials.shutil, "which", return_value="/usr/bin/gcloud"
+            ),
+            mock.patch.object(
+                get_credentials.subprocess, "run", return_value=completed
+            ) as run_mock,
+        ):
+            token = get_credentials._token_from_gcloud()
+        self.assertEqual((token.token, token.source), ("gcloud-tok", "gcloud"))
+        self.assertEqual(
+            token.expiry, datetime.datetime(2030, 1, 1, tzinfo=datetime.timezone.utc)
+        )
+        self.assertEqual(run_mock.call_args.kwargs.get("stdin"), subprocess.DEVNULL)
+        self.assertTrue(run_mock.call_args.kwargs.get("capture_output"))
+
+    def test_gcloud_stdin_closed_prevents_interactive_hang(self):
+        # A real child that reads stdin gets EOF immediately instead of waiting
+        # for the 30 s timeout when stdin is wired to DEVNULL.
+        with tempfile.TemporaryDirectory() as bin_dir:
+            gcloud = os.path.join(bin_dir, "gcloud")
+            with open(gcloud, "w") as f:
+                f.write(
+                    "#!/bin/sh\n"
+                    "if read -r _line; then\n"
+                    "  echo 'unexpected stdin' >&2\n"
+                    "  exit 1\n"
+                    "fi\n"
+                    'printf \'{"token": "eof-gcloud-tok"}\'\n'
+                )
+            os.chmod(gcloud, 0o755)
+            with mock.patch.dict(os.environ, {"PATH": bin_dir}):
+                token = get_credentials._token_from_gcloud()
+        self.assertEqual((token.token, token.source), ("eof-gcloud-tok", "gcloud"))
+
+    def test_loas_token_closes_stdin_and_captures_stderr_on_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            helper = os.path.join(tmpdir, "common_bag_ws_proxy.par")
+            with open(helper, "w") as f:
+                f.write(
+                    "#!/bin/sh\n"
+                    "if read -r _line; then\n"
+                    "  echo 'unexpected stdin' >&2\n"
+                    "  exit 1\n"
+                    "fi\n"
+                    "echo 'noisy banner'\n"
+                    "echo 'loas-tok'\n"
+                )
+            os.chmod(helper, 0o755)
+            with mock.patch.object(get_credentials, "_PROXY_PAR", helper):
+                token = get_credentials._token_from_loas()
+            self.assertEqual((token.token, token.source), ("loas-tok", "loas"))
+
+            # On failure, stderr is captured into the RuntimeError instead of
+            # leaking directly to the server's terminal.
+            with open(helper, "w") as f:
+                f.write(
+                    "#!/bin/sh\n"
+                    "echo 'first warning' >&2\n"
+                    "echo 'gcert required' >&2\n"
+                    "exit 2\n"
+                )
+            os.chmod(helper, 0o755)
+            with mock.patch.object(get_credentials, "_PROXY_PAR", helper):
+                with self.assertRaisesRegex(RuntimeError, "^gcert required$"):
+                    get_credentials._token_from_loas()
+
+            # Non-zero exit with empty stderr falls back to the exit code.
+            with open(helper, "w") as f:
+                f.write("#!/bin/sh\nexit 3\n")
+            os.chmod(helper, 0o755)
+            with mock.patch.object(get_credentials, "_PROXY_PAR", helper):
+                with self.assertRaisesRegex(RuntimeError, "^exit code 3$"):
+                    get_credentials._token_from_loas()
+
+            # Mocked call verifies subprocess.run kwargs explicitly.
+            completed = subprocess.CompletedProcess(
+                args=[helper], returncode=0, stdout="mock-loas\n", stderr=""
+            )
+            with (
+                mock.patch.object(get_credentials, "_PROXY_PAR", helper),
+                mock.patch.object(
+                    get_credentials.subprocess, "run", return_value=completed
+                ) as run_mock,
+            ):
+                token = get_credentials._token_from_loas()
+            self.assertEqual(token.token, "mock-loas")
+            self.assertEqual(run_mock.call_args.kwargs.get("stdin"), subprocess.DEVNULL)
+            self.assertTrue(run_mock.call_args.kwargs.get("capture_output"))
 
     def test_chain_credentials_refresh(self):
         self.use_sources(lambda: _token(60))
