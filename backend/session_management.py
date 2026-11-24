@@ -107,11 +107,33 @@ class SessionManager:
             if current:
                 if current.websocket_handler:
                     return None
+                current.ws_host = data.ws_host
                 return current
             self._check_can_add_locked(session_id, max_sessions)
             self._sessions[session_id] = data
         logging.info("Session %s added", session_id)
         return data
+
+    async def reuse_pending(
+        self, session_id: str, ws_host: str
+    ) -> tuple[bool, Optional[SessionBaseModel]]:
+        """Updates ws_host on an existing pending record atomically.
+
+        Returns:
+            (already_connected, record):
+              - (True, record) if session_id already has an active WebSocket.
+              - (False, record) if a pending record exists and its ws_host was
+                updated to ws_host.
+              - (False, None) if no record exists for session_id.
+        """
+        async with self._lock:
+            current = self._sessions.get(session_id)
+            if current is None:
+                return False, None
+            if current.websocket_handler:
+                return True, current
+            current.ws_host = ws_host
+            return False, current
 
     async def check_can_add(self, session_id: str, max_sessions: int) -> None:
         """Raises SessionAddError if session_id couldn't be added right now.
@@ -141,6 +163,8 @@ class SessionManager:
             if self._sessions.get(session_id) is not record or record.websocket_handler:
                 return False
             record.websocket_handler = handler
+            if record.expiry_task and record.expiry_task is not asyncio.current_task():
+                record.expiry_task.cancel()
             return True
 
     async def release(self, session_id: str, record: SessionBaseModel) -> bool:
@@ -193,6 +217,25 @@ class SessionManager:
             or next(iter(self._abandoned.values())) <= now
         ):
             self._abandoned.popitem(last=False)
+
+    async def delete_if_pending(
+        self, session_id: str, record: SessionBaseModel
+    ) -> bool:
+        """Removes and ends record only if it is still stored and unclaimed.
+
+        Used by the pending-session expiry timer so a lock-contention race with
+        claim_websocket() can never tear down a newly connected session.
+        """
+        async with self._lock:
+            if (
+                self._sessions.get(session_id) is not record
+                or record.websocket_handler is not None
+            ):
+                return False
+            del self._sessions[session_id]
+        logging.info("Session %s never opened a WebSocket; removing it", session_id)
+        await record.del_session()
+        return True
 
     async def delete_item(self, session_id: str, record: SessionBaseModel) -> None:
         """Removes record if it is still session_id's record, and ends it.

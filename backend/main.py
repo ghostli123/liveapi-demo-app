@@ -510,15 +510,17 @@ async def handle_control_request(request: web.Request):
         ws_host = resolve_ws_host(endpoint, location)
     except ValueError as e:
         return _json_error(str(e), 400)
-    logging.info("Websocket host for session %s is set to: %s", session_id, ws_host)
 
-    existing = await SESSION_MANAGER.search_item(session_id)
+    already_connected, existing = await SESSION_MANAGER.reuse_pending(
+        session_id, ws_host
+    )
+    if already_connected:
+        return _json_error("Already running", 409)
     if existing:
-        if existing.websocket_handler:
-            return _json_error("Already running", 409)
         # Keep the pending record (preserving any fc_definitions already
-        # posted to it) and refresh its expiry window without re-running
-        # simulator init.
+        # posted to it) with the updated ws_host and refresh its expiry window
+        # without re-running simulator init.
+        logging.info("Websocket host for session %s is set to: %s", session_id, ws_host)
         _arm_pending_expiry(session_id, existing)
         return _session_initialized_response()
     # Before the simulator init: a rejected connect shouldn't build a chat.
@@ -555,6 +557,7 @@ async def handle_control_request(request: web.Request):
     if record is None:
         await session_handler.del_session()
         return _json_error("Already running", 409)
+    logging.info("Websocket host for session %s is set to: %s", session_id, ws_host)
     _arm_pending_expiry(session_id, record)
     if record is not session_handler:
         await session_handler.del_session()
@@ -684,8 +687,7 @@ async def _remove_if_never_connected(
         session.websocket_handler is None
         and session.expiry_task is asyncio.current_task()
     ):
-        logging.info("Session %s never opened a WebSocket; removing it", session_id)
-        await SESSION_MANAGER.delete_item(session_id, session)
+        await SESSION_MANAGER.delete_if_pending(session_id, session)
 
 
 @functools.cache
@@ -764,14 +766,28 @@ async def revalidate_static_files(request: web.Request, handler):
 _machine_hostnames_task: asyncio.Task[frozenset[str]] | None = None
 
 
+def _safe_gethostname() -> str:
+    try:
+        return _normalize_hostname(socket.gethostname())
+    except OSError:
+        return ""
+
+
+def _safe_getfqdn() -> str:
+    try:
+        return _normalize_hostname(socket.getfqdn())
+    except OSError:
+        return ""
+
+
 @functools.cache
 def _machine_hostnames() -> frozenset[str]:
     return frozenset(
         name
         for name in (
             "localhost",
-            _normalize_hostname(socket.gethostname()),
-            _normalize_hostname(socket.getfqdn()),
+            _safe_gethostname(),
+            _safe_getfqdn(),
         )
         if name
     )
@@ -878,7 +894,11 @@ def is_explicitly_allowed_origin(origin: str) -> bool:
     try:
         parts = urllib.parse.urlsplit(origin)
         origin_host = _normalize_hostname(parts.hostname)
-        origin_port = parts.port or _DEFAULT_PORTS.get(parts.scheme.lower())
+        origin_port = (
+            parts.port
+            if parts.port is not None
+            else _DEFAULT_PORTS.get(parts.scheme.lower())
+        )
     except ValueError:  # Unparsable, so it can't be a listed host.
         return False
     # "null" has no host, and a blank entry must not match it; "http://*"
@@ -916,7 +936,7 @@ def _check_allowed_host_fast(hostname: str) -> bool | None:
         pass
     if os.environ.get("K_SERVICE") and hostname.endswith(".run.app"):
         return True
-    if hostname == _normalize_hostname(socket.gethostname()):
+    if hostname == _safe_gethostname():
         return True
     return None
 
@@ -1101,6 +1121,7 @@ async def main_async():
     proxy_proc: subprocess.Popen[Any] | None = None
     runner = None
     warmup_hostnames = None
+    prefetch = None
     stop = asyncio.Event()
 
     def on_signal():
@@ -1191,12 +1212,13 @@ async def main_async():
                 if runner is not None:
                     await runner.cleanup()
             finally:
-                if warmup_hostnames is not None and not warmup_hostnames.done():
-                    warmup_hostnames.cancel()
-                    try:
-                        await warmup_hostnames
-                    except (asyncio.CancelledError, Exception):
-                        pass
+                for bg_task in (warmup_hostnames, prefetch):
+                    if bg_task is not None and not bg_task.done():
+                        bg_task.cancel()
+                        try:
+                            await bg_task
+                        except (asyncio.CancelledError, Exception):
+                            pass
                 if proxy_proc is not None:
                     await _stop_gateway(proxy_proc)
         finally:

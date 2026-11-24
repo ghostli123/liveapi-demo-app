@@ -1141,15 +1141,80 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 await self.connect_session("s6")
                 record = await main.SESSION_MANAGER.search_item("s6")
                 ws = await self.client.ws_connect("/ws?session_id=s6")
-                # The expiry check has run, rather than a sleep that a slow
-                # machine could end before it.
+                # Claiming the WebSocket cancels the pending expiry timer.
                 assert record is not None and record.expiry_task is not None
-                await asyncio.wait_for(record.expiry_task, 5)
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(record.expiry_task, 5)
                 self.assertIs(await main.SESSION_MANAGER.search_item("s6"), record)
                 await ws.send_str("ping")
                 msg = await asyncio.wait_for(ws.receive(), 5)
                 self.assertEqual(json.loads(msg.data), {"echo": "ping"})
                 await ws.close()
+
+    async def test_expiry_timer_cannot_remove_claimed_session_under_lock_contention(
+        self,
+    ):
+        # Even if the expiry timer wakes right as claim_websocket() runs and
+        # queues behind it on SESSION_MANAGER._lock, delete_if_pending()
+        # re-checks websocket_handler under the lock and leaves the live WS.
+        async with FakeUpstream() as upstream:
+            sleep_started = asyncio.Event()
+            release_sleep = asyncio.Event()
+            orig_sleep = asyncio.sleep
+
+            async def controlled_sleep(delay, *args, **kwargs):
+                if delay == main.PENDING_SESSION_TTL_S:
+                    sleep_started.set()
+                    await release_sleep.wait()
+                    return
+                return await orig_sleep(delay, *args, **kwargs)
+
+            with (
+                flagsaver.flagsaver(common_bag_ws_port=upstream.port, ws_heartbeat_s=0),
+                mock.patch.object(main.asyncio, "sleep", side_effect=controlled_sleep),
+            ):
+                await self.connect_session("s6-race")
+                await asyncio.wait_for(sleep_started.wait(), 5)
+                record = await main.SESSION_MANAGER.search_item("s6-race")
+                assert record is not None
+
+                orig_claim = main.SESSION_MANAGER.claim_websocket
+                claim_waiting = asyncio.Event()
+                release_hold = asyncio.Event()
+
+                async def hold_on_claim(*args, **kwargs):
+                    async def holder():
+                        async with main.SESSION_MANAGER._lock:
+                            claim_waiting.set()
+                            await release_hold.wait()
+
+                    asyncio.create_task(holder())
+                    await claim_waiting.wait()
+                    return await orig_claim(*args, **kwargs)
+
+                with mock.patch.object(
+                    main.SESSION_MANAGER, "claim_websocket", side_effect=hold_on_claim
+                ):
+                    ws_task = asyncio.create_task(
+                        self.client.ws_connect("/ws?session_id=s6-race")
+                    )
+                    await asyncio.wait_for(claim_waiting.wait(), 5)
+                    # Let claim_websocket() queue first on _lock, then wake the
+                    # expiry timer so it passes its unlocked check and queues
+                    # behind claim_websocket() on _lock.
+                    await orig_sleep(0)
+                    release_sleep.set()
+                    await orig_sleep(0)
+                    await orig_sleep(0)
+                    release_hold.set()
+                    ws = await asyncio.wait_for(ws_task, 5)
+
+                self.assertIs(await main.SESSION_MANAGER.search_item("s6-race"), record)
+                await ws.send_str("ping")
+                msg = await asyncio.wait_for(ws.receive(), 5)
+                self.assertEqual(json.loads(msg.data), {"echo": "ping"})
+                await ws.close()
+                await self.wait_for_session_end("s6-race")
 
     async def test_control_retry_cannot_replace_a_connected_session(self):
         # A slow connect awaiting simulator init while a retry connects and
@@ -1224,6 +1289,68 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         # The first record's expiry time passes; the refreshed record stays.
         await asyncio.sleep(0.8)
         self.assertIs(await main.SESSION_MANAGER.search_item("s24"), first)
+
+    async def test_control_retry_updates_pending_ws_host_and_skips_log_when_running(
+        self,
+    ):
+        async with FakeUpstream() as upstream:
+            with flagsaver.flagsaver(common_bag_ws_port=upstream.port):
+                status, body = await self.connect_session("s24-host")
+                self.assertEqual(status, 200, body)
+                record = await main.SESSION_MANAGER.search_item("s24-host")
+                assert record is not None
+                self.assertEqual(record.ws_host, "autopush-common")
+
+                # Re-connecting the pending session with a different endpoint
+                # keeps the pending record and updates its ws_host.
+                resp = await self.client.post(
+                    "/api/control",
+                    json={
+                        "command": "connect",
+                        "session_id": "s24-host",
+                        "endpoint": "aiplatform.googleapis.com",
+                        "location": "us-central1",
+                    },
+                )
+                self.assertEqual(resp.status, 200)
+                self.assertIs(
+                    await main.SESSION_MANAGER.search_item("s24-host"), record
+                )
+                self.assertEqual(
+                    record.ws_host, "us-central1-aiplatform.googleapis.com"
+                )
+
+                # Switch back to autopush-common so /ws opens against FakeUpstream.
+                status, body = await self.connect_session("s24-host")
+                self.assertEqual(status, 200, body)
+                self.assertEqual(record.ws_host, "autopush-common")
+                ws = await self.client.ws_connect("/ws?session_id=s24-host")
+                await ws.send_str("ping")
+                await asyncio.wait_for(ws.receive(), 5)
+
+                # Once connected, a repeat connect returns 409 without logging
+                # a misleading "Websocket host ... is set to" line.
+                with self.assertLogs("absl", level="INFO") as logs:
+                    main.logging.info("sentinel")
+                    resp409 = await self.client.post(
+                        "/api/control",
+                        json={
+                            "command": "connect",
+                            "session_id": "s24-host",
+                            "endpoint": "aiplatform.googleapis.com",
+                            "location": "us-central1",
+                        },
+                    )
+                self.assertEqual(resp409.status, 409)
+                self.assertFalse(
+                    any(
+                        "Websocket host for session s24-host" in m for m in logs.output
+                    ),
+                    logs.output,
+                )
+                self.assertEqual(record.ws_host, "autopush-common")
+                await ws.close()
+                await self.wait_for_session_end("s24-host")
 
     async def test_slow_connect_finishing_after_retry_keeps_fc_definitions(self):
         # If attempt 1 is stuck in simulator init, attempt 2 succeeds and the
@@ -2147,6 +2274,7 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 ("http://demo.example:8443", 200),
                 ("https://web.example", 200),
                 ("https://web.example:443", 200),
+                ("https://web.example:0", 403),
                 ("http://web.example", 403),
                 ("https://web.example:8443", 403),
                 ("https://any.example:6666", 200),
@@ -2220,6 +2348,26 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(main.is_allowed_host(host), host)
         with mock.patch.dict("os.environ", {"K_SERVICE": "demo"}):
             self.assertTrue(main.is_allowed_host("demo-abc123-uc.a.run.app"))
+
+    async def test_gethostname_oserror_does_not_500_in_reject_cross_origin(self):
+        main._machine_hostnames.cache_clear()
+        self.addCleanup(main._machine_hostnames.cache_clear)
+        with mock.patch.object(
+            main.socket, "gethostname", side_effect=OSError("hostname failed")
+        ):
+            resp = await self.client.post(
+                "/api/control",
+                json={
+                    "command": "connect",
+                    "session_id": "s-host-err",
+                    "endpoint": "autopush-common",
+                    "location": "us-central1",
+                },
+                headers={"Host": "unknown.example"},
+            )
+            self.assertEqual(resp.status, 403)
+            self.assertFalse(main.is_allowed_host("unknown.example"))
+            self.assertTrue(main.is_allowed_host("localhost"))
 
     async def test_slow_getfqdn_does_not_stall_event_loop_or_duplicate_lookups(self):
         main._machine_hostnames.cache_clear()
@@ -2608,6 +2756,46 @@ class MainAsyncTest(unittest.IsolatedAsyncioTestCase):
                     os.kill(os.getpid(), signal.SIGTERM)
                 await asyncio.wait_for(server, timeout=10)
 
+    async def test_main_async_cancels_prefetch_on_shutdown(self):
+        started = asyncio.Event()
+        cancelled = False
+
+        async def slow_prefetch(*, bounded=True):
+            nonlocal cancelled
+            del bounded
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+
+        with socket.socket() as probe:
+            probe.bind(("", 0))
+            port = probe.getsockname()[1]
+        with (
+            mock.patch.dict("os.environ", {"PORT": str(port)}),
+            mock.patch.object(
+                main.get_credentials, "fetch_access_token", side_effect=slow_prefetch
+            ),
+            mock.patch.object(main, "COMMON_BAG_PROXY_PAR", "/nonexistent/gw.par"),
+        ):
+            before_tasks = set(asyncio.all_tasks())
+            server = asyncio.create_task(main.main_async())
+            try:
+                await asyncio.wait_for(started.wait(), timeout=5)
+                os.kill(os.getpid(), signal.SIGTERM)
+                await asyncio.wait_for(server, timeout=10)
+                leaked = [
+                    t for t in (set(asyncio.all_tasks()) - before_tasks) if not t.done()
+                ]
+                self.assertEqual(leaked, [])
+                self.assertTrue(cancelled)
+            finally:
+                if not server.done():
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    await asyncio.wait_for(server, timeout=10)
+
     async def _bound_addresses(self, k_service=None):
         """Starts main_async, returns what it listens on, and stops it."""
         runners = []
@@ -2947,11 +3135,27 @@ class SessionManagerTest(unittest.IsolatedAsyncioTestCase):
         manager = session_management.SessionManager()
         first = session_management.SessionBaseModel("s", "host")
         first.fc_definitions = '{"functions": ["f"]}'
-        second = session_management.SessionBaseModel("s", "host")
+        second = session_management.SessionBaseModel("s", "host2")
         self.assertIs(await manager.add_unless_connected("s", first), first)
         self.assertIs(await manager.add_unless_connected("s", second), first)
         self.assertIs(await manager.search_item("s"), first)
+        self.assertEqual(first.ws_host, "host2")
         self.assertEqual(first.fc_definitions, '{"functions": ["f"]}')
+
+    async def test_delete_if_pending_skips_claimed_record(self):
+        manager = session_management.SessionManager()
+        record = session_management.SessionBaseModel("s", "host")
+        self.assertIs(await manager.add_unless_connected("s", record), record)
+        handler = mock.AsyncMock(spec=websocket_handler.WebsocketHandler)
+        self.assertTrue(await manager.claim_websocket("s", record, handler))
+        self.assertFalse(await manager.delete_if_pending("s", record))
+        self.assertIs(await manager.search_item("s"), record)
+        handler.end_websocket.assert_not_awaited()
+
+        pending = session_management.SessionBaseModel("p", "host")
+        self.assertIs(await manager.add_unless_connected("p", pending), pending)
+        self.assertTrue(await manager.delete_if_pending("p", pending))
+        self.assertIsNone(await manager.search_item("p"))
 
     async def test_claim_websocket_is_exclusive(self):
         manager = session_management.SessionManager()
