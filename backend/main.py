@@ -697,38 +697,42 @@ async def _send_simulator_message(chat, content, session_id: str):
     """
     token_before = get_credentials.cached_token()
     try:
-        return await chat.send_message(content)
+        with get_credentials.track_credentials_token() as used_token:
+            return await chat.send_message(content)
     except genai_errors.APIError as e:
         if e.code != 401:
             raise
-        # A call whose token was fetched inside send_message() had no cached
-        # token before the call; read the cache again to catch it too.
-        rejected = get_credentials.cached_token() or token_before
-        # If another caller already replaced the cached token while this call
-        # was in flight, retry directly with the newer cached token.
-        if (
-            rejected is not None
-            and token_before is not None
-            and token_before.token != rejected.token
-        ):
-            logging.warning(
-                "Simulator rejected an earlier access token (HTTP 401) for session %s; "
-                "retrying with the newer cached token from %s",
-                session_id,
-                rejected.source,
-            )
-            return await chat.send_message(content)
+        # Prefer the token ChainCredentials actually refreshed or returned for
+        # this call so a concurrent refresh after an empty or stale cache is
+        # recognized as a newer replacement instead of being invalidated.
+        rejected = used_token.token or token_before or get_credentials.cached_token()
         if rejected is not None:
-            get_credentials.invalidate(rejected)
-            logging.warning(
-                "Simulator rejected the access token from %s (HTTP 401) for session %s; "
-                "dropped it from the cache",
-                rejected.source,
-                session_id,
-            )
+            if get_credentials.invalidate(rejected):
+                logging.warning(
+                    "Simulator rejected the access token from %s (HTTP 401) for session %s; "
+                    "dropped it from the cache",
+                    rejected.source,
+                    session_id,
+                )
+            elif (
+                newer := get_credentials.cached_token()
+            ) is not None and newer.token != rejected.token:
+                logging.warning(
+                    "Simulator rejected an earlier access token (HTTP 401) for session %s; "
+                    "retrying with the newer cached token from %s",
+                    session_id,
+                    newer.source,
+                )
+                return await chat.send_message(content)
+            else:
+                logging.warning(
+                    "Simulator returned HTTP 401 for session %s after its access token "
+                    "was invalidated in flight; fetching a replacement",
+                    session_id,
+                )
         else:
-            # token_before was None, send_message() fetched and cached a token,
-            # and another caller invalidated it before the 401 returned.
+            # token_before was None, send_message() did not use ChainCredentials,
+            # and no token is cached now.
             logging.warning(
                 "Simulator returned HTTP 401 for session %s after its access token "
                 "was invalidated in flight; fetching a replacement",

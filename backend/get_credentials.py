@@ -14,6 +14,8 @@ expires, so opening a session doesn't cost a token fetch.
 
 import asyncio
 import concurrent.futures
+import contextlib
+import contextvars
 import dataclasses
 import datetime
 import json
@@ -275,6 +277,30 @@ async def fetch_access_token(*, bounded: bool = True) -> AccessToken:
         return _fallback_token(_timeout_error())
 
 
+@dataclasses.dataclass
+class _TokenCapture:
+    token: AccessToken | None = None
+
+
+# Records the AccessToken actually used by a ChainCredentials consumer inside a
+# track_credentials_token() block. A ContextVar keeps concurrent simulator calls
+# isolated, and asyncio.to_thread() copies the context into refresh threads.
+_token_capture: contextvars.ContextVar[_TokenCapture | None] = contextvars.ContextVar(
+    "get_credentials_token_capture", default=None
+)
+
+
+@contextlib.contextmanager
+def track_credentials_token():
+    """Tracks the AccessToken last refreshed or read from ChainCredentials."""
+    capture = _TokenCapture()
+    reset = _token_capture.set(capture)
+    try:
+        yield capture
+    finally:
+        _token_capture.reset(reset)
+
+
 class ChainCredentials(google.auth.credentials.Credentials):
     """google-auth credentials backed by get_access_token(), for the genai client.
 
@@ -286,11 +312,31 @@ class ChainCredentials(google.auth.credentials.Credentials):
     window between google-auth's 3m45s REFRESH_THRESHOLD and `_EXPIRY_MARGIN`.
     """
 
+    def __init__(self) -> None:
+        self._token_pair: tuple[str | None, AccessToken | None] = (None, None)
+        super().__init__()
+
+    @property
+    def token(self) -> str | None:
+        raw_token, access_token = self._token_pair
+        if access_token is not None:
+            if (capture := _token_capture.get()) is not None:
+                capture.token = access_token
+        return raw_token
+
+    @token.setter
+    def token(self, value: str | None) -> None:
+        _, access_token = self._token_pair
+        if access_token is None or access_token.token != value:
+            access_token = None
+        self._token_pair = (value, access_token)
+
     def _stale_in_cache(self) -> bool:
-        if self.token is None:
+        raw_token, _ = self._token_pair
+        if raw_token is None:
             return True
         cached = _cached_token
-        return cached is None or cached.token != self.token
+        return cached is None or cached.token != raw_token
 
     @property
     def expired(self) -> bool:
@@ -312,8 +358,10 @@ class ChainCredentials(google.auth.credentials.Credentials):
     def refresh(self, request) -> None:
         del request  # Unused; get_access_token() picks its own transport.
         token = get_access_token()
-        self.token = token.token
         # google-auth compares expiry against naive UTC datetimes.
         self.expiry = token.expiry.astimezone(datetime.timezone.utc).replace(
             tzinfo=None
         )
+        self._token_pair = (token.token, token)
+        if (capture := _token_capture.get()) is not None:
+            capture.token = token

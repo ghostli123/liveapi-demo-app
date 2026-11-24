@@ -1168,6 +1168,130 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(get_credentials._cached_token)
         self.assertIn("No other access token for simulator", "\n".join(logs.output))
 
+    async def test_fr_401_retries_when_uncached_token_replaced_in_flight(self):
+        creds = get_credentials.ChainCredentials()
+        expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+            hours=1
+        )
+        tok_a = get_credentials.AccessToken("revoked-token", expiry, "gcloud")
+        tok_b = get_credentials.AccessToken("fresh-token", expiry, "gcloud")
+        # Fetch 1: tok_a (used by RacingChat), Fetch 2: tok_b (concurrent WS),
+        # Fetch 3: must not happen; if tok_b were spuriously invalidated, a 3rd
+        # fetch returning tok_b would skip retry and fail with 502.
+        fetch = mock.Mock(side_effect=[tok_a, tok_b, tok_b])
+        seen_tokens = []
+
+        class RacingChat:
+            async def send_message(self, parts):
+                del parts
+                if creds.expired or not creds.token:
+                    await asyncio.to_thread(creds.refresh, None)
+                sent = creds.token
+                seen_tokens.append(sent)
+                if sent == "revoked-token":
+                    # Concurrent caller invalidated tok_a and cached tok_b.
+                    get_credentials.invalidate(tok_a)
+                    get_credentials.get_access_token()
+                    raise main.genai_errors.ClientError(
+                        401, {"error": {"code": 401, "status": "UNAUTHENTICATED"}}
+                    )
+                return mock.Mock(text='{"ok": true}')
+
+        self.enterContext(
+            mock.patch.object(get_credentials, "_SOURCES", (("gcloud", fetch),))
+        )
+        self.enterContext(mock.patch.object(get_credentials, "_cached_token", None))
+        self.enterContext(
+            mock.patch.object(
+                main, "initialize_gemini_chat_session", return_value=RacingChat()
+            )
+        )
+        await self.connect_session("s30b")
+        with self.assertLogs("absl", level="WARNING") as logs:
+            resp = await self.client.post(
+                "/api/post_endpoint",
+                json={
+                    "session_id": "s30b",
+                    "objective": "fr_generate",
+                    "functionName": "f",
+                    "functionArgs": {},
+                },
+            )
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(await resp.json(), {"response": '{"ok": true}'})
+        self.assertEqual(seen_tokens, ["revoked-token", "fresh-token"])
+        self.assertEqual(fetch.call_count, 2)
+        self.assertIs(get_credentials.cached_token(), tok_b)
+        output = "\n".join(logs.output)
+        self.assertIn("retrying with the newer cached token", output)
+        self.assertNotIn("revoked-token", output)
+        self.assertNotIn("fresh-token", output)
+
+    async def test_fr_401_does_not_retry_stale_replaced_token_if_it_was_used(self):
+        creds = get_credentials.ChainCredentials()
+        now = datetime.datetime.now(datetime.timezone.utc)
+        near_expiry = get_credentials.AccessToken(
+            "near-expiry-token", now + datetime.timedelta(seconds=30), "gcloud"
+        )
+        revoked_new = get_credentials.AccessToken(
+            "revoked-new-token", now + datetime.timedelta(hours=1), "gcloud"
+        )
+        fresh = get_credentials.AccessToken(
+            "fresh-token", now + datetime.timedelta(hours=1), "gcloud"
+        )
+        # Before send_message(), cache holds near_expiry (within _EXPIRY_MARGIN),
+        # so ChainCredentials refreshes and sends revoked_new. On 401,
+        # _send_simulator_message must recognize revoked_new as the rejected token
+        # (not treat it as a newer replacement for near_expiry).
+        fetch = mock.Mock(side_effect=[revoked_new, fresh])
+        seen_tokens = []
+
+        class RefreshingChat:
+            async def send_message(self, parts):
+                del parts
+                if creds.expired or not creds.token:
+                    await asyncio.to_thread(creds.refresh, None)
+                sent = creds.token
+                seen_tokens.append(sent)
+                if sent == "revoked-new-token":
+                    raise main.genai_errors.ClientError(
+                        401, {"error": {"code": 401, "status": "UNAUTHENTICATED"}}
+                    )
+                return mock.Mock(text='{"ok": true}')
+
+        self.enterContext(
+            mock.patch.object(get_credentials, "_SOURCES", (("gcloud", fetch),))
+        )
+        self.enterContext(
+            mock.patch.object(get_credentials, "_cached_token", near_expiry)
+        )
+        self.enterContext(
+            mock.patch.object(
+                main, "initialize_gemini_chat_session", return_value=RefreshingChat()
+            )
+        )
+        await self.connect_session("s30c")
+        with self.assertLogs("absl", level="WARNING") as logs:
+            resp = await self.client.post(
+                "/api/post_endpoint",
+                json={
+                    "session_id": "s30c",
+                    "objective": "fr_generate",
+                    "functionName": "f",
+                    "functionArgs": {},
+                },
+            )
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(await resp.json(), {"response": '{"ok": true}'})
+        self.assertEqual(seen_tokens, ["revoked-new-token", "fresh-token"])
+        self.assertEqual(fetch.call_count, 2)
+        self.assertIs(get_credentials.cached_token(), fresh)
+        output = "\n".join(logs.output)
+        self.assertIn("dropped it from the cache", output)
+        self.assertNotIn("retrying with the newer cached token", output)
+        self.assertNotIn("revoked-new-token", output)
+        self.assertNotIn("fresh-token", output)
+
     async def test_fr_definitions_stored_without_simulator(self):
         await self.connect_session("s9")
         resp = await self.client.post(

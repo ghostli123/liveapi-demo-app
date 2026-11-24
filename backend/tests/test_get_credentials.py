@@ -542,6 +542,28 @@ class GetAccessTokenTest(unittest.TestCase):
         self.assertTrue(no_expiry.valid)
         self.assertEqual(no_expiry.token_state, token_state.FRESH)
 
+    def test_track_credentials_token_records_refresh_and_read(self):
+        first = _token(60, "first")
+        second = _token(60, "second")
+        self.use_sources(mock.Mock(side_effect=[first, second]))
+        creds = get_credentials.ChainCredentials()
+
+        # Refresh inside track_credentials_token records the refreshed AccessToken.
+        with get_credentials.track_credentials_token() as capture:
+            creds.refresh(None)
+        self.assertIs(capture.token, first)
+
+        # Reading creds.token without refreshing also records the cached AccessToken.
+        with get_credentials.track_credentials_token() as capture:
+            self.assertEqual(creds.token, first.token)
+        self.assertIs(capture.token, first)
+
+        # Overwriting creds.token with an unrelated string clears the AccessToken.
+        creds.token = "manual-token"
+        with get_credentials.track_credentials_token() as capture:
+            self.assertEqual(creds.token, "manual-token")
+        self.assertIsNone(capture.token)
+
 
 class FetchAccessTokenTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -610,6 +632,35 @@ class FetchAccessTokenTest(unittest.IsolatedAsyncioTestCase):
         self.use_source(slow)
         token = await get_credentials.fetch_access_token(bounded=False)
         self.assertEqual(token.source, "slow")
+
+    async def test_track_credentials_token_propagates_to_thread_and_isolates_tasks(
+        self,
+    ):
+        tok_a = _token(60, "a")
+        tok_b = _token(60, "b")
+        self.use_source(mock.Mock(side_effect=[tok_a, tok_b]))
+        creds = get_credentials.ChainCredentials()
+        a_refreshed = asyncio.Event()
+        b_done = asyncio.Event()
+
+        async def task_a():
+            with get_credentials.track_credentials_token() as capture:
+                await asyncio.to_thread(creds.refresh, None)
+                a_refreshed.set()
+                await b_done.wait()
+                return capture.token
+
+        async def task_b():
+            await a_refreshed.wait()
+            get_credentials.invalidate(tok_a)
+            with get_credentials.track_credentials_token() as capture:
+                await asyncio.to_thread(creds.refresh, None)
+                b_done.set()
+                return capture.token
+
+        got_a, got_b = await asyncio.gather(task_a(), task_b())
+        self.assertIs(got_a, tok_a)
+        self.assertIs(got_b, tok_b)
 
 
 if __name__ == "__main__":
