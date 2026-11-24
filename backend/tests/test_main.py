@@ -3219,6 +3219,108 @@ class FlagValidatorTest(unittest.TestCase):
                 with flagsaver.flagsaver(fr_simulator_thinking_level=value):
                     pass
 
+    def test_project_id_resolution_and_validation(self):
+        with mock.patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("GOOGLE_CLOUD_PROJECT", None)
+            for flag_val in [None, "", "   ", "\t\n"]:
+                with self.subTest(flag_val=flag_val):
+                    with flagsaver.flagsaver(project_id=flag_val):
+                        self.assertEqual(main.project_id(), main.DEFAULT_PROJECT_ID)
+
+        for env_val, expected in [
+            ("", main.DEFAULT_PROJECT_ID),
+            ("   ", main.DEFAULT_PROJECT_ID),
+            ("  env-proj  ", "env-proj"),
+            ("123456789012", "123456789012"),
+            ("google.com:my-proj", "google.com:my-proj"),
+        ]:
+            with self.subTest(env_val=env_val):
+                with mock.patch.dict("os.environ", {"GOOGLE_CLOUD_PROJECT": env_val}):
+                    with flagsaver.flagsaver(project_id="   "):
+                        self.assertEqual(main.project_id(), expected)
+
+        for flag_val, expected in [
+            ("p", "p"),
+            ("  my-proj  ", "my-proj"),
+            ("123456789012", "123456789012"),
+            ("google.com:my-proj", "google.com:my-proj"),
+        ]:
+            with self.subTest(flag_val=flag_val):
+                with mock.patch.dict("os.environ", {"GOOGLE_CLOUD_PROJECT": "bad/env"}):
+                    with flagsaver.flagsaver(project_id=flag_val):
+                        self.assertEqual(main.project_id(), expected)
+
+        bad_values = [
+            "my proj",
+            "proj\nother",
+            "proj/other",
+            "proj\\other",
+            ".",
+            "..",
+            "a..b",
+            "proj?x=1",
+            "proj#frag",
+            "-proj",
+            "proj-",
+            "ev\u00e9-proj",
+        ]
+        for value in bad_values:
+            with self.subTest(bad_flag=value):
+                with self.assertRaises(flags.IllegalFlagValueError, msg=value):
+                    with flagsaver.flagsaver(project_id=value):
+                        pass
+            with self.subTest(bad_env=value):
+                with mock.patch.dict("os.environ", {"GOOGLE_CLOUD_PROJECT": value}):
+                    with flagsaver.flagsaver(project_id=None):
+                        with self.assertRaisesRegex(
+                            ValueError, "invalid GOOGLE_CLOUD_PROJECT"
+                        ):
+                            main.project_id()
+
+    def test_fr_simulator_model_flag_validator(self):
+        for value in [
+            "gemini-3-flash-preview",
+            "  gemini-2.5-flash  ",
+            "gemini-2.5-flash@001",
+            "models/gemini-2.5-flash",
+            "publishers/google/models/gemini-2.5-flash",
+            "projects/google.com:my-proj/locations/global/publishers/google/models/gemini-2.5-flash",
+        ]:
+            with flagsaver.flagsaver(fr_simulator_model=value):
+                self.assertEqual(main.FR_SIMULATOR_MODEL.value, value)
+        for value in [
+            "",
+            "   ",
+            "\t\n",
+            "gemini 3",
+            "gemini\n3",
+            "/gemini-3",
+            "gemini-3/",
+            "models//gemini-3",
+            ".",
+            "..",
+            "../gemini-3",
+            "models/../gemini-3",
+            "gemini..3",
+            "gemini-3?key=1",
+            "gemini-3&a=1",
+            "gemini-3#frag",
+            "gemini-\u00e9",
+        ]:
+            with self.assertRaises(flags.IllegalFlagValueError, msg=value):
+                with flagsaver.flagsaver(fr_simulator_model=value):
+                    pass
+
+    def test_initialize_gemini_chat_session_strips_model(self):
+        fake_client = mock.Mock()
+        with mock.patch.object(main, "_genai_client", return_value=fake_client):
+            with flagsaver.flagsaver(fr_simulator_model="  gemini-2.5-flash  "):
+                main.initialize_gemini_chat_session()
+        self.assertEqual(
+            fake_client.aio.chats.create.call_args.kwargs["model"],
+            "gemini-2.5-flash",
+        )
+
     def test_initialize_gemini_chat_session_thinking_level(self):
         fake_client = mock.Mock()
         with mock.patch.object(main, "_genai_client", return_value=fake_client):
@@ -3291,6 +3393,22 @@ class FlagValidatorTest(unittest.TestCase):
                 self.assertNotIn("Traceback", result.stderr)
                 self.assertNotIn("Serving on", result.stderr)
 
+    def test_server_refuses_to_start_with_invalid_env_project_id(self):
+        script = os.path.join(os.path.dirname(main.__file__), "main.py")
+        for raw in ["my proj", "proj/other"]:
+            with self.subTest(project=raw):
+                result = subprocess.run(
+                    [sys.executable, script],
+                    env={**os.environ, "PORT": "0", "GOOGLE_CLOUD_PROJECT": raw},
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("invalid GOOGLE_CLOUD_PROJECT", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertNotIn("Serving on", result.stderr)
+
     def test_server_refuses_to_start_with_invalid_port_or_heartbeat(self):
         script = os.path.join(os.path.dirname(main.__file__), "main.py")
         for flag_name, flag_arg in [
@@ -3298,6 +3416,9 @@ class FlagValidatorTest(unittest.TestCase):
             ("--common_bag_ws_port", "--common_bag_ws_port=70000"),
             ("--ws_heartbeat_s", "--ws_heartbeat_s=nan"),
             ("--ws_heartbeat_s", "--ws_heartbeat_s=inf"),
+            ("--project_id", "--project_id=proj/other"),
+            ("--fr_simulator_model", "--fr_simulator_model="),
+            ("--fr_simulator_model", "--fr_simulator_model=   "),
             ("--fr_simulator_thinking_level", "--fr_simulator_thinking_level=bogus"),
         ]:
             with self.subTest(flag=flag_arg):

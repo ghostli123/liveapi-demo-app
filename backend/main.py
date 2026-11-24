@@ -82,6 +82,8 @@ _HOSTNAME_RE = re.compile(
     r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
 )
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.:-]{0,126}[A-Za-z0-9])?$")
+_MODEL_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$")
 
 SESSION_MANAGER = session_management.SessionManager()
 
@@ -174,10 +176,41 @@ DEBUG = flags.DEFINE_bool(
 )
 
 
+def _parse_project_id(value: str | None, source: str = "--project_id") -> str | None:
+    """Strips and validates a project ID, returning None if unset or blank."""
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    if not _PROJECT_ID_RE.fullmatch(stripped) or ".." in stripped:
+        raise ValueError(
+            f"invalid {source} {value!r}; expected a Google Cloud project ID or "
+            "number without whitespace or path separators"
+        )
+    return stripped
+
+
+def _validate_project_id(value: str | None) -> bool:
+    try:
+        _parse_project_id(value, source="--project_id")
+    except ValueError as e:
+        raise flags.ValidationError(str(e)) from e
+    return True
+
+
+flags.register_validator(PROJECT_ID, _validate_project_id)
+
+
 def project_id() -> str:
-    return (
-        PROJECT_ID.value or os.environ.get("GOOGLE_CLOUD_PROJECT") or DEFAULT_PROJECT_ID
-    )
+    for candidate, source in (
+        (PROJECT_ID.value, "--project_id"),
+        (os.environ.get("GOOGLE_CLOUD_PROJECT"), "GOOGLE_CLOUD_PROJECT"),
+    ):
+        parsed = _parse_project_id(candidate, source=source)
+        if parsed is not None:
+            return parsed
+    return DEFAULT_PROJECT_ID
 
 
 def _allowed_suffix_domain(entry: str) -> str:
@@ -239,6 +272,32 @@ def _validate_ws_heartbeat_s(value: float) -> bool:
 
 
 flags.register_validator(WS_HEARTBEAT_S, _validate_ws_heartbeat_s)
+
+
+def _parse_fr_simulator_model(value: str) -> str:
+    """Strips and validates the function-response simulator model name."""
+    model = value.strip()
+    if (
+        not model
+        or ".." in model
+        or not all(_MODEL_SEGMENT_RE.fullmatch(part) for part in model.split("/"))
+    ):
+        raise ValueError(
+            f"invalid simulator model {value!r}; expected a non-empty Gemini "
+            "model name or resource path, e.g. gemini-3-flash-preview"
+        )
+    return model
+
+
+def _validate_fr_simulator_model(value: str) -> bool:
+    try:
+        _parse_fr_simulator_model(value)
+    except ValueError as e:
+        raise flags.ValidationError(str(e)) from e
+    return True
+
+
+flags.register_validator(FR_SIMULATOR_MODEL, _validate_fr_simulator_model)
 
 
 _THINKING_LEVELS = {level.value.upper(): level for level in genai.types.ThinkingLevel}
@@ -765,9 +824,10 @@ def _genai_client() -> genai.Client:
 
 def initialize_gemini_chat_session():
     logging.info("Initializing Gemini chat session with project %s...", project_id())
+    model = _parse_fr_simulator_model(FR_SIMULATOR_MODEL.value)
     thinking_level = _parse_thinking_level(FR_SIMULATOR_THINKING.value)
     return _genai_client().aio.chats.create(
-        model=FR_SIMULATOR_MODEL.value,
+        model=model,
         config=genai.types.GenerateContentConfig(
             system_instruction=FR_SIMULATOR_PROMPT,
             thinking_config=(
@@ -1238,6 +1298,7 @@ async def _stop_gateway(proxy_proc: subprocess.Popen[Any]) -> None:
 async def main_async():
     logging.set_verbosity(logging.DEBUG if DEBUG.value else logging.INFO)
     port = listen_port()
+    resolved_project = project_id()
     proxy_proc: subprocess.Popen[Any] | None = None
     runner = None
     warmup_hostnames = None
@@ -1301,7 +1362,7 @@ async def main_async():
                     "Serving on %s port %d; project %s; allowed upstream hosts: %s",
                     host or "all interfaces,",
                     port,
-                    project_id(),
+                    resolved_project,
                     ", ".join(ALLOWED_HOST_SUFFIXES.value),
                 )
                 # Warm the machine FQDN cache in a worker thread so a slow
@@ -1351,6 +1412,7 @@ def serve(argv) -> None:
     del argv  # Unused.
     try:
         listen_port()
+        project_id()
     except ValueError as e:
         sys.exit(str(e))
     loop = asyncio.new_event_loop()
