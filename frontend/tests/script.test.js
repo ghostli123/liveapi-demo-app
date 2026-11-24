@@ -2625,6 +2625,86 @@ test("endSession() after a simulator timeout still suppresses the stale chat err
     );
 });
 
+test("cancelling a timed-out call mid-batch omits it from toolResponse", async () => {
+    const { context, api, posts, timers } = loadFunctionCalls();
+    const done = context.handleFunctionCallRequest([
+        { id: "c1", name: "hung", args: {} },
+        { id: "c2", name: "next", args: {} },
+    ]);
+    assert.equal(posts.length, 1);
+
+    // c1 times out (locking signal.reason to "timeout") and c2 begins.
+    timers[0].callback();
+    await settle();
+    assert.equal(posts.length, 2);
+    assert.equal(posts[0].signal.reason, "timeout");
+
+    // Server cancels c1 while c2 is still running.
+    context.handleReceiveResponse({ type: "FUNCTION_CALL_CANCELLATION", data: ["c1"] });
+    posts[1].resolve({ response: "ok" });
+    await done;
+
+    assert.deepEqual(
+        plainJson(api.sent.map((m) => m.toolResponse.functionResponses.map((r) => r.id))),
+        [["c2"]]
+    );
+});
+
+test("cancelling every call after an earlier call timed out sends no toolResponse and suppresses replaced notice", async () => {
+    const { context, api, posts, timers, chat } = loadFunctionCalls();
+    const done = context.handleFunctionCallRequest([
+        { id: "c1", name: "hung", args: {} },
+        { id: "c2", name: "next", args: {} },
+    ]);
+    timers[0].callback();
+    await settle();
+    assert.equal(posts.length, 2);
+
+    context.handleReceiveResponse({ type: "FUNCTION_CALL_CANCELLATION", data: ["c1", "c2"] });
+    await done;
+    assert.deepEqual(api.sent, []);
+
+    // Also when a GoAway resume replaces the socket after all calls were cancelled.
+    const replaced = loadFunctionCalls({ abortRejects: false });
+    const done2 = replaced.context.handleFunctionCallRequest([
+        { id: "c1", name: "hung", args: {} },
+        { id: "c2", name: "next", args: {} },
+    ]);
+    replaced.timers[0].callback();
+    replaced.posts[0].reject(new Error("aborted"));
+    await settle();
+    assert.equal(replaced.posts.length, 2);
+
+    replaced.context.handleReceiveResponse({ type: "FUNCTION_CALL_CANCELLATION", data: ["c1", "c2"] });
+    await replaced.context.handleSessionResumptionReconnect();
+    replaced.posts[1].reject(new Error("aborted"));
+    await done2;
+
+    assert.deepEqual(replaced.api.sent, []);
+    assert.deepEqual(
+        replaced.chat.filter((line) => /connection was replaced/i.test(line)),
+        []
+    );
+    assert.ok(chat.includes("Function calls cancelled: c1, c2"));
+});
+
+test("cancelling a call after its timeout fired but before rejection settles suppresses failure and response", async () => {
+    const { context, api, posts, timers, chat } = loadFunctionCalls({ abortRejects: false });
+    const done = context.handleFunctionCallRequest([{ id: "c1", name: "hung", args: {} }]);
+
+    timers[0].callback();
+    assert.equal(posts[0].signal.reason, "timeout");
+    context.handleReceiveResponse({ type: "FUNCTION_CALL_CANCELLATION", data: ["c1"] });
+    posts[0].reject(new Error("aborted"));
+    await done;
+
+    assert.deepEqual(api.sent, []);
+    assert.deepEqual(
+        chat.filter((line) => /failed:/i.test(line)),
+        []
+    );
+});
+
 test("fcScheduling is snapshotted at Connect and ignores mid-session select changes", async () => {
     const posts = [];
     const app = loadApp({

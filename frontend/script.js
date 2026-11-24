@@ -1179,7 +1179,10 @@ const FUNCTION_RESPONSE_TIMEOUT_MS = 30000;
 // Function calls waiting for or running their simulation: keyed by call ID so
 // toolCallCancellation can stop specific calls, plus every active controller
 // (including calls without an ID) so endSession() and resume stop all of them.
-/** @type {Map<string, AbortController>} */
+// Cancellation is tracked on the entry because AbortController.abort() is a
+// no-op once a call has already been aborted by its timeout.
+/** @typedef {{controller: AbortController, cancelled: boolean}} PendingFunctionCall */
+/** @type {Map<string, PendingFunctionCall>} */
 const pendingFunctionCalls = new Map();
 /** @type {Set<AbortController>} */
 const activeFunctionCalls = new Set();
@@ -1203,7 +1206,11 @@ function cancelFunctionCalls(ids) {
     const validIds = ids.filter((id) => typeof id === "string" && id.length > 0);
     if (!validIds.length) return;
     for (const id of validIds) {
-        pendingFunctionCalls.get(id)?.abort("cancelled");
+        const call = pendingFunctionCalls.get(id);
+        if (call) {
+            call.cancelled = true;
+            call.controller.abort("cancelled");
+        }
     }
     newSystemMessage("Function calls cancelled: " + validIds.join(", "));
 }
@@ -1211,10 +1218,11 @@ function cancelFunctionCalls(ids) {
 /**
  * Asks the backend's simulator for a function's response. Returns null if the
  * server cancelled the call or the session ended/reconnected meanwhile.
- * @param {AbortController} controller - Aborted with "cancelled",
- *     "disconnected", "replaced", or "timeout".
+ * @param {PendingFunctionCall} call - Its controller is aborted with
+ *     "cancelled", "disconnected", "replaced", or "timeout".
  */
-async function simulateFunctionResponse(funcCall, sessionId, webSocket, controller) {
+async function simulateFunctionResponse(funcCall, sessionId, webSocket, call) {
+    const { controller } = call;
     const timer = setTimeout(() => controller.abort("timeout"), FUNCTION_RESPONSE_TIMEOUT_MS);
     try {
         return {
@@ -1231,7 +1239,9 @@ async function simulateFunctionResponse(funcCall, sessionId, webSocket, controll
         };
     } catch (error) {
         const reason = controller.signal.reason;
-        if (reason === "cancelled" || reason === "disconnected" || reason === "replaced") return null;
+        if (call.cancelled || reason === "cancelled" || reason === "disconnected" || reason === "replaced") {
+            return null;
+        }
         const message =
             reason === "timeout"
                 ? `the simulator didn't answer within ${FUNCTION_RESPONSE_TIMEOUT_MS / 1000} s`
@@ -1254,12 +1264,12 @@ async function handleFunctionCallRequest(functionCalls) {
     const webSocket = api.webSocket;
     const sessionId = api.sessionId;
     const endCount = endSessionCount;
-    const controllers = functionCalls.map((funcCall) => {
+    const calls = functionCalls.map((funcCall) => {
         newSystemMessage(`Function call: ${funcCall.name}(${JSON.stringify(funcCall.args || {})})`);
-        const controller = new AbortController();
-        activeFunctionCalls.add(controller);
-        if (funcCall.id) pendingFunctionCalls.set(funcCall.id, controller);
-        return controller;
+        const call = { controller: new AbortController(), cancelled: false };
+        activeFunctionCalls.add(call.controller);
+        if (funcCall.id) pendingFunctionCalls.set(funcCall.id, call);
+        return call;
     });
 
     // Scheduling only applies to NON_BLOCKING functions.
@@ -1272,27 +1282,27 @@ async function handleFunctionCallRequest(functionCalls) {
     try {
         for (const [i, funcCall] of functionCalls.entries()) {
             if (api.webSocket !== webSocket) break;
-            if (controllers[i].signal.aborted) continue; // Cancelled before it started.
-            const response = await simulateFunctionResponse(funcCall, sessionId, webSocket, controllers[i]);
+            if (calls[i].cancelled || calls[i].controller.signal.aborted) continue; // Cancelled before it started.
+            const response = await simulateFunctionResponse(funcCall, sessionId, webSocket, calls[i]);
             if (!response) continue;
             if (schedulingVal) response.scheduling = schedulingVal;
-            responses.push({ controller: controllers[i], item: { id: funcCall.id, name: funcCall.name, response } });
+            responses.push({ call: calls[i], item: { id: funcCall.id, name: funcCall.name, response } });
         }
     } finally {
         for (const [i, funcCall] of functionCalls.entries()) {
-            activeFunctionCalls.delete(controllers[i]);
-            if (pendingFunctionCalls.get(funcCall.id) === controllers[i]) pendingFunctionCalls.delete(funcCall.id);
+            activeFunctionCalls.delete(calls[i].controller);
+            if (pendingFunctionCalls.get(funcCall.id) === calls[i]) pendingFunctionCalls.delete(funcCall.id);
         }
     }
     // Calls cancelled while a later one ran aren't answered either.
     const functionResponses = responses
-        .filter(({ controller }) => controller.signal.reason !== "cancelled")
+        .filter(({ call }) => !call.cancelled)
         .map(({ item }) => item);
     if (AppState.geminiLiveApi.webSocket !== webSocket) {
         // The connection that made these calls has closed or been replaced;
         // the new one doesn't know their IDs.
         const disconnected = endSessionCount !== endCount;
-        const allCancelled = controllers.every((c) => c.signal.reason === "cancelled");
+        const allCancelled = calls.every((c) => c.cancelled);
         if (!disconnected && !allCancelled) {
             console.warn("Dropping responses to calls from a previous connection.");
             if (AppUI.isHidden("disconnected")) {
