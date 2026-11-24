@@ -46,7 +46,7 @@ class GeminiLiveResponseMessage {
 
         const toolCall = field(raw, "toolCall", "tool_call");
         const functionCalls = list(field(toolCall, "functionCalls", "function_calls")).filter(
-            (call) => call && typeof call === "object"
+            (call) => call && typeof call === "object" && !Array.isArray(call)
         );
         if (functionCalls.length) {
             add("FUNCTION_CALL", functionCalls);
@@ -457,11 +457,11 @@ class GeminiLiveAPI {
      * @param {string} startSen - Speech start sensitivity ('low', 'high', or empty).
      * @param {string} endSen - Speech end sensitivity ('low', 'high', or empty).
      */
-    setVad(disableInterruption, disableDetection, startSen, endSen) {
+    setVad(disableInterruption, disableDetection, startSen = "", endSen = "") {
         this.disableInterruption = disableInterruption;
         this.disableDetection = disableDetection;
-        this.startSensitivity = startSen;
-        this.endSensitivity = endSen;
+        this.startSensitivity = typeof startSen === "string" ? startSen : "";
+        this.endSensitivity = typeof endSen === "string" ? endSen : "";
     }
 
     /**
@@ -781,7 +781,8 @@ class GeminiLiveAPI {
      * @returns {Promise<void>}
      */
     async setupFuncDeclarationToService(sessionId = this.sessionId, signal = undefined) {
-        if (!this.functionCallDefinition) {
+        const declarations = this._functionDeclarations();
+        if (!declarations.length) {
             return;
         }
         const funcDeclarationMessage = {
@@ -1334,6 +1335,20 @@ class GeminiLiveAPI {
         return config;
     }
 
+    /**
+     * Normalizes `this.functionCallDefinition` into a list of declarations,
+     * returning `[]` when unset or empty.
+     * @returns {Object[]}
+     */
+    _functionDeclarations() {
+        if (!this.functionCallDefinition) {
+            return [];
+        }
+        return Array.isArray(this.functionCallDefinition)
+            ? this.functionCallDefinition
+            : [this.functionCallDefinition];
+    }
+
     _buildToolsConfig() {
         /** @type {Object[] | null} */
         let fcDef = null;
@@ -1342,13 +1357,11 @@ class GeminiLiveAPI {
             fcDef = [{ googleSearch: {} }];
         }
 
-        if (this.functionCallDefinition) {
+        const declarations = this._functionDeclarations();
+        if (declarations.length) {
             if (!fcDef) {
                 fcDef = [];
             }
-            const declarations = Array.isArray(this.functionCallDefinition)
-                ? this.functionCallDefinition
-                : [this.functionCallDefinition];
             // `behavior` belongs to each FunctionDeclaration, not the Tool.
             // BLOCKING is the default, so it is only sent for NON_BLOCKING.
             fcDef.push({
@@ -1387,8 +1400,8 @@ class GeminiLiveAPI {
     _buildRealtimeInputConfig() {
         const hasDetectionConfig =
             this.disableDetection ||
-            this.startSensitivity !== "" ||
-            this.endSensitivity !== "";
+            Boolean(this.startSensitivity) ||
+            Boolean(this.endSensitivity);
 
         const hasInterruptionConfig = this.disableInterruption;
 

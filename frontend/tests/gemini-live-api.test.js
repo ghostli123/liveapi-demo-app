@@ -198,14 +198,17 @@ test("parseAll ignores parts, calls and ids that aren't lists", () => {
     assert.equal(events[1].data, "");
 });
 
-test("parseAll drops function calls that aren't objects and keeps the rest", () => {
+test("parseAll drops function calls that aren't plain objects and keeps the rest", () => {
     const events = GeminiLiveResponseMessage.parseAll({
-        toolCall: { functionCalls: [null, "f", 3, { id: "c1", name: "f" }] },
+        toolCall: { functionCalls: [null, "f", 3, [], ["not-an-object"], { id: "c1", name: "f" }] },
     });
     assert.deepEqual(types(events), ["FUNCTION_CALL"]);
     assert.deepEqual(plain(events[0].data), [{ id: "c1", name: "f" }]);
 
-    assert.deepEqual(types(GeminiLiveResponseMessage.parseAll({ toolCall: { functionCalls: [null] } })), []);
+    assert.deepEqual(
+        types(GeminiLiveResponseMessage.parseAll({ toolCall: { functionCalls: [null, [], ["x"]] } })),
+        []
+    );
 });
 
 test("a non-string resumption handle is ignored, not offered for a resume", () => {
@@ -249,6 +252,23 @@ test("tools put behavior on each function declaration, only for NON_BLOCKING", (
         ["NON_BLOCKING", "NON_BLOCKING"]
     );
     assert.equal(tools[1].behavior, undefined);
+});
+
+test("empty functionCallDefinition omits function_declarations and skips fc_definition POST", async () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    api.setFunctionCall([]);
+    assert.equal(api._buildToolsConfig(), null);
+
+    api.googleSearchEnabled = true;
+    assert.deepEqual(plain(api._buildToolsConfig()), [{ googleSearch: {} }]);
+
+    let posted = 0;
+    api.sendPostRequest = async () => {
+        posted++;
+        return {};
+    };
+    await api.setupFuncDeclarationToService("s1");
+    assert.equal(posted, 0);
 });
 
 test("realtime input is dropped until the server confirms setup", () => {
@@ -1348,6 +1368,13 @@ test("realtime input config sends only what the user chose", () => {
         automatic_activity_detection: { end_of_speech_sensitivity: "END_SENSITIVITY_LOW", disabled: true },
         activity_handling: "NO_INTERRUPTION",
     });
+
+    api.setVad(false, false, undefined, undefined);
+    assert.equal(api._buildRealtimeInputConfig(), null);
+
+    api.startSensitivity = undefined;
+    api.endSensitivity = null;
+    assert.equal(api._buildRealtimeInputConfig(), null);
 });
 
 test("describeClose explains how the server ended the session", () => {
