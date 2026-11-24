@@ -375,6 +375,9 @@ class LiveAudioInputManager {
         const audioContext = new AudioContext({
             sampleRate: MIC_SAMPLE_RATE,
         });
+        // Held before getUserMedia() so disconnectMicrophone() while the
+        // permission prompt is open closes it right away.
+        this.audioContext = audioContext;
 
         let constraints = {
             audio: {
@@ -391,7 +394,8 @@ class LiveAudioInputManager {
         try {
             stream = await navigator.mediaDevices.getUserMedia(constraints);
         } catch (error) {
-            audioContext.close()?.catch(() => {});
+            if (this.audioContext === audioContext) this.audioContext = null;
+            this._closeAudioContext(audioContext);
             // A refusal for a connect that was superseded while the prompt was
             // open isn't reported: the caller would turn off the newer mic.
             if (generation !== this.generation) return;
@@ -399,12 +403,12 @@ class LiveAudioInputManager {
         }
         if (generation !== this.generation) {
             stream.getTracks().forEach((track) => track.stop());
-            audioContext.close()?.catch(() => {});
+            if (this.audioContext === audioContext) this.audioContext = null;
+            this._closeAudioContext(audioContext);
             return;
         }
         // Held before the worklet module loads, so a disconnectMicrophone()
         // during the load releases the mic at once, not when the load ends.
-        this.audioContext = audioContext;
         this.stream = stream;
         try {
             await audioContext.audioWorklet.addModule("/frontend/input-processor.js");
@@ -492,11 +496,32 @@ class LiveAudioInputManager {
         this.newAudioRecording(base64);
     }
 
+    /** @param {AudioContext | null} audioContext */
+    _closeAudioContext(audioContext) {
+        if (!audioContext || audioContext.state === "closed") return;
+        try {
+            audioContext.close()?.catch(() => {});
+        } catch (error) {
+            console.error("Error closing microphone audio context", error);
+        }
+    }
+
     disconnectMicrophone() {
         this.generation++;
-        if (this.stream) {
+        const stream = this.stream;
+        const processor = this.processor;
+        const audioContext = this.audioContext;
+        this.stream = null;
+        this.processor = null;
+        this.audioContext = null;
+        this.pcmData = [];
+
+        clearInterval(this.interval);
+        this.interval = null;
+
+        if (stream) {
             try {
-                for (const track of this.stream.getTracks()) {
+                for (const track of stream.getTracks()) {
                     try {
                         track.stop();
                     } catch (error) {
@@ -507,30 +532,17 @@ class LiveAudioInputManager {
                 console.error("Error disconnecting microphone stream", error);
             }
         }
-        if (this.processor) {
+        if (processor) {
             // Messages the worklet posted before this are still queued; without
             // a handler they don't land in the next connection's pcmData.
-            if (this.processor.port) this.processor.port.onmessage = null;
+            if (processor.port) processor.port.onmessage = null;
             try {
-                this.processor.disconnect();
+                processor.disconnect();
             } catch (error) {
                 console.error("Error disconnecting microphone processor", error);
             }
         }
-        if (this.audioContext && this.audioContext.state !== "closed") {
-            try {
-                this.audioContext.close()?.catch(() => {});
-            } catch (error) {
-                console.error("Error closing microphone audio context", error);
-            }
-        }
-        this.stream = null;
-        this.processor = null;
-        this.audioContext = null;
-        this.pcmData = [];
-
-        clearInterval(this.interval);
-        this.interval = null;
+        this._closeAudioContext(audioContext);
     }
 }
 

@@ -201,6 +201,7 @@ function audioInputWithPendingMic({
     class FakeAudioContext {
         constructor() {
             this.state = "running";
+            this.closeCalls = 0;
             this.audioWorklet = { addModule };
             contexts.push(this);
         }
@@ -213,8 +214,10 @@ function audioInputWithPendingMic({
             };
         }
         close() {
+            this.closeCalls++;
+            const result = onClose ? onClose() : undefined;
             this.state = "closed";
-            if (onClose) return onClose();
+            return result;
         }
     }
     class FakeWorkletNode {
@@ -459,6 +462,81 @@ test("a rejecting AudioContext.close() in LiveAudioInputManager does not cause u
     } finally {
         process.off("unhandledRejection", onUnhandled);
     }
+});
+
+test("disconnectMicrophone() closes the pre-prompt AudioContext immediately before getUserMedia settles", async () => {
+    const { manager, requests, contexts } = audioInputWithPendingMic();
+
+    // 1. Disconnected while permission prompt is pending, then granted late.
+    const first = manager.connectMicrophone();
+    assert.equal(contexts.length, 1);
+    assert.equal(manager.audioContext, contexts[0]);
+    manager.disconnectMicrophone();
+    assert.equal(contexts[0].state, "closed");
+    assert.equal(contexts[0].closeCalls, 1);
+    assert.equal(manager.audioContext, null);
+    requests[0].grant();
+    await first;
+    assert.equal(requests[0].track.readyState, "ended");
+    assert.equal(contexts[0].closeCalls, 1);
+
+    // 2. Disconnected while permission prompt is pending, then denied late.
+    const second = manager.connectMicrophone();
+    assert.equal(contexts.length, 2);
+    manager.disconnectMicrophone();
+    assert.equal(contexts[1].state, "closed");
+    assert.equal(contexts[1].closeCalls, 1);
+    assert.equal(manager.audioContext, null);
+    requests[1].deny("NotAllowedError");
+    await second;
+    assert.equal(contexts[1].closeCalls, 1);
+
+    // 3. Second connectMicrophone() while first prompt is pending closes the first context immediately.
+    const third = manager.connectMicrophone();
+    const fourth = manager.connectMicrophone();
+    assert.equal(contexts.length, 4);
+    assert.equal(contexts[2].state, "closed");
+    assert.equal(contexts[2].closeCalls, 1);
+    assert.equal(contexts[3].state, "running");
+    assert.equal(manager.audioContext, contexts[3]);
+    requests[3].grant();
+    await fourth;
+    requests[2].grant();
+    await third;
+    assert.equal(requests[2].track.readyState, "ended");
+    assert.equal(contexts[3].state, "running");
+    assert.equal(manager.audioContext, contexts[3]);
+    manager.disconnectMicrophone();
+});
+
+test("a synchronously throwing AudioContext.close() in LiveAudioInputManager does not mask errors or reject superseded connects", async () => {
+    const { manager, requests, contexts } = audioInputWithPendingMic({
+        onClose: () => {
+            throw new Error("sync close failure");
+        },
+    });
+
+    // 1. getUserMedia rejection still surfaces the original error and clears audioContext.
+    const denied = manager.connectMicrophone();
+    requests[0].deny("NotAllowedError");
+    await assert.rejects(denied, { name: "NotAllowedError" });
+    assert.equal(manager.audioContext, null);
+    assert.equal(contexts[0].closeCalls, 1);
+
+    // 2. Superseded getUserMedia resolution settles quietly and stops the track.
+    const supersededGrant = manager.connectMicrophone();
+    manager.disconnectMicrophone();
+    assert.equal(manager.audioContext, null);
+    requests[1].grant();
+    await supersededGrant;
+    assert.equal(requests[1].track.readyState, "ended");
+
+    // 3. Superseded getUserMedia rejection settles quietly.
+    const supersededDeny = manager.connectMicrophone();
+    manager.disconnectMicrophone();
+    assert.equal(manager.audioContext, null);
+    requests[2].deny("NotAllowedError");
+    await supersededDeny;
 });
 
 test("disconnectMicrophone() still closes the audio context and cleans up if processor.disconnect() or track.stop() throws", async () => {
