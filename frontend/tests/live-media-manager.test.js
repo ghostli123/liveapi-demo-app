@@ -1534,6 +1534,33 @@ test("playVideoChunk catches invalid base64 without throwing or breaking later c
     assert.equal(manager.recordedChunks.length, 1);
 });
 
+test("playVideoChunk drops non-string chunks without coercing null or numbers to base64", () => {
+    const { manager, fake, video, elementsById, errors } = videoOutputWithFakeMediaSource();
+    manager.recordingEnabled = true;
+    manager.initMediaSource();
+    fake.mediaSources[0].open();
+    const sourceBuffer = fake.mediaSources[0].sourceBuffer;
+
+    // atob(null) / atob(1234) / atob(true) coerce to valid 4-char base64 strings if unguarded.
+    for (const bad of [null, undefined, 1234, true, {}]) {
+        assert.doesNotThrow(() => manager.playVideoChunk(bad, "video/mp4"));
+        assert.doesNotThrow(() => manager.playVideoChunk(bad, "image/jpeg"));
+    }
+    assert.equal(sourceBuffer.appended.length, 0);
+    assert.equal(manager.chunkQueue.length, 0);
+    assert.equal(manager.queuedBytes, 0);
+    assert.equal(manager.recordedChunks.length, 0);
+    assert.equal(manager.playbackFailed, false);
+    assert.equal(video.style.display, "block");
+    assert.equal(elementsById.avatar_frame_img, undefined);
+    assert.deepEqual(errors, []);
+
+    const { LiveVideoOutputManager } = loadScript("live-media-manager.js", ["LiveVideoOutputManager"], {
+        window: { atob },
+    });
+    assert.throws(() => LiveVideoOutputManager.base64ToArrayBuffer(null), /Base64 data must be a string/);
+});
+
 test("chunkQueue is capped before sourceopen and reports playback failure once", () => {
     const { manager, fake, errors } = videoOutputWithFakeMediaSource();
     const chunkBytes = Buffer.from(VIDEO_CHUNK, "base64").length;
@@ -2170,6 +2197,44 @@ test("close() still closes the playback context if node disconnect() throws", as
     assert.ok(fake.errors.includes("Error disconnecting audio output node:"));
 });
 
+test("resume() handles audioContext.close() returning undefined or throwing synchronously", async () => {
+    const { manager, fake } = audioOutputWithFakeContexts({ holdAddModule: true });
+    manager.resume();
+    assert.equal(fake.contexts.length, 1);
+    let closedFirst = 0;
+    fake.contexts[0].close = () => {
+        closedFirst++;
+        return undefined;
+    };
+    assert.doesNotThrow(() => manager.resume());
+    assert.equal(closedFirst, 1);
+    assert.equal(fake.contexts.length, 2);
+
+    fake.contexts[1].close = () => {
+        throw new Error("InvalidStateError");
+    };
+    assert.doesNotThrow(() => manager.resume());
+    assert.equal(fake.contexts.length, 3);
+    assert.ok(fake.errors.includes("Error closing audio output context:"));
+    fake.pendingLoads[2].resolve();
+    await settle();
+    assert.equal(manager.workletNode.context, fake.contexts[2]);
+});
+
+test("playAudioChunk drops non-string chunks without coercing numbers or null to PCM", () => {
+    const { manager, fake } = audioOutputWithFakeContexts();
+    for (const bad of [null, undefined, 12345678, true, {}]) {
+        assert.doesNotThrow(() => manager.playAudioChunk(bad));
+    }
+    assert.equal(fake.contexts.length, 0);
+    assert.deepEqual(fake.errors, []);
+
+    const { LiveAudioOutputManager } = loadScript("live-media-manager.js", ["LiveAudioOutputManager"], {
+        window: { atob },
+    });
+    assert.throws(() => LiveAudioOutputManager.base64ToArrayBuffer(null), /Base64 data must be a string/);
+});
+
 test("a mic level meter the browser refuses throws and leaves nothing running", () => {
     const contexts = [];
     let refuseContext = false;
@@ -2211,6 +2276,93 @@ test("a mic level meter the browser refuses throws and leaves nothing running", 
     assert.throws(() => meter.start({}), /no audio device/);
     assert.equal(meter.context, null);
     meter.stop(); // Turning the mic off afterwards is still fine.
+});
+
+test("MicLevelMeter.stop() called re-entrantly from onLevel does not recurse or leak animation frames", () => {
+    let nextId = 1;
+    let queued = [];
+    const contexts = [];
+    class FakeAudioContext {
+        constructor() {
+            this.state = "running";
+            this.closed = 0;
+            contexts.push(this);
+        }
+        createAnalyser() {
+            return {
+                fftSize: 512,
+                getFloatTimeDomainData(arr) {
+                    arr.fill(0.1);
+                },
+            };
+        }
+        createMediaStreamSource() {
+            return { connect() {} };
+        }
+        close() {
+            this.closed++;
+            this.state = "closed";
+            return undefined;
+        }
+    }
+    const { MicLevelMeter } = loadScript("live-media-manager.js", ["MicLevelMeter"], {
+        window: { AudioContext: FakeAudioContext },
+        requestAnimationFrame: (fn) => {
+            const id = nextId++;
+            queued.push({ id, fn });
+            return id;
+        },
+        cancelAnimationFrame: (id) => {
+            queued = queued.filter((entry) => entry.id !== id);
+        },
+    });
+
+    // Direct re-entrant stop() from onLevel(0) terminates cleanly.
+    const seen = [];
+    const directMeter = new MicLevelMeter((level) => {
+        seen.push(level);
+        directMeter.stop();
+    });
+    assert.doesNotThrow(() => directMeter.stop());
+    assert.deepEqual(seen, [0]);
+
+    // stop() invoked from onLevel(level) inside tick() does not reschedule rAF.
+    let stopOnSound = false;
+    const levels = [];
+    const meter = new MicLevelMeter((level) => {
+        levels.push(level);
+        if (stopOnSound && level > 0) meter.stop();
+    });
+    meter.start({});
+    assert.equal(queued.length, 1);
+    assert.equal(levels.length, 2); // stop() -> 0, initial tick() -> >0
+
+    stopOnSound = true;
+    const firstFrame = queued.shift();
+    firstFrame.fn();
+    assert.equal(meter.context, null);
+    assert.equal(meter.frame, null);
+    assert.equal(contexts[0].closed, 1);
+    assert.equal(queued.length, 0);
+    assert.equal(levels.at(-1), 0);
+
+    // Restarting with a new stream from inside onLevel keeps only the new rAF loop.
+    stopOnSound = false;
+    let restarted = false;
+    const restartMeter = new MicLevelMeter((level) => {
+        if (!restarted && level > 0) {
+            restarted = true;
+            restartMeter.start({});
+        }
+    });
+    restartMeter.start({});
+    assert.equal(queued.length, 1);
+    assert.equal(contexts.length, 3);
+    assert.equal(contexts[1].closed, 1);
+    assert.equal(contexts[2].closed, 0);
+    assert.equal(restartMeter.frame, queued[0].id);
+    restartMeter.stop();
+    assert.equal(queued.length, 0);
 });
 
 test("recordChunk sends the buffered samples as base64 16-bit little-endian PCM", () => {

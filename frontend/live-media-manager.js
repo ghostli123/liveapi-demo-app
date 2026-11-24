@@ -40,6 +40,7 @@ class LiveAudioOutputManager {
      * Chunks play in the order this is called.
      */
     playAudioChunk(base64AudioChunk) {
+        if (typeof base64AudioChunk !== "string") return;
         let float32Data;
         try {
             const arrayBuffer =
@@ -120,12 +121,16 @@ class LiveAudioOutputManager {
                 }
             }
         }
-        if (audioContext && audioContext.state !== "closed") {
-            try {
-                audioContext.close()?.catch(() => {});
-            } catch (error) {
-                console.error("Error closing audio output context:", error);
-            }
+        this._closeAudioContext(audioContext);
+    }
+
+    /** @param {AudioContext | null} audioContext */
+    _closeAudioContext(audioContext) {
+        if (!audioContext || audioContext.state === "closed") return;
+        try {
+            audioContext.close()?.catch(() => {});
+        } catch (error) {
+            console.error("Error closing audio output context:", error);
         }
     }
 
@@ -146,7 +151,7 @@ class LiveAudioOutputManager {
             const audioContext = this.audioContext;
             this.audioContext = null;
             this.ready = null;
-            audioContext?.close().catch(() => {});
+            this._closeAudioContext(audioContext);
         }
         this.resumeContext();
     }
@@ -194,7 +199,7 @@ class LiveAudioOutputManager {
             : Promise.reject(new Error("AudioWorklet is unavailable: the page needs HTTPS or localhost"));
         const ready = loaded.then(() => {
             if (this.generation !== generation) {
-                if (audioContext.state !== "closed") audioContext.close().catch(() => {});
+                this._closeAudioContext(audioContext);
                 throw new Error("Audio player initialization superseded");
             }
             const workletNode = new AudioWorkletNode(audioContext, "pcm-processor", {
@@ -210,7 +215,7 @@ class LiveAudioOutputManager {
         });
         ready.catch((error) => {
             if (this.generation !== generation) {
-                if (audioContext.state !== "closed") audioContext.close().catch(() => {});
+                this._closeAudioContext(audioContext);
                 return;
             }
             console.error("Could not load the audio player:", error);
@@ -220,7 +225,7 @@ class LiveAudioOutputManager {
             this.audioContext = null;
             this.ready = null;
             this.backOff(ready);
-            audioContext.close().catch(() => {});
+            this._closeAudioContext(audioContext);
         });
         this.audioContext = audioContext;
         this.ready = ready;
@@ -246,7 +251,7 @@ class LiveAudioOutputManager {
         this.audioContext = null;
         this.ready = null;
         this.workletNode = null;
-        audioContext?.close().catch(() => {});
+        this._closeAudioContext(audioContext);
         if (performance.now() - this.startedAt >= PLAYER_CRASH_RESET_MS) this.crashDelayMs = 0;
         this.crashDelayMs = Math.min(30000, this.crashDelayMs * 2 || 1000);
         const failed = Promise.reject(new Error("The audio player stopped"));
@@ -275,6 +280,9 @@ class LiveAudioOutputManager {
     }
 
     static base64ToArrayBuffer(base64) {
+        if (typeof base64 !== "string") {
+            throw new TypeError("Base64 data must be a string");
+        }
         const binaryString = window.atob(base64);
         const bytes = new Uint8Array(binaryString.length);
         for (let i = 0; i < binaryString.length; i++) {
@@ -532,6 +540,7 @@ class MicLevelMeter {
         this.onLevel = onLevel;
         this.context = null;
         this.frame = null;
+        this.stopping = false;
     }
 
     /** Throws if the browser refuses the audio context or the stream; nothing is left running then. */
@@ -544,7 +553,7 @@ class MicLevelMeter {
             // Created after awaiting getUserMedia, i.e. possibly without a user
             // gesture, so it can start suspended (always in Safari).
             if (this.context.state === "suspended") {
-                this.context.resume().catch(() => {});
+                this.context.resume()?.catch(() => {});
             }
             analyser = this.context.createAnalyser();
             analyser.fftSize = 512;
@@ -553,8 +562,10 @@ class MicLevelMeter {
             this.stop();
             throw error;
         }
+        const context = this.context;
         const samples = new Float32Array(analyser.fftSize);
         const tick = () => {
+            if (this.context !== context) return;
             analyser.getFloatTimeDomainData(samples);
             let sum = 0;
             for (const sample of samples) sum += sample * sample;
@@ -562,7 +573,9 @@ class MicLevelMeter {
             // and a linear scale pins loud microphones at the top.
             const dbfs = 10 * Math.log10(sum / samples.length + 1e-12);
             this.onLevel(Math.min(1, Math.max(0, (dbfs + 60) / 60)));
-            this.frame = requestAnimationFrame(tick);
+            if (this.context === context) {
+                this.frame = requestAnimationFrame(tick);
+            }
         };
         tick();
     }
@@ -571,10 +584,23 @@ class MicLevelMeter {
         cancelAnimationFrame(this.frame);
         this.frame = null;
         if (this.context) {
-            this.context.close().catch(() => {});
+            const context = this.context;
             this.context = null;
+            if (context.state !== "closed") {
+                try {
+                    context.close()?.catch(() => {});
+                } catch {
+                    // Best effort; the meter is already stopped.
+                }
+            }
         }
-        this.onLevel(0);
+        if (this.stopping) return;
+        this.stopping = true;
+        try {
+            this.onLevel(0);
+        } finally {
+            this.stopping = false;
+        }
     }
 }
 
@@ -943,6 +969,7 @@ class LiveVideoOutputManager {
     }
 
     playVideoChunk(base64Chunk, mimeType = "") {
+        if (typeof base64Chunk !== "string") return;
         const mime =
             typeof mimeType === "string"
                 ? mimeType.split(";", 1)[0].trim().toLowerCase()
@@ -1212,6 +1239,9 @@ class LiveVideoOutputManager {
     }
 
     static base64ToArrayBuffer(base64) {
+        if (typeof base64 !== "string") {
+            throw new TypeError("Base64 data must be a string");
+        }
         const binaryString = window.atob(base64);
         const bytes = new Uint8Array(binaryString.length);
         for (let i = 0; i < binaryString.length; i++) {
