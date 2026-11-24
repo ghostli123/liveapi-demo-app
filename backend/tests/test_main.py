@@ -125,9 +125,18 @@ class ResolveWsHostTest(unittest.TestCase):
         for entry in [
             "com",
             ".com",
+            ".",
+            "..",
+            "...",
+            " . ",
             "*",
             "googleapis.com/x",
             "a..b.com",
+            "..googleapis.com",
+            ".googleapis.com..",
+            "googleapis.com..",
+            "..googleapis.com.",
+            "..googleapis.com..",
             "https://x.com",
         ]:
             with self.assertRaises(flags.IllegalFlagValueError, msg=entry):
@@ -139,8 +148,10 @@ class ResolveWsHostTest(unittest.TestCase):
             allowed_host_suffixes=[
                 ".googleapis.com",
                 "example.com",
+                "example.com.",
                 " .Example.ORG. ",
                 "",
+                "   ",
             ]
         ):
             pass

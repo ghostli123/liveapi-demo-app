@@ -182,7 +182,7 @@ def project_id() -> str:
 
 def _allowed_suffix_domain(entry: str) -> str:
     """One --allowed_host_suffixes entry as a bare domain; "" for a blank."""
-    return entry.strip().lower().strip(".")
+    return entry.strip().lower().removeprefix(".").removesuffix(".")
 
 
 def _is_in_domain(host: str, domain: str) -> bool:
@@ -193,8 +193,10 @@ def _is_in_domain(host: str, domain: str) -> bool:
 
 def _validate_allowed_host_suffixes(entries: list[str]) -> bool:
     for entry in entries:
+        if not entry.strip():
+            continue
         domain = _allowed_suffix_domain(entry)
-        if domain and not _HOSTNAME_RE.fullmatch(domain):
+        if not _HOSTNAME_RE.fullmatch(domain):
             raise flags.ValidationError(
                 f"invalid entry {entry!r}; expected a domain with at least two "
                 "labels, e.g. .googleapis.com"
