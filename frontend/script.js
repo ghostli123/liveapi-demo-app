@@ -146,6 +146,8 @@ const AppState = {
     voiceAttempt: 0, // Voice file, recorded take or voice picked from the dropdown
     fcAttempt: 0, // Function declarations file or Remove
     deviceListAttempt: 0, // Device-list refresh (page load, device change, mic or camera grant)
+    micAttempt: 0, // Microphone start, switch, stop, or session end
+    videoAttempt: 0, // Camera/screen capture start, switch, stop, track end, or session end
 };
 
 // --- Manager Callbacks ---
@@ -1432,6 +1434,7 @@ function deviceErrorReason(err) {
 }
 
 async function startAudioInput() {
+    const attempt = ++AppState.micAttempt;
     const deviceId = AppUI.getValue("audioSource") || null;
     try {
         const webRtcManager = webRtcManagerIfActive();
@@ -1446,16 +1449,19 @@ async function startAudioInput() {
             AppState.liveAudioInputManager.recordChunk();
             AppState.liveAudioInputManager.deviceId = deviceId;
             await AppState.liveAudioInputManager.updateAudioInterval(AppUI.getValue("audioInterval"));
+            if (attempt !== AppState.micAttempt) return;
             if (AppState.liveAudioInputManager.processor && AppState.geminiLiveApi.isSetupComplete) {
                 AppState.wsAudioStreamActive = true;
             }
         }
+        if (attempt !== AppState.micAttempt) return;
         if (isMicOn()) {
             startMicLevelMeter(webRtcManager ? webRtcManager.micStream : AppState.liveAudioInputManager.stream);
         }
         // Device names are only visible once the user has granted access.
         refreshDeviceLists();
     } catch (err) {
+        if (attempt !== AppState.micAttempt) return;
         console.error("Failed to start microphone:", err);
         AppUI.showModal(`Could not start the microphone: ${deviceErrorReason(err)}`);
         // E.g. switching to another mic mid-turn: like turning the mic off,
@@ -1495,6 +1501,7 @@ function endAudioStream() {
 }
 
 function stopAudioInput() {
+    AppState.micAttempt++;
     endAudioStream();
     AppState.wsAudioStreamActive = false;
     AppState.micLevelMeter.stop();
@@ -1605,6 +1612,7 @@ function showIntervalUsed(field, limits) {
 }
 
 async function startCameraCapture() {
+    const attempt = ++AppState.videoAttempt;
     AppState.liveScreenManager.stopCapture();
     const camera = AppState.liveVideoManager;
     camera.stopWebcam();
@@ -1613,15 +1621,18 @@ async function startCameraCapture() {
     try {
         // WebRTC sends the camera track itself; WebSocket sends JPEG frames.
         await camera.startWebcam({ sendFrames: !webRtcManagerIfActive() });
+        if (attempt !== AppState.videoAttempt) return;
         // Re-check after the prompt: media may have fallen back to WebSocket
         // while the user answered it, so don't attach to a closed manager.
         const webRtcManager = webRtcManagerIfActive();
         if (webRtcManager) {
             await webRtcManager.attachVideoStream(camera.stream);
+            if (attempt !== AppState.videoAttempt) return;
         }
         sendFramesIfWebSocket(camera);
         refreshDeviceLists();
     } catch (err) {
+        if (attempt !== AppState.videoAttempt) return;
         console.error("Failed to start camera:", err);
         AppUI.showModal(`Could not start the camera: ${deviceErrorReason(err)}`);
         camera.stopWebcam();
@@ -1649,6 +1660,9 @@ async function startScreenCapture() {
         }
         return;
     }
+    // Claim video ownership only after the user picks a screen, so cancelling
+    // the picker doesn't invalidate a camera start already in flight.
+    const attempt = ++AppState.videoAttempt;
     // The camera and the screen share the preview, so only one runs at a time.
     AppState.liveVideoManager.stopWebcam();
     showCameraState(false);
@@ -1659,6 +1673,7 @@ async function startScreenCapture() {
         try {
             await webRtcManager.attachVideoStream(screen.stream);
         } catch (err) {
+            if (attempt !== AppState.videoAttempt) return;
             console.error("Failed to attach screen share:", err);
             AppUI.showModal(`Could not share the screen: ${deviceErrorReason(err)}`);
             screen.stopCapture();
@@ -1669,6 +1684,7 @@ async function startScreenCapture() {
             }
             return;
         }
+        if (attempt !== AppState.videoAttempt) return;
     }
     sendFramesIfWebSocket(screen);
 }
@@ -1683,6 +1699,7 @@ function sendFramesIfWebSocket(source) {
 // A camera or screen track ended; stop the WebRTC sender if it was sending it,
 // so the session (and a renegotiated one after resumption) doesn't keep it.
 function stopSendingVideoTrack(track) {
+    AppState.videoAttempt++;
     const webRtcManager = AppState.geminiLiveApi.webRtcManager;
     if (webRtcManager && webRtcManager.videoTrack === track) {
         webRtcManager.detachVideoStream();
@@ -1690,6 +1707,7 @@ function stopSendingVideoTrack(track) {
 }
 
 function cameraBtnClick() {
+    AppState.videoAttempt++;
     const webRtcManager = webRtcManagerIfActive();
     if (webRtcManager) {
         webRtcManager.detachVideoStream();
@@ -1904,6 +1922,7 @@ function endSession() {
     AppState.geminiLiveApi.disconnect();
     abortPendingFunctionCalls("disconnected");
     stopAudioInput();
+    AppState.videoAttempt++;
     AppState.liveVideoManager.stopWebcam();
     AppState.liveScreenManager.stopCapture();
     showMicState(false);

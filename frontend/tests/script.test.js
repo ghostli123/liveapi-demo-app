@@ -1836,6 +1836,291 @@ test("startScreenCapture handles attachVideoStream failures by stopping the shar
     assert.equal(dialogText(), "Could not share the screen: sender rejected track");
 });
 
+test("superseded startCameraCapture and startScreenCapture attachVideoStream failures do not detach the active video source", async () => {
+    const camTrack = { kind: "video", id: "cam-1", readyState: "live" };
+    const scrTrack = { kind: "video", id: "scr-1", readyState: "live" };
+    const camTrack2 = { kind: "video", id: "cam-2", readyState: "live" };
+    let camStarts = 0;
+    const { context, element, webRtc, dialogText } = loadWithWebRtcManager({
+        console: { error() {} },
+        navigator: {},
+        requestAnimationFrame: () => 0,
+        LiveVideoManager: class extends FakeFrameSource {
+            stopWebcam() {
+                this.stream = null;
+            }
+            async startWebcam() {
+                const track = camStarts++ === 0 ? camTrack : camTrack2;
+                this.stream = { getVideoTracks: () => [track] };
+            }
+        },
+        LiveScreenManager: class extends FakeFrameSource {
+            stopCapture() {
+                this.stream = null;
+            }
+            async startCapture() {
+                this.stream = { getVideoTracks: () => [scrTrack] };
+                return true;
+            }
+        },
+    });
+    context.AppState.geminiLiveApi.transportMode = "webrtc";
+    const attaches = [];
+    webRtc.attachVideoStream = (stream) => {
+        webRtc.videoTrack = stream.getVideoTracks()[0];
+        const deferred = Promise.withResolvers();
+        attaches.push(deferred);
+        return deferred.promise;
+    };
+
+    // F1a: camera attach hangs, screen share takes over and attaches, then stale camera attach rejects.
+    const tick = () => new Promise((r) => setImmediate(r));
+    const cam1 = context.startCameraCapture();
+    await tick();
+    assert.equal(attaches.length, 1);
+
+    const scr1 = context.startScreenCapture();
+    await tick();
+    assert.equal(attaches.length, 2);
+    attaches[1].resolve();
+    await scr1;
+    assert.equal(webRtc.videoTrack, scrTrack);
+
+    attaches[0].reject(new Error("InvalidStateError: camera track stopped"));
+    await cam1;
+    assert.equal(webRtc.videoTrack, scrTrack);
+    assert.deepEqual(webRtc.detached, []);
+    assert.equal(dialogText(), undefined);
+
+    // F1b: screen share attach hangs, camera takes over and attaches, then stale screen attach rejects.
+    const scr2 = context.startScreenCapture();
+    await tick();
+    assert.equal(attaches.length, 3);
+
+    element("cameraBtn").hidden = false;
+    const cam2 = context.startCameraCapture();
+    await tick();
+    assert.equal(attaches.length, 4);
+    attaches[3].resolve();
+    await cam2;
+    assert.equal(webRtc.videoTrack, camTrack2);
+
+    attaches[2].reject(new Error("InvalidStateError: screen track stopped"));
+    await scr2;
+    assert.equal(webRtc.videoTrack, camTrack2);
+    assert.deepEqual(webRtc.detached, []);
+    assert.equal(element("cameraBtn").hidden, false);
+    assert.equal(dialogText(), undefined);
+
+    // Turning the camera off while attachVideoStream is pending suppresses a stale attach rejection.
+    const cam3 = context.startCameraCapture();
+    await tick();
+    assert.equal(attaches.length, 5);
+    context.cameraBtnClick();
+    attaches[4].reject(new Error("sender closed"));
+    await cam3;
+    assert.equal(dialogText(), undefined);
+});
+
+test("superseded startCameraCapture during getUserMedia does not re-attach the newer camera, and a cancelled screen picker leaves camera in flight", async () => {
+    const prompts = [];
+    let screenCancel = false;
+    const camTracks = [
+        { kind: "video", id: "cam-1" },
+        { kind: "video", id: "cam-2" },
+        { kind: "video", id: "cam-3" },
+    ];
+    let enumerateCalls = 0;
+    const { context, webRtc } = loadWithWebRtcManager({
+        navigator: {
+            mediaDevices: {
+                async enumerateDevices() {
+                    enumerateCalls++;
+                    return [];
+                },
+            },
+        },
+        requestAnimationFrame: () => 0,
+        LiveVideoManager: class extends FakeFrameSource {
+            constructor(...args) {
+                super(...args);
+                this.generation = 0;
+            }
+            stopWebcam() {
+                this.generation++;
+                this.stream = null;
+            }
+            async startWebcam() {
+                const gen = ++this.generation;
+                const deferred = Promise.withResolvers();
+                prompts.push({ gen, deferred, track: camTracks[prompts.length] });
+                await deferred.promise;
+                if (gen !== this.generation) return;
+                this.stream = { getVideoTracks: () => [camTracks[prompts.findIndex((p) => p.gen === gen)]] };
+            }
+        },
+        LiveScreenManager: class extends FakeFrameSource {
+            stopCapture() {
+                this.stream = null;
+            }
+            async startCapture() {
+                if (screenCancel) throw Object.assign(new Error("cancelled"), { name: "NotAllowedError" });
+                return false;
+            }
+        },
+    });
+    context.AppState.geminiLiveApi.transportMode = "webrtc";
+    let attachCalls = 0;
+    webRtc.attachVideoStream = async (stream) => {
+        attachCalls++;
+        webRtc.videoTrack = stream.getVideoTracks()[0];
+    };
+
+    // Two overlapping camera starts: second finishes first, first finishes late and must be a no-op.
+    const cam1 = context.startCameraCapture();
+    const cam2 = context.startCameraCapture();
+    assert.equal(prompts.length, 2);
+    prompts[1].deferred.resolve();
+    await cam2;
+    assert.equal(attachCalls, 1);
+    assert.equal(webRtc.videoTrack, camTracks[1]);
+    const enumAfterSecond = enumerateCalls;
+
+    prompts[0].deferred.resolve();
+    await cam1;
+    assert.equal(attachCalls, 1);
+    assert.equal(enumerateCalls, enumAfterSecond);
+
+    // Cancelling the screen picker while a camera prompt is open must not invalidate the camera start.
+    screenCancel = true;
+    const cam3 = context.startCameraCapture();
+    assert.equal(prompts.length, 3);
+    await context.startScreenCapture();
+    prompts[2].deferred.resolve();
+    await cam3;
+    assert.equal(attachCalls, 2);
+    assert.equal(webRtc.videoTrack, camTracks[2]);
+});
+
+test("superseded WebRTC startAudioInput replaceTrack failure does not stop the newer mic or show a dialog", async () => {
+    const starts = [];
+    let stopMicCalls = 0;
+    let meterStarts = 0;
+    const { context, element, webRtc, dialogText } = loadWithWebRtcManager({
+        console: { error() {} },
+        navigator: {},
+        requestAnimationFrame: () => 0,
+        MicLevelMeter: class {
+            start() {
+                meterStarts++;
+            }
+            stop() {}
+        },
+    });
+    context.AppState.geminiLiveApi.transportMode = "webrtc";
+    webRtc.startMicrophone = () => {
+        const stream = { id: `mic-${starts.length + 1}` };
+        webRtc.micStream = stream;
+        const deferred = Promise.withResolvers();
+        starts.push({ stream, deferred });
+        return deferred.promise;
+    };
+    webRtc.stopMicrophone = () => {
+        stopMicCalls++;
+        webRtc.micStream = null;
+    };
+
+    // Mic 1 hangs in replaceTrack, mic 2 supersedes and succeeds, then mic 1 rejects.
+    element("micBtn").hidden = false;
+    element("micOffBtn").hidden = true;
+    const mic1 = context.startAudioInput();
+    const mic2 = context.startAudioInput();
+    assert.equal(starts.length, 2);
+    starts[1].deferred.resolve();
+    await mic2;
+    assert.equal(meterStarts, 1);
+
+    starts[0].deferred.reject(new Error("InvalidStateError: track stopped"));
+    await mic1;
+    assert.equal(element("micBtn").hidden, false);
+    assert.equal(webRtc.micStream, starts[1].stream);
+    assert.equal(stopMicCalls, 0);
+    assert.equal(dialogText(), undefined);
+
+    // Turning the mic off while startMicrophone is pending also suppresses a late rejection.
+    const mic3 = context.startAudioInput();
+    context.micBtnClick();
+    assert.equal(stopMicCalls, 1);
+    starts[2].deferred.reject(new Error("track stopped"));
+    await mic3;
+    assert.equal(dialogText(), undefined);
+});
+
+test("superseded startAudioInput during getUserMedia does not restart MicLevelMeter or mark WebSocket stream active", async () => {
+    const prompts = [];
+    let meterStarts = 0;
+    const { context, element } = loadApp({
+        navigator: {},
+        requestAnimationFrame: () => 0,
+        MicLevelMeter: class {
+            start() {
+                meterStarts++;
+            }
+            stop() {}
+        },
+        LiveAudioInputManager: class {
+            constructor() {
+                this.generation = 0;
+                this.stream = null;
+                this.processor = null;
+            }
+            recordChunk() {}
+            disconnectMicrophone() {
+                this.generation++;
+                this.stream = null;
+                this.processor = null;
+            }
+            async updateAudioInterval() {
+                this.disconnectMicrophone();
+                const gen = ++this.generation;
+                const deferred = Promise.withResolvers();
+                prompts.push({ gen, deferred });
+                await deferred.promise;
+                if (gen !== this.generation) return;
+                this.stream = { id: `ws-mic-${gen}` };
+                this.processor = { id: gen };
+            }
+        },
+    });
+    const api = context.AppState.geminiLiveApi;
+    api.transportMode = "websocket";
+    api.isSetupComplete = true;
+    element("micBtn").hidden = false;
+    element("micOffBtn").hidden = true;
+
+    // Overlapped mic switch: second resolves first, first resolves late and must not restart the meter.
+    const mic1 = context.startAudioInput();
+    const mic2 = context.startAudioInput();
+    assert.equal(prompts.length, 2);
+    prompts[1].deferred.resolve();
+    await mic2;
+    assert.equal(meterStarts, 1);
+    assert.equal(context.AppState.wsAudioStreamActive, true);
+
+    prompts[0].deferred.resolve();
+    await mic1;
+    assert.equal(meterStarts, 1);
+
+    // Stopping the mic while a start is pending prevents it from marking wsAudioStreamActive when it resolves.
+    const mic3 = context.startAudioInput();
+    context.stopAudioInput();
+    assert.equal(context.AppState.wsAudioStreamActive, false);
+    prompts[2].deferred.resolve();
+    await mic3;
+    assert.equal(context.AppState.wsAudioStreamActive, false);
+    assert.equal(meterStarts, 1);
+});
+
 /**
  * A connected session whose function-response simulator answers when the test
  * says; `timers` holds the callbacks script.js scheduled.
