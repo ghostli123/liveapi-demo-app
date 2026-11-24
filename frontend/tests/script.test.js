@@ -3285,6 +3285,128 @@ test("a failing MediaRecorder.start() clears the limit timer and cancel handle",
     assert.match(dialogs[0], /encoder unavailable/);
 });
 
+test("zero-duration or non-finite voice audio is rejected cleanly without a 0-frame OfflineAudioContext", async () => {
+    for (const duration of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        const constructedLengths = [];
+        class SpecOfflineAudioContext {
+            constructor(channels, length, sampleRate) {
+                constructedLengths.push(length);
+                if (!Number.isFinite(length) || length < 1) {
+                    throw Object.assign(
+                        new Error(`Failed to construct 'OfflineAudioContext': length (${length}) < 1`),
+                        { name: "NotSupportedError" }
+                    );
+                }
+                this.length = length;
+                this.sampleRate = sampleRate;
+            }
+            async decodeAudioData() {
+                return { duration };
+            }
+        }
+
+        // Upload path.
+        const upload = loadApp({ OfflineAudioContext: SpecOfflineAudioContext, FileReader: FakeFileReader });
+        const input = { value: "empty.wav", files: [{ name: "empty.wav", arrayBuffer: async () => new ArrayBuffer(44) }] };
+        await upload.context.handleAudioFileInputChange({ target: input });
+        assert.equal(
+            upload.element("dialogMessage").textContent,
+            'Could not use "empty.wav" as a voice sample: it contains no audio.',
+            `upload duration=${duration}`
+        );
+        assert.equal(upload.context.AppState.customVoiceBase64, "", `upload duration=${duration}`);
+        assert.deepEqual(constructedLengths, [1], `upload duration=${duration}`);
+
+        // Recording path.
+        constructedLengths.length = 0;
+        const devices = fakeRecordingDevices();
+        const rec = loadApp({
+            ...devices.globals,
+            OfflineAudioContext: SpecOfflineAudioContext,
+            FileReader: FakeFileReader,
+            Blob,
+        });
+        rec.element("dialog").show = () => {
+            rec.document.activeElement = rec.element("dialog");
+        };
+        rec.context.openModal();
+        rec.element("newVoiceName").value = "Kai";
+        const click = rec.context.handleRecordClick();
+        devices.prompts[0].grant();
+        await click;
+        devices.recorders[0].stop();
+        await flush();
+
+        assert.equal(
+            rec.element("dialogMessage").textContent,
+            "Could not process the recording: it contains no audio.",
+            `record duration=${duration}`
+        );
+        assert.equal(rec.element("newVoiceName").value, "Kai", `record duration=${duration}`);
+        assert.equal(rec.document.activeElement, rec.element("dialog"), `record duration=${duration}`);
+        assert.equal(rec.element("recordButton").disabled, false, `record duration=${duration}`);
+        assert.equal(rec.element("recordStatus").textContent, "", `record duration=${duration}`);
+        assert.equal(rec.element("processingSpinner").hidden, true, `record duration=${duration}`);
+        assert.equal(rec.context.AppState.isRecording, false, `record duration=${duration}`);
+        assert.deepEqual(constructedLengths, [1], `record duration=${duration}`);
+    }
+});
+
+test("a recording decode error preserves the voice name, keeps focus on the error dialog, and resets the record button", async () => {
+    for (const stopMode of ["micEnded", "stopClick"]) {
+        const devices = fakeRecordingDevices();
+        class RejectOfflineAudioContext {
+            async decodeAudioData() {
+                throw Object.assign(new Error("Unable to decode audio data"), { name: "EncodingError" });
+            }
+        }
+        const { context, element, document } = loadApp({
+            ...devices.globals,
+            OfflineAudioContext: RejectOfflineAudioContext,
+            FileReader: FakeFileReader,
+            Blob,
+        });
+        element("dialog").show = () => {
+            document.activeElement = element("dialog");
+        };
+        context.openModal();
+        element("newVoiceName").value = "My Custom Voice";
+        const click = context.handleRecordClick();
+        devices.prompts[0].grant();
+        await click;
+
+        if (stopMode === "stopClick") {
+            context.AppState.recordingStartTime -= 11000;
+            await context.handleRecordClick();
+        } else {
+            devices.recorders[0].stop();
+        }
+        await flush();
+
+        assert.equal(
+            element("dialogMessage").textContent,
+            "Could not process the recording: Unable to decode audio data",
+            stopMode
+        );
+        assert.equal(element("newVoiceName").value, "My Custom Voice", stopMode);
+        assert.equal(document.activeElement, element("dialog"), stopMode);
+        assert.equal(element("brandedVoiceModal").style.display, "flex", stopMode);
+        assert.equal(element("recordButton").disabled, false, stopMode);
+        assert.equal(element("recordStatus").textContent, "", stopMode);
+        assert.equal(element("processingSpinner").hidden, true, stopMode);
+        assert.equal(context.AppState.isRecording, false, stopMode);
+
+        // Ready for another take without retyping the name.
+        const retry = context.handleRecordClick();
+        devices.prompts[1].grant();
+        await retry;
+        assert.equal(context.AppState.isRecording, true, stopMode);
+        context.closeModal();
+        await flush();
+        assert.equal(devices.prompts[1].track.stopped, true, stopMode);
+    }
+});
+
 test("a throw before api.resume() during resumption ends the session instead of sticking in connecting", async () => {
     const app = loadSession();
     const { context, element, api, dialogText } = app;

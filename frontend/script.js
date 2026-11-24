@@ -695,6 +695,9 @@ async function toVoiceSample(audioData, { clip = false } = {}) {
     const decoded = await new OfflineAudioContext(1, 1, VOICE_SAMPLE_RATE).decodeAudioData(
         audioData
     );
+    if (!Number.isFinite(decoded.duration) || decoded.duration <= 0) {
+        throw new Error("it contains no audio.");
+    }
     if (decoded.duration > MAX_VOICE_SAMPLE_S && !clip) {
         throw new Error(
             `it is ${formatMinutes(decoded.duration)} long; samples are limited to ` +
@@ -2212,7 +2215,7 @@ async function handleRecordClick() {
                 if (AppState.mediaRecorder === activeRecorder) AppState.mediaRecorder = null;
                 // Closing the dialog while the take is stopping or processing
                 // abandons it, and the dialog may since hold a newer recording,
-                // which the closeModal()/openModal() below would stop or orphan.
+                // which the closeModal()/resetRecordButton() below would stop or overwrite.
                 const abandoned = () => attempt !== AppState.recordingAttempt;
                 if (cancelled || abandoned()) {
                     chunks.length = 0;
@@ -2255,8 +2258,8 @@ async function handleRecordClick() {
                 } catch (error) {
                     console.error("Could not process the recording:", error);
                     if (abandoned()) return;
+                    resetRecordButton();
                     AppUI.showModal(`Could not process the recording: ${error.message}`);
-                    openModal();
                 }
             };
 
