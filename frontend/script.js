@@ -348,6 +348,10 @@ async function restoreSettings() {
                 ? preferred
                 : transportSelect.value;
     }
+    const restoredEnv = AppUI.getValue("envApiHost");
+    if (isWebSocketOnlyEnvironment(restoredEnv)) {
+        syncTransportForEnvironment(restoredEnv);
+    }
     saveSettings();
 }
 
@@ -587,6 +591,18 @@ function isWebSocketOnlyEnvironment(envVal) {
     return envVal === "prod";
 }
 
+function syncTransportForEnvironment(envVal) {
+    const transportSelect = AppUI.getControl("transportMode");
+    if (!transportSelect) return;
+    if (isWebSocketOnlyEnvironment(envVal)) {
+        if (!AppState.preferredTransport) AppState.preferredTransport = transportSelect.value;
+        if (transportSelect.value === "webrtc") transportSelect.value = "websocket";
+    } else if (AppState.preferredTransport) {
+        // Back from a WebSocket-only environment: restore the user's choice.
+        transportSelect.value = AppState.preferredTransport;
+    }
+}
+
 // On prod mREP, gemini-3.8-live is served by the GRoot "bidi" pool, which
 // supports WebRTC; gemini-3.1 models go to "genai-rapid", which does not.
 const PROD_US_REP_MODEL = "gemini-3.8-live";
@@ -609,16 +625,7 @@ function handleEnvironmentChange() {
     ) {
         modelSelect.value = "gemini-3.1-flash-live-preview-04-2026";
     }
-    const transportSelect = AppUI.getControl("transportMode");
-    if (transportSelect) {
-        if (isWebSocketOnlyEnvironment(envVal)) {
-            if (!AppState.preferredTransport) AppState.preferredTransport = transportSelect.value;
-            if (transportSelect.value === "webrtc") transportSelect.value = "websocket";
-        } else if (AppState.preferredTransport) {
-            // Back from a WebSocket-only environment: restore the user's choice.
-            transportSelect.value = AppState.preferredTransport;
-        }
-    }
+    syncTransportForEnvironment(envVal);
     saveSettings(); // Programmatic changes don't fire change events.
 }
 
@@ -643,6 +650,7 @@ function handleModelChange() {
     } else if (envVal === "prod-us-rep") {
         envSelect.value = "prod";
     }
+    syncTransportForEnvironment(envSelect.value);
     saveSettings(); // Programmatic changes don't fire change events.
 }
 

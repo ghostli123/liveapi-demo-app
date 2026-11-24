@@ -134,6 +134,7 @@ function loadApp(globals = {}, { radios = [] } = {}) {
         "closeModal",
         "restoreSettings",
         "handleEnvironmentChange",
+        "handleModelChange",
         "newUserMessage",
         "turnBtnClick",
         "micOffBtnClick",
@@ -515,6 +516,59 @@ test("leaving a WebSocket-only environment returns to the default or restored tr
     reloaded.element("envApiHost").value = "prod-us-rep";
     reloaded.context.handleEnvironmentChange();
     assert.equal(reloaded.element("transportMode").value, "webrtc");
+});
+
+test("handleModelChange syncs transportMode to websocket when switching prod-us-rep to prod", async () => {
+    const storage = fakeStorage(
+        new Map([[SETTINGS_KEY, JSON.stringify({ envApiHost: "prod-us-rep", transportMode: "webrtc" })]])
+    );
+    const { context, element } = await loadWithSettings(storage);
+    element("location").value = "europe-west4";
+    element("liveApiModel").value = "gemini-3.5-live-early-exp";
+    context.handleModelChange();
+
+    assert.equal(element("location").value, "us-central1");
+    assert.equal(element("envApiHost").value, "prod");
+    assert.equal(element("transportMode").value, "websocket");
+    const saved = JSON.parse(storage.getItem(SETTINGS_KEY));
+    assert.equal(saved.envApiHost, "prod");
+    assert.equal(saved.transportMode, "websocket");
+    assert.equal(saved.preferredTransport, "webrtc");
+
+    // Switching back to prod-us-rep (even after a reload) restores webrtc.
+    const reloaded = await loadWithSettings(fakeStorage(storage.items));
+    assert.equal(reloaded.element("envApiHost").value, "prod");
+    assert.equal(reloaded.element("transportMode").value, "websocket");
+    reloaded.element("envApiHost").value = "prod-us-rep";
+    reloaded.context.handleEnvironmentChange();
+    assert.equal(reloaded.element("transportMode").value, "webrtc");
+
+    // Works before restoreSettings populates preferredTransport too.
+    const fresh = loadApp({ localStorage: fakeStorage() });
+    fresh.element("envApiHost").value = "prod-us-rep";
+    fresh.element("transportMode").value = "webrtc";
+    fresh.element("liveApiModel").value = "gemini-3.5-live-early-exp";
+    fresh.context.handleModelChange();
+    assert.equal(fresh.element("envApiHost").value, "prod");
+    assert.equal(fresh.element("transportMode").value, "websocket");
+    assert.equal(fresh.context.AppState.preferredTransport, "webrtc");
+});
+
+test("restoreSettings reconciles a saved WebSocket-only environment with webrtc transport", async () => {
+    const storage = fakeStorage(
+        new Map([[SETTINGS_KEY, JSON.stringify({ envApiHost: "prod", transportMode: "webrtc" })]])
+    );
+    const { context, element } = await loadWithSettings(storage);
+
+    assert.equal(element("envApiHost").value, "prod");
+    assert.equal(element("transportMode").value, "websocket");
+    const saved = JSON.parse(storage.getItem(SETTINGS_KEY));
+    assert.equal(saved.transportMode, "websocket");
+    assert.equal(saved.preferredTransport, "webrtc");
+
+    element("envApiHost").value = "prod-us-rep";
+    context.handleEnvironmentChange();
+    assert.equal(element("transportMode").value, "webrtc");
 });
 
 test("an unknown saved response type keeps the page's default selected", async () => {
