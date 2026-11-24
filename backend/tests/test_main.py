@@ -2569,6 +2569,15 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             "foo..bar:8443",
             "demo.example..:8443",
             ".:8443",
+            "*.",
+            "*:8080",
+            "*.example.com",
+            "*.example.com:8443",
+            "foo*bar",
+            "ev\u00e9.example",
+            "ev\u00e9.example:8443",
+            "demo.example\x00",
+            "demo.example\x7f",
         ]:
             with self.assertRaises(flags.IllegalFlagValueError, msg=entry):
                 with flagsaver.flagsaver(allowed_hosts=["demo.example.com", entry]):
@@ -2579,6 +2588,7 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                 "min.example:1",
                 "max.example:65535",
                 "fqdn.example.:8443",
+                "xn--ev-cja.example:443",
                 "[::1]:8080",
                 "[2001:db8::]",
                 "*",
@@ -2593,6 +2603,7 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                         "min.example",
                         "max.example",
                         "fqdn.example",
+                        "xn--ev-cja.example",
                         "::1",
                         "2001:db8::",
                         "*",
@@ -2601,21 +2612,29 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             )
 
     def test_server_refuses_to_start_with_invalid_allowed_hosts(self):
-        result = subprocess.run(
-            [
-                sys.executable,
-                os.path.join(os.path.dirname(main.__file__), "main.py"),
-                "--allowed_hosts=demo.example,[",
-            ],
-            env={**os.environ, "PORT": "0"},
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("--allowed_hosts", result.stderr)
-        self.assertIn("invalid entry '['", result.stderr)
-        self.assertNotIn("Serving on", result.stderr)
+        for flag_val, expected_err in [
+            ("demo.example,[", "invalid entry '['"),
+            ("*.", "invalid entry '*.'"),
+            ("*:8080", "invalid entry '*:8080'"),
+            ("*.example.com", "invalid entry '*.example.com'"),
+            ("ev\u00e9.example", "non-ASCII host name"),
+        ]:
+            with self.subTest(allowed_hosts=flag_val):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        os.path.join(os.path.dirname(main.__file__), "main.py"),
+                        f"--allowed_hosts={flag_val}",
+                    ],
+                    env={**os.environ, "PORT": "0"},
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("--allowed_hosts", result.stderr)
+                self.assertIn(expected_err, result.stderr)
+                self.assertNotIn("Serving on", result.stderr)
 
     def test_is_allowed_host(self):
         for host in [

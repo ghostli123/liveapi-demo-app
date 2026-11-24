@@ -973,11 +973,15 @@ def _allowed_host_entry(entry: str) -> tuple[str, int | None]:
     The host is "" for a blank entry and "*" for any host.
 
     Raises:
-      ValueError: the entry isn't a host name with an optional port.
+      ValueError: the entry isn't an ASCII host name with an optional port.
     """
     entry = entry.strip()
     if entry in ("", "*"):
         return entry, None
+    if not entry.isascii():
+        raise ValueError("non-ASCII host name; use punycode")
+    if "*" in entry:
+        raise ValueError("wildcards are not supported; use '*' alone or a host name")
     parts = urllib.parse.urlsplit("//" + entry)  # Raises for e.g. "[".
     port = _validated_port(parts)
     # A scheme or path ("https://demo.example") would otherwise parse to a
@@ -986,7 +990,7 @@ def _allowed_host_entry(entry: str) -> tuple[str, int | None]:
         parts.netloc != entry
         or "@" in entry
         or "\\" in entry
-        or any(c.isspace() for c in entry)
+        or any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in entry)
         or not parts.hostname
         or not _has_valid_host_labels(parts.hostname)
     ):
