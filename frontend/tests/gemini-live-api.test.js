@@ -93,6 +93,26 @@ test("parseAll emits one event per model turn part", () => {
     assert.equal(events[1].mimeType, "video/mp4");
 });
 
+test("parseAll classifies inline media MIME types case-insensitively with parameters", () => {
+    const events = GeminiLiveResponseMessage.parseAll({
+        serverContent: {
+            modelTurn: {
+                parts: [
+                    { inlineData: { mimeType: "Image/JPEG; charset=binary", data: "AAA=" } },
+                    { inlineData: { mimeType: " Video/MP4 ; codecs=avc1", data: "BBB=" } },
+                    { inlineData: { mime_type: "VIDEO/JPEG2000; rate=30", data: "CCC=" } },
+                    { inlineData: { mimeType: "AUDIO/PCM; rate=24000", data: "DDD=" } },
+                ],
+            },
+        },
+    });
+    assert.deepEqual(types(events), ["VIDEO", "VIDEO", "VIDEO", "AUDIO"]);
+    assert.equal(events[0].mimeType, "Image/JPEG; charset=binary");
+    assert.equal(events[1].mimeType, " Video/MP4 ; codecs=avc1");
+    assert.equal(events[2].mimeType, "VIDEO/JPEG2000; rate=30");
+    assert.equal(events[3].mimeType, "AUDIO/PCM; rate=24000");
+});
+
 test("parseAll accepts snake_case and reads the WebRTC answer", () => {
     const events = GeminiLiveResponseMessage.parseAll({
         setup_complete: { session_id: "s-1", rtc_setup_complete: { answer_sdp: "v=0" } },

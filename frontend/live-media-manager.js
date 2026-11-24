@@ -893,7 +893,10 @@ class LiveVideoOutputManager {
     }
 
     playVideoChunk(base64Chunk, mimeType = "") {
-        const mime = typeof mimeType === "string" ? mimeType : "";
+        const mime =
+            typeof mimeType === "string"
+                ? mimeType.split(";", 1)[0].trim().toLowerCase()
+                : "";
         if (
             mime === "video/jpeg2000" ||
             mime === "video/jpeg" ||

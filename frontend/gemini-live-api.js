@@ -90,7 +90,8 @@ class GeminiLiveResponseMessage {
                 const data = str(inline?.data);
                 if (data) {
                     const mimeType = str(inline.mimeType) || str(inline.mime_type);
-                    const isVideo = mimeType.startsWith("video/") || mimeType.startsWith("image/");
+                    const baseMime = mimeType.split(";", 1)[0].trim().toLowerCase();
+                    const isVideo = baseMime.startsWith("video/") || baseMime.startsWith("image/");
                     add(isVideo ? "VIDEO" : "AUDIO", data, { mimeType });
                 }
             }

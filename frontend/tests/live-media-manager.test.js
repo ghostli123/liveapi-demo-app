@@ -1420,6 +1420,35 @@ test("playVideoChunk handles null or non-string mimeType without throwing", () =
     assert.equal(sourceBuffer.appended.length, 2);
 });
 
+test("playVideoChunk routes JPEG and image MIME types case-insensitively and with parameters", () => {
+    const { manager, fake, errors, elementsById } = videoOutputWithFakeMediaSource();
+    manager.initMediaSource();
+    fake.mediaSources[0].open();
+    const sourceBuffer = fake.mediaSources[0].sourceBuffer;
+
+    for (const mimeType of [
+        "Image/JPEG",
+        "image/jpeg; charset=binary",
+        " video/jpeg ; q=1 ",
+        "VIDEO/JPEG2000; rate=30",
+        "IMAGE/WEBP; quality=80",
+    ]) {
+        manager.playVideoChunk(VIDEO_CHUNK, mimeType);
+    }
+
+    const img = elementsById.avatar_frame_img;
+    assert.ok(img, "expected JPEG avatar frame element");
+    assert.equal(img.src, `data:image/jpeg;base64,${VIDEO_CHUNK}`);
+    assert.equal(img.style.display, "block");
+    assert.equal(sourceBuffer.appended.length, 0);
+    assert.equal(manager.chunkQueue.length, 0);
+    assert.deepEqual(errors, []);
+
+    // Parameterized MP4 video still routes to the MSE SourceBuffer.
+    manager.playVideoChunk(VIDEO_CHUNK, "Video/MP4; codecs=avc1");
+    assert.equal(sourceBuffer.appended.length, 1);
+});
+
 test("playVideoChunk catches invalid base64 without throwing or breaking later chunks", () => {
     const { manager, fake, errors } = videoOutputWithFakeMediaSource();
     manager.recordingEnabled = true;
