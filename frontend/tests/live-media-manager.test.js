@@ -180,31 +180,55 @@ test("a microphone that ends on its own is reported; a replaced one isn't", asyn
 
 /**
  * A LiveAudioInputManager (WebSocket mic) on fake audio nodes.
- * @param {{addModule?: () => Promise<void>}} [options] - The worklet loader.
+ * @param {{
+ *   addModule?: () => Promise<void>,
+ *   createMediaStreamSource?: () => { connect: (dest: unknown) => void },
+ *   onWorkletNode?: () => void,
+ *   onConnect?: () => void,
+ *   onClose?: () => unknown,
+ * }} [options]
  */
-function audioInputWithPendingMic({ addModule = async () => {} } = {}) {
+function audioInputWithPendingMic({
+    addModule = async () => {},
+    createMediaStreamSource,
+    onWorkletNode,
+    onConnect,
+    onClose,
+} = {}) {
     const devices = pendingMediaDevices();
     const intervals = new Set();
+    const contexts = [];
     class FakeAudioContext {
         constructor() {
             this.state = "running";
             this.audioWorklet = { addModule };
+            contexts.push(this);
         }
         createMediaStreamSource() {
-            return { connect() {} };
+            if (createMediaStreamSource) return createMediaStreamSource();
+            return {
+                connect() {
+                    if (onConnect) onConnect();
+                },
+            };
         }
         close() {
             this.state = "closed";
+            if (onClose) return onClose();
         }
     }
     class FakeWorkletNode {
         constructor(context, name, options) {
+            if (onWorkletNode) onWorkletNode();
             this.context = context;
             this.name = name;
             this.options = options;
             this.port = {};
+            this.disconnected = false;
         }
-        disconnect() {}
+        disconnect() {
+            this.disconnected = true;
+        }
     }
     const context = loadScript("live-media-manager.js", ["LiveAudioInputManager"], {
         btoa,
@@ -218,7 +242,7 @@ function audioInputWithPendingMic({ addModule = async () => {} } = {}) {
         },
         clearInterval: (id) => intervals.delete(id),
     });
-    return { manager: new context.LiveAudioInputManager(), requests: devices.requests, intervals };
+    return { manager: new context.LiveAudioInputManager(), requests: devices.requests, intervals, contexts };
 }
 
 /** Switches a LiveAudioInputManager to another device the way script.js's startAudioInput does. */
@@ -339,6 +363,102 @@ test("a WebSocket microphone whose worklet fails to load is released and the err
     assert.equal(manager.stream, null);
     assert.equal(manager.audioContext, null);
     assert.equal(intervals.size, 0);
+});
+
+test("connectMicrophone releases stream, context, and processor if node wiring throws", async () => {
+    const cases = [
+        {
+            name: "createMediaStreamSource",
+            options: {
+                createMediaStreamSource() {
+                    throw new Error("no audio tracks");
+                },
+            },
+            pattern: /no audio tracks/,
+        },
+        {
+            name: "AudioWorkletNode",
+            options: {
+                onWorkletNode() {
+                    throw Object.assign(new Error("InvalidStateError"), { name: "InvalidStateError" });
+                },
+            },
+            pattern: /InvalidStateError/,
+        },
+        {
+            name: "source.connect",
+            options: {
+                onConnect() {
+                    throw new Error("connect failed");
+                },
+            },
+            pattern: /connect failed/,
+        },
+    ];
+    for (const { name, options, pattern } of cases) {
+        const { manager, requests, intervals, contexts } = audioInputWithPendingMic(options);
+        const connecting = manager.connectMicrophone();
+        requests[0].grant();
+        await assert.rejects(connecting, pattern, name);
+        assert.equal(requests[0].track.readyState, "ended", name);
+        assert.equal(contexts[0].state, "closed", name);
+        assert.equal(manager.stream, null, name);
+        assert.equal(manager.audioContext, null, name);
+        assert.equal(manager.processor, null, name);
+        assert.equal(intervals.size, 0, name);
+    }
+});
+
+test("connectMicrophone called twice without disconnectMicrophone releases the first mic and timer", async () => {
+    const { manager, requests, intervals, contexts } = audioInputWithPendingMic();
+    const first = manager.connectMicrophone();
+    requests[0].grant();
+    await first;
+    assert.equal(intervals.size, 1);
+
+    const second = manager.connectMicrophone();
+    assert.equal(requests[0].track.readyState, "ended");
+    assert.equal(contexts[0].state, "closed");
+    assert.equal(intervals.size, 0);
+    requests[1].grant();
+    await second;
+    assert.equal(manager.stream, requests[1].stream);
+    assert.equal(intervals.size, 1);
+    manager.disconnectMicrophone();
+    assert.equal(intervals.size, 0);
+});
+
+test("a rejecting AudioContext.close() in LiveAudioInputManager does not cause unhandled rejections", async () => {
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+        const { manager, requests } = audioInputWithPendingMic({
+            onClose: () => Promise.reject(new Error("close failed")),
+        });
+        // 1. getUserMedia rejection path
+        const denied = manager.connectMicrophone();
+        requests[0].deny("NotAllowedError");
+        await assert.rejects(denied, { name: "NotAllowedError" });
+
+        // 2. Superseded getUserMedia resolution path
+        const superseded = manager.connectMicrophone();
+        manager.disconnectMicrophone();
+        requests[1].grant();
+        await superseded;
+
+        // 3. disconnectMicrophone() on an active context
+        const active = manager.connectMicrophone();
+        requests[2].grant();
+        await active;
+        manager.disconnectMicrophone();
+
+        // Wait a turn so any unhandled rejection would fire.
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.deepEqual(unhandled, []);
+    } finally {
+        process.off("unhandledRejection", onUnhandled);
+    }
 });
 
 test("a WebSocket microphone refused after it was superseded doesn't throw or touch the newer one", async () => {
@@ -1241,6 +1361,18 @@ test("a full buffer while playing trims behind the playhead and leaves it alone"
     assert.equal(manager.chunkQueue.length, 1);
 });
 
+test("playVideoChunk handles null or non-string mimeType without throwing", () => {
+    const { manager, fake } = videoOutputWithFakeMediaSource();
+    manager.initMediaSource();
+    fake.mediaSources[0].open();
+    const sourceBuffer = fake.mediaSources[0].sourceBuffer;
+    assert.doesNotThrow(() => manager.playVideoChunk(VIDEO_CHUNK, null));
+    sourceBuffer.finishUpdate();
+    assert.doesNotThrow(() => manager.playVideoChunk(VIDEO_CHUNK, undefined));
+    sourceBuffer.finishUpdate();
+    assert.equal(sourceBuffer.appended.length, 2);
+});
+
 // A LiveAudioOutputManager on fake AudioContexts. `fake.failNextLoad` makes the
 // next addModule() reject (`fake.failAllLoads` every one); like Chrome and
 // Firefox, a context whose load failed keeps rejecting. `fake.noWorklet` leaves
@@ -1637,6 +1769,28 @@ test("recordChunk sends the buffered samples as base64 16-bit little-endian PCM"
     samples.forEach((sample, i) => expected.writeInt16LE(sample, i * 2));
     assert.deepEqual(sent, [expected.toString("base64")]);
     assert.equal(manager.pcmData.length, 0);
+});
+
+test("recordChunk clears pcmData before invoking onNewAudioRecordingChunk so a throw does not re-send stale audio", () => {
+    const context = loadScript("live-media-manager.js", ["LiveAudioInputManager"], { btoa });
+    const manager = new context.LiveAudioInputManager();
+    const sent = [];
+    let shouldThrow = true;
+    manager.onNewAudioRecordingChunk = (b64AudioData) => {
+        if (shouldThrow) throw new Error("send failed");
+        sent.push(b64AudioData);
+    };
+    manager.pcmData.push(100, 200);
+    assert.throws(() => manager.recordChunk(), /send failed/);
+    assert.equal(manager.pcmData.length, 0);
+
+    shouldThrow = false;
+    manager.pcmData.push(300, 400);
+    manager.recordChunk();
+    const expected = Buffer.alloc(4);
+    expected.writeInt16LE(300, 0);
+    expected.writeInt16LE(400, 2);
+    assert.deepEqual(sent, [expected.toString("base64")]);
 });
 
 function fakeGatheringPeerConnection() {

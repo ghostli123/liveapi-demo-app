@@ -286,8 +286,10 @@ class LiveAudioInputManager {
     }
 
     async connectMicrophone() {
-        // disconnectMicrophone() bumps this, abandoning a connect still in flight.
-        const generation = ++this.generation;
+        // Release any active mic/interval and bump generation to abandon a
+        // connect still in flight.
+        this.disconnectMicrophone();
+        const generation = this.generation;
         const audioContext = new AudioContext({
             sampleRate: MIC_SAMPLE_RATE,
         });
@@ -307,7 +309,7 @@ class LiveAudioInputManager {
         try {
             stream = await navigator.mediaDevices.getUserMedia(constraints);
         } catch (error) {
-            audioContext.close();
+            audioContext.close()?.catch(() => {});
             // A refusal for a connect that was superseded while the prompt was
             // open isn't reported: the caller would turn off the newer mic.
             if (generation !== this.generation) return;
@@ -315,7 +317,7 @@ class LiveAudioInputManager {
         }
         if (generation !== this.generation) {
             stream.getTracks().forEach((track) => track.stop());
-            audioContext.close();
+            audioContext.close()?.catch(() => {});
             return;
         }
         // Held before the worklet module loads, so a disconnectMicrophone()
@@ -332,38 +334,44 @@ class LiveAudioInputManager {
             throw error;
         }
         if (generation !== this.generation) return;
+        try {
+            const source = this.audioContext.createMediaStreamSource(this.stream);
+
+            // Force mono downmix at the node input: input-processor.js reads only
+            // channel 0, so a stereo mic whose left channel is silent would send
+            // silence under the default channelCountMode ("max").
+            const processor = new AudioWorkletNode(this.audioContext, "input-processor", {
+                channelCount: 1,
+                channelCountMode: "explicit",
+            });
+            this.processor = processor;
+            // A worklet that throws is stopped by the browser and sends nothing
+            // more, with the mic still on.
+            processor.onprocessorerror = (event) => {
+                if (this.processor !== processor) return;
+                console.error("The microphone's audio processor stopped:", event);
+                this.onMicrophoneFailed();
+            };
+
+            // Listen for messages (the PCM data) from the worklet. These keep
+            // arriving in a hidden tab, where the browser throttles the timer below
+            // (Chrome: to once a second, once a minute after 5 minutes hidden), so
+            // audio the timer hasn't sent within two intervals is sent from here.
+            this.processor.port.onmessage = (event) => {
+                this.pcmData.push(...event.data);
+                if (this.pcmData.length >= (2 * this.intervalMs * MIC_SAMPLE_RATE) / 1000) this.recordChunk();
+            };
+
+            // Connect the microphone source to the worklet.
+            source.connect(this.processor);
+        } catch (error) {
+            this.disconnectMicrophone();
+            throw error;
+        }
+
         onTrackEnded(stream.getAudioTracks(), () => {
             if (this.stream === stream) this.onMicrophoneEnded();
         });
-        const source = this.audioContext.createMediaStreamSource(this.stream);
-
-        // Force mono downmix at the node input: input-processor.js reads only
-        // channel 0, so a stereo mic whose left channel is silent would send
-        // silence under the default channelCountMode ("max").
-        const processor = new AudioWorkletNode(this.audioContext, "input-processor", {
-            channelCount: 1,
-            channelCountMode: "explicit",
-        });
-        this.processor = processor;
-        // A worklet that throws is stopped by the browser and sends nothing
-        // more, with the mic still on.
-        processor.onprocessorerror = (event) => {
-            if (this.processor !== processor) return;
-            console.error("The microphone's audio processor stopped:", event);
-            this.onMicrophoneFailed();
-        };
-
-        // Listen for messages (the PCM data) from the worklet. These keep
-        // arriving in a hidden tab, where the browser throttles the timer below
-        // (Chrome: to once a second, once a minute after 5 minutes hidden), so
-        // audio the timer hasn't sent within two intervals is sent from here.
-        this.processor.port.onmessage = (event) => {
-            this.pcmData.push(...event.data);
-            if (this.pcmData.length >= (2 * this.intervalMs * MIC_SAMPLE_RATE) / 1000) this.recordChunk();
-        };
-
-        // Connect the microphone source to the worklet.
-        source.connect(this.processor);
 
         this.interval = setInterval(
             this.recordChunk.bind(this),
@@ -398,8 +406,8 @@ class LiveAudioInputManager {
         }
 
         const base64 = btoa(binaryString);
-        this.newAudioRecording(base64);
         this.pcmData = [];
+        this.newAudioRecording(base64);
     }
 
     disconnectMicrophone() {
@@ -417,7 +425,7 @@ class LiveAudioInputManager {
                 this.processor.disconnect();
             }
             if (this.audioContext && this.audioContext.state !== "closed") {
-                this.audioContext.close();
+                this.audioContext.close()?.catch(() => {});
             }
         } catch (error) {
             console.error("Error disconnecting microphone", error);
@@ -832,10 +840,11 @@ class LiveVideoOutputManager {
     }
 
     playVideoChunk(base64Chunk, mimeType = "") {
+        const mime = typeof mimeType === "string" ? mimeType : "";
         if (
-            mimeType === "video/jpeg2000" ||
-            mimeType === "video/jpeg" ||
-            mimeType.startsWith("image/")
+            mime === "video/jpeg2000" ||
+            mime === "video/jpeg" ||
+            mime.startsWith("image/")
         ) {
             let imgEl = getAvatarFrameElement();
             const video = getAvatarVideoElement();
