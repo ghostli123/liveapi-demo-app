@@ -200,6 +200,63 @@ test("attachVideoStream returns when the connection closes during its replaceTra
     assert.equal(track.readyState, "live");
 });
 
+test("attachVideoStream clears videoTrack if replaceTrack() rejects and stays quiet if superseded", async () => {
+    const { manager } = webRtcManagerWithPendingMic();
+    manager.videoSender = {
+        replaceTrack: () => Promise.reject(new Error("InvalidModificationError")),
+    };
+    const track1 = fakeTrack();
+    await assert.rejects(
+        () => manager.attachVideoStream({ getVideoTracks: () => [track1] }),
+        /InvalidModificationError/
+    );
+    assert.equal(manager.videoTrack, null);
+    assert.equal(track1.readyState, "live"); // Owned by the caller's camera/screen manager.
+
+    // If superseded by a newer attachVideoStream(), a late rejection from the first
+    // stays quiet and leaves the newer videoTrack untouched.
+    let rejectFirst;
+    let calls = 0;
+    manager.videoSender = {
+        replaceTrack() {
+            calls++;
+            if (calls === 1) {
+                return new Promise((_, reject) => {
+                    rejectFirst = reject;
+                });
+            }
+            return Promise.resolve();
+        },
+    };
+    const trackA = fakeTrack();
+    const trackB = fakeTrack();
+    const first = manager.attachVideoStream({ getVideoTracks: () => [trackA] });
+    await settle();
+    const second = manager.attachVideoStream({ getVideoTracks: () => [trackB] });
+    await second;
+    rejectFirst(new Error("InvalidModificationError"));
+    await first;
+    assert.equal(manager.videoTrack, trackB);
+
+    // If superseded by detachVideoStream(), a late rejection also stays quiet.
+    let rejectDetached;
+    manager.videoSender = {
+        replaceTrack(t) {
+            if (t === null) return Promise.resolve();
+            return new Promise((_, reject) => {
+                rejectDetached = reject;
+            });
+        },
+    };
+    const trackC = fakeTrack();
+    const third = manager.attachVideoStream({ getVideoTracks: () => [trackC] });
+    await settle();
+    manager.detachVideoStream();
+    rejectDetached(new Error("InvalidModificationError"));
+    await third;
+    assert.equal(manager.videoTrack, null);
+});
+
 test("a microphone that ends on its own is reported; a replaced one isn't", async () => {
     const { manager, requests } = webRtcManagerWithPendingMic();
     let ended = 0;
@@ -2367,6 +2424,42 @@ test("resume() rebuilds the playback context when audioContext was closed extern
     assert.equal(manager.workletNode.posted.length, 1);
 });
 
+test("initializeAudioContext and playAudioChunk rebuild when audioContext was closed externally", async () => {
+    const { manager, fake } = audioOutputWithFakeContexts();
+    manager.playAudioChunk(AUDIO_CHUNK);
+    await settle();
+    const firstNode = manager.workletNode;
+    assert.ok(firstNode);
+    assert.equal(fake.contexts.length, 1);
+    assert.equal(firstNode.posted.length, 1);
+
+    // Externally close the AudioContext mid-session without calling manager.close() or resume().
+    fake.contexts[0].state = "closed";
+    manager.playAudioChunk(AUDIO_CHUNK);
+    await settle();
+    assert.equal(firstNode.disconnected, true);
+    assert.equal(firstNode.onprocessorerror, null);
+    assert.equal(fake.contexts.length, 2);
+    assert.equal(manager.audioContext, fake.contexts[1]);
+    assert.equal(manager.audioContext.state, "running");
+    assert.equal(manager.workletNode.context, fake.contexts[1]);
+    assert.equal(firstNode.posted.length, 1);
+    assert.equal(manager.workletNode.posted.length, 1);
+
+    // Also rebuilds if the context closed externally while addModule() was still pending.
+    const { manager: pending, fake: pendingFake } = audioOutputWithFakeContexts({ holdAddModule: true });
+    pending.initializeAudioContext().catch(() => {});
+    assert.equal(pendingFake.contexts.length, 1);
+    pendingFake.contexts[0].state = "closed";
+    const rebuilt = pending.initializeAudioContext();
+    assert.equal(pendingFake.contexts.length, 2);
+    pendingFake.pendingLoads[0].resolve();
+    pendingFake.pendingLoads[1].resolve();
+    const node = await rebuilt;
+    assert.equal(node.context, pendingFake.contexts[1]);
+    assert.equal(pending.workletNode, node);
+});
+
 test("resumeContext() handles audioContext.resume() returning undefined or throwing synchronously", async () => {
     const { manager: m1, fake: f1 } = audioOutputWithFakeContexts();
     m1.initializeAudioContext();
@@ -2597,6 +2690,100 @@ test("MicLevelMeter.start() closes its AudioContext if onLevel throws on the ini
     assert.equal(contexts[1].closed, 1);
     assert.equal(meter2.context, null);
     assert.equal(meter2.stopping, false);
+});
+
+test("MicLevelMeter.start() does not leak an AudioContext when onLevel(0) re-entrantly calls start()", () => {
+    const contexts = [];
+    let queued = [];
+    let nextId = 1;
+    class FakeAudioContext {
+        constructor() {
+            this.state = "running";
+            this.closed = 0;
+            contexts.push(this);
+        }
+        createAnalyser() {
+            return {
+                fftSize: 512,
+                getFloatTimeDomainData(arr) {
+                    arr.fill(0.2);
+                },
+            };
+        }
+        createMediaStreamSource(stream) {
+            this.stream = stream;
+            return { connect() {} };
+        }
+        close() {
+            this.closed++;
+            this.state = "closed";
+            return Promise.resolve();
+        }
+    }
+    const { MicLevelMeter } = loadScript("live-media-manager.js", ["MicLevelMeter"], {
+        window: { AudioContext: FakeAudioContext },
+        requestAnimationFrame: (fn) => {
+            const id = nextId++;
+            queued.push({ id, fn });
+            return id;
+        },
+        cancelAnimationFrame: (id) => {
+            queued = queued.filter((entry) => entry.id !== id);
+        },
+    });
+
+    // Re-entrant start(streamB) inside start(streamA)'s initial stop() -> onLevel(0) wins without leaking.
+    const streamA = { id: "A" };
+    const streamB = { id: "B" };
+    let reentered = false;
+    const meter = new MicLevelMeter((level) => {
+        if (!reentered && level === 0) {
+            reentered = true;
+            meter.start(streamB);
+        }
+    });
+    meter.start(streamA);
+    assert.equal(contexts.length, 1);
+    assert.equal(contexts[0].stream, streamB);
+    assert.equal(meter.context, contexts[0]);
+    assert.equal(queued.length, 1);
+    meter.stop();
+    assert.equal(contexts[0].closed, 1);
+    assert.equal(meter.context, null);
+    assert.equal(queued.length, 0);
+
+    // Re-entrant start(null) inside onLevel(0) cancels the outer start(streamA).
+    let cancelled = false;
+    const cancelMeter = new MicLevelMeter((level) => {
+        if (!cancelled && level === 0) {
+            cancelled = true;
+            cancelMeter.start(null);
+        }
+    });
+    cancelMeter.start(streamA);
+    assert.equal(contexts.length, 1);
+    assert.equal(cancelMeter.context, null);
+    assert.equal(queued.length, 0);
+
+    // Re-entrant start(streamB) inside initial tick's onLevel followed by a throw preserves streamB.
+    let switched = false;
+    const throwMeter = new MicLevelMeter((level) => {
+        if (!switched && level > 0) {
+            switched = true;
+            throwMeter.start(streamB);
+            throw new Error("after switch");
+        }
+    });
+    assert.throws(() => throwMeter.start(streamA), /after switch/);
+    assert.equal(contexts.length, 3);
+    assert.equal(contexts[1].stream, streamA);
+    assert.equal(contexts[1].closed, 1);
+    assert.equal(contexts[2].stream, streamB);
+    assert.equal(contexts[2].closed, 0);
+    assert.equal(throwMeter.context, contexts[2]);
+    throwMeter.stop();
+    assert.equal(contexts[2].closed, 1);
+    assert.equal(queued.length, 0);
 });
 
 test("recordChunk sends the buffered samples as base64 16-bit little-endian PCM", () => {

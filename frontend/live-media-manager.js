@@ -50,8 +50,9 @@ class LiveAudioOutputManager {
             console.error("Error decoding audio chunk:", error);
             return;
         }
+        const ready = this.initializeAudioContext();
         const generation = this.generation;
-        this.initializeAudioContext()
+        ready
             .then(
                 (workletNode) => {
                     if (this.generation !== generation) return;
@@ -176,6 +177,9 @@ class LiveAudioOutputManager {
      * the worklet; the first call after that, or a resume(), starts over.
      */
     initializeAudioContext() {
+        if (this.audioContext?.state === "closed") {
+            this.close();
+        }
         if (this.ready) return this.ready;
         if (this.failed && performance.now() < this.retryAt) return this.failed;
         const generation = this.generation;
@@ -554,12 +558,14 @@ class MicLevelMeter {
         this.context = null;
         this.frame = null;
         this.stopping = false;
+        this.generation = 0;
     }
 
     /** Throws if the browser refuses the audio context or the stream; nothing is left running then. */
     start(stream) {
+        const generation = ++this.generation;
         this.stop();
-        if (!stream) return;
+        if (!stream || this.generation !== generation) return;
         try {
             this.context = new (window.AudioContext || window.webkitAudioContext)();
             // Created after awaiting getUserMedia, i.e. possibly without a user
@@ -587,10 +593,12 @@ class MicLevelMeter {
             };
             tick();
         } catch (error) {
-            try {
-                this.stop();
-            } catch {
-                // Keep the original start() error if onLevel(0) also throws.
+            if (this.generation === generation) {
+                try {
+                    this.stop();
+                } catch {
+                    // Keep the original start() error if onLevel(0) also throws.
+                }
             }
             throw error;
         }
@@ -1285,6 +1293,7 @@ class G3RtcWebRtcManager {
         /** @type {Set<() => void>} */
         this.onSendersDropped = new Set();
         this.videoTrack = null;
+        this.videoGeneration = 0;
         this.statsInterval = null;
         /** @type {number | null} */
         this.connectTimer = null;
@@ -1579,14 +1588,25 @@ class G3RtcWebRtcManager {
 
     async attachVideoStream(stream) {
         if (!stream) return;
+        const generation = ++this.videoGeneration;
         // Remembered so a renegotiated session (resumption) keeps sending it.
-        this.videoTrack = stream.getVideoTracks()[0] || null;
+        const track = stream.getVideoTracks()[0] || null;
+        this.videoTrack = track;
         if (this.videoSender) {
-            await this._replaceTrack(this.videoSender, this.videoTrack);
+            try {
+                await this._replaceTrack(this.videoSender, track);
+            } catch (error) {
+                if (this.videoTrack === track && generation === this.videoGeneration) {
+                    this.videoTrack = null;
+                }
+                if (generation !== this.videoGeneration) return;
+                throw error;
+            }
         }
     }
 
     detachVideoStream() {
+        this.videoGeneration++;
         this.videoTrack = null;
         if (this.videoSender) {
             this.videoSender.replaceTrack(null).catch(() => {});
