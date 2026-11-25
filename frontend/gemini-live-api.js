@@ -211,6 +211,28 @@ function httpErrorDetail(receivedData, statusText) {
 }
 
 /**
+ * Extracts a non-empty human-readable reason from a caught error or rejection
+ * value (mirrors `errorReason()` in `script.js`).
+ * @param {*} error
+ * @returns {string}
+ */
+function formatErrorReason(error) {
+    if (error && typeof error === "object") {
+        if (typeof error.message === "string" && error.message.trim()) return error.message.trim();
+        if (typeof error.name === "string" && error.name.trim()) return error.name.trim();
+    }
+    if (error !== null && error !== undefined) {
+        try {
+            const text = String(error).trim();
+            if (text && text !== "[object Object]") return text;
+        } catch {
+            // E.g. Object.create(null) or a throwing toString().
+        }
+    }
+    return "unknown error";
+}
+
+/**
  * Main Client API class for interacting with Gemini Live Realtime connections.
  * Manages WebSocket connections, HTTP backend control requests, tool declarations,
  * and real-time bandwidth statistics.
@@ -576,7 +598,7 @@ class GeminiLiveAPI {
                 return false;
             }
             this._teardownSession({ abandonConnecting: false });
-            this.onErrorMessage(error.message);
+            this.onErrorMessage(formatErrorReason(error));
             throw error;
         } finally {
             if (this.prepareController === controller) {
@@ -662,8 +684,7 @@ class GeminiLiveAPI {
         } catch (error) {
             this.abandonSession(sessionId);
             this._teardownSession({ abandonConnecting: false });
-            const message = error?.message || String(error);
-            this.onErrorMessage(`Could not open the WebSocket connection: ${message}`);
+            this.onErrorMessage(`Could not open the WebSocket connection: ${formatErrorReason(error)}`);
             throw error;
         }
     }
@@ -852,15 +873,15 @@ class GeminiLiveAPI {
         try {
             return await this.postWithRetry(this.controlUrl, postRequestBody, { isCurrent, signal });
         } catch (error) {
-            if (!error.cancelled) {
+            if (!error?.cancelled) {
                 console.error("Error in initBackendService:", error);
             }
-            if (error.timeouts > 0 || error.abortedInFlight) {
+            if (error?.timeouts > 0 || error?.abortedInFlight) {
                 // The server may still create the record for an attempt we
                 // gave up on, even if a later one failed another way.
                 this.abandonSession(sessionId);
             }
-            throw new Error(`Could not start the session: ${error.message}`, { cause: error });
+            throw new Error(`Could not start the session: ${formatErrorReason(error)}`, { cause: error });
         }
     }
 
@@ -889,7 +910,9 @@ class GeminiLiveAPI {
             if (!signal?.aborted) {
                 console.error("Error in setupFuncDeclarationToService:", error);
             }
-            throw new Error(`Could not set up function declarations: ${error.message}`, { cause: error });
+            throw new Error(`Could not set up function declarations: ${formatErrorReason(error)}`, {
+                cause: error,
+            });
         }
     }
 
@@ -1009,7 +1032,9 @@ class GeminiLiveAPI {
                         console.error("Error switching media to the WebSocket:", error);
                         // fallBackToWebSocketMedia() already closed webRtcManager.
                         this._teardownSession({ closeWebRtc: false });
-                        this.onErrorMessage(`Could not switch media to the WebSocket: ${error.message}`);
+                        this.onErrorMessage(
+                            `Could not switch media to the WebSocket: ${formatErrorReason(error)}`
+                        );
                         return; // The session has ended; drop the rest.
                     }
                     if (!isCurrent()) return;
@@ -1041,7 +1066,7 @@ class GeminiLiveAPI {
                         );
                         this._teardownSession();
                         this.onErrorMessage(
-                            `WebRTC answer negotiation failed: ${err.message}`
+                            `WebRTC answer negotiation failed: ${formatErrorReason(err)}`
                         );
                     });
             }
@@ -1059,7 +1084,7 @@ class GeminiLiveAPI {
                 } catch (error) {
                     console.error("Error starting the connection:", error);
                     this._teardownSession();
-                    this.onErrorMessage(`Could not start the session: ${error.message}`);
+                    this.onErrorMessage(`Could not start the session: ${formatErrorReason(error)}`);
                     return; // The session has ended; drop the rest.
                 }
             }
@@ -1160,7 +1185,7 @@ class GeminiLiveAPI {
                     if (this.webRtcManager) {
                         this.webRtcManager.close({ markClosed: this.transportMode === "webrtc" });
                     }
-                    this.onErrorMessage(`Could not resume the session: ${error?.message ?? error}`);
+                    this.onErrorMessage(`Could not resume the session: ${formatErrorReason(error)}`);
                 }
                 return;
             }
@@ -1182,7 +1207,7 @@ class GeminiLiveAPI {
                 if (this.webSocket !== webSocket) return; // Cancelled meanwhile.
                 console.error("Failed during initial setup:", err);
                 this._teardownSession();
-                this.onErrorMessage(`Setup failed: ${err.message}`);
+                this.onErrorMessage(`Setup failed: ${formatErrorReason(err)}`);
             }
         };
 
@@ -1744,6 +1769,20 @@ class GeminiLiveAPI {
      */
     async postWithRetry(url, data, { attempts = 4, isCurrent = () => true, signal } = {}) {
         let timeouts = 0;
+        const withTimeouts = (error) => {
+            if (error && typeof error === "object") {
+                try {
+                    return Object.assign(error, { timeouts });
+                } catch {
+                    // Frozen or non-extensible error object; fall through to wrap.
+                }
+            }
+            return Object.assign(new Error(formatErrorReason(error), { cause: error }), {
+                timeouts,
+                ...(error?.cancelled ? { cancelled: true } : {}),
+                ...(error?.status !== undefined ? { status: error.status } : {}),
+            });
+        };
         for (let attempt = 1; ; attempt++) {
             try {
                 if (!isCurrent() || signal?.aborted) {
@@ -1752,7 +1791,7 @@ class GeminiLiveAPI {
                 return await this.sendPostRequest(url, data, { signal, timeoutMs: CONTROL_TIMEOUT_MS });
             } catch (error) {
                 if (error?.cancelled) {
-                    throw Object.assign(error, { timeouts });
+                    throw withTimeouts(error);
                 }
                 // fetch() rejects with a TypeError when the server is
                 // unreachable; a proxy in front of it answers 502-504. A
@@ -1775,12 +1814,12 @@ class GeminiLiveAPI {
                     [502, 503, 504].includes(error?.status) ||
                     (error?.timeout && timeouts < 2);
                 if (!transient || attempt >= attempts) {
-                    throw Object.assign(error, { timeouts });
+                    throw withTimeouts(error);
                 }
                 if (!isCurrent()) {
                     throw Object.assign(new Error("cancelled"), { cancelled: true, timeouts });
                 }
-                console.warn(`POST ${url} failed (${error.message}); retrying...`);
+                console.warn(`POST ${url} failed (${formatErrorReason(error)}); retrying...`);
                 await /** @type {Promise<void>} */ (
                     new Promise((resolve) => {
                         if (signal?.aborted) {

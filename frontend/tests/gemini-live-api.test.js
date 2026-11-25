@@ -2419,3 +2419,210 @@ test("describeDuration formats sub-second positive durations as seconds, not 0 m
     fireIdleTimer(oneMin, 60000);
     assert.deepEqual(plain(oneMin.idleMessages), ["Disconnected after 1 minute without activity."]);
 });
+
+test("catch blocks in GeminiLiveAPI format null and non-Error throws without crashing", async () => {
+    const nullProto = Object.create(null);
+
+    // 1. prepare() catch when initBackendService rejects with null / string / null-proto / named blank error.
+    for (const [thrown, expected] of [
+        [null, "unknown error"],
+        ["  plain failure  ", "plain failure"],
+        [nullProto, "unknown error"],
+        [{ name: "CustomError", message: "   " }, "CustomError"],
+    ]) {
+        const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+        const errors = [];
+        api.onErrorMessage = (message) => errors.push(message);
+        api.initBackendService = () => Promise.reject(thrown);
+        await assert.rejects(() => api.prepare(api.connectAttempt), (err) => err === thrown);
+        assert.deepEqual(plain(errors), [expected]);
+    }
+
+    // 2. openPreparedWebSocket() catch with null and null-prototype throws.
+    for (const thrown of [null, nullProto]) {
+        const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+        const errors = [];
+        const abandoned = [];
+        api.onErrorMessage = (message) => errors.push(message);
+        api.abandonSession = (id) => abandoned.push(id);
+        api.setupWebSocketToService = () => {
+            throw thrown;
+        };
+        assert.throws(() => api.openPreparedWebSocket("s-open"), (err) => err === thrown);
+        assert.deepEqual(plain(errors), ["Could not open the WebSocket connection: unknown error"]);
+        assert.deepEqual(plain(abandoned), ["s-open"]);
+    }
+
+    // 3. initBackendService() and setupFuncDeclarationToService() with null and string rejections.
+    {
+        const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+        api.setFunctionCall([{ name: "f" }]);
+        api.postWithRetry = () => Promise.reject(null);
+        await assert.rejects(
+            () => api.initBackendService("s-init"),
+            (err) => err?.name === "Error" && err.message === "Could not start the session: unknown error" && err.cause === null
+        );
+        api.sendPostRequest = () => Promise.reject(null);
+        await assert.rejects(
+            () => api.setupFuncDeclarationToService("s-init"),
+            (err) =>
+                err?.name === "Error" &&
+                err.message === "Could not set up function declarations: unknown error" &&
+                err.cause === null
+        );
+        api.sendPostRequest = () => Promise.reject("quota exceeded");
+        await assert.rejects(
+            () => api.setupFuncDeclarationToService("s-init"),
+            (err) =>
+                err?.name === "Error" &&
+                err.message === "Could not set up function declarations: quota exceeded" &&
+                err.cause === "quota exceeded"
+        );
+    }
+
+    // 4. onTransportFallback() throws null during setupComplete fallback.
+    {
+        const api = await idleApi(120);
+        api.transportMode = "webrtc";
+        api.setupWebSocketToService = GeminiLiveAPI.prototype.setupWebSocketToService;
+        api.setupWebSocketToService();
+        api.webRtcManager = { close: () => {} };
+        api.onTransportFallback = () => {
+            throw null;
+        };
+        const errors = [];
+        api.onErrorMessage = (message) => errors.push(message);
+        api.webSocket.onmessage({ data: JSON.stringify({ setupComplete: {} }) });
+        assert.deepEqual(plain(errors), ["Could not switch media to the WebSocket: unknown error"]);
+        assert.equal(api.webSocket, null);
+    }
+
+    // 5. completeSession() rejects with null after setupComplete.
+    {
+        const api = await idleApi(120);
+        api.transportMode = "webrtc";
+        api.setupWebSocketToService = GeminiLiveAPI.prototype.setupWebSocketToService;
+        api.setupWebSocketToService();
+        api.webRtcManager = {
+            close: () => {},
+            completeSession: () => Promise.reject(null),
+        };
+        api.onConnectionStarted = () => {};
+        const errors = [];
+        api.onErrorMessage = (message) => errors.push(message);
+        api.webSocket.onmessage({
+            data: JSON.stringify({ setupComplete: { rtcSetupComplete: { answerSdp: "v=0" } } }),
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.deepEqual(plain(errors), ["WebRTC answer negotiation failed: unknown error"]);
+        assert.equal(api.webSocket, null);
+    }
+
+    // 6. onConnectionStarted() throws null during setupComplete.
+    {
+        const api = await idleApi(120);
+        api.setupWebSocketToService = GeminiLiveAPI.prototype.setupWebSocketToService;
+        api.setupWebSocketToService();
+        api.onConnectionStarted = () => {
+            throw null;
+        };
+        const errors = [];
+        api.onErrorMessage = (message) => errors.push(message);
+        api.webSocket.onmessage({ data: JSON.stringify({ setupComplete: {} }) });
+        assert.deepEqual(plain(errors), ["Could not start the session: unknown error"]);
+        assert.equal(api.webSocket, null);
+    }
+
+    // 7. onReconnectNeeded() throws null / null-prototype on close 1001.
+    for (const thrown of [null, nullProto]) {
+        const api = await idleApi(120);
+        api.setResumption(true, "h1");
+        api.setupWebSocketToService = GeminiLiveAPI.prototype.setupWebSocketToService;
+        api.setupWebSocketToService();
+        api.isSetupComplete = true;
+        api.latestResumptionHandle = "h1";
+        api.onReconnectNeeded = () => {
+            throw thrown;
+        };
+        const errors = [];
+        api.onErrorMessage = (message) => errors.push(message);
+        api.webSocket.onclose({ code: 1001, reason: "restart" });
+        assert.deepEqual(plain(errors), ["Could not resume the session: unknown error"]);
+        assert.equal(api.idleTimer, null);
+    }
+
+    // 8. sendInitialSetupMessages() rejects with null in webSocket.onopen.
+    {
+        const api = await idleApi(120);
+        api.setupWebSocketToService = GeminiLiveAPI.prototype.setupWebSocketToService;
+        api.setupWebSocketToService();
+        api.sendInitialSetupMessages = () => Promise.reject(null);
+        const errors = [];
+        api.onErrorMessage = (message) => errors.push(message);
+        await api.webSocket.onopen();
+        assert.deepEqual(plain(errors), ["Setup failed: unknown error"]);
+        assert.equal(api.webSocket, null);
+    }
+});
+
+test("postWithRetry() guards null, non-Error, and frozen rejections and formats retry warnings", async () => {
+    const warnings = [];
+    const retryTimers = [];
+    const context = loadScript("gemini-live-api.js", ["GeminiLiveAPI"], {
+        WebSocket: FakeWebSocket,
+        AbortController,
+        TypeError,
+        console: { log: () => {}, warn: (...args) => warnings.push(args.join(" ")), error: () => {} },
+        document: { getElementById: () => null },
+        setTimeout: (fn, ms) => retryTimers.push({ fn, ms, cleared: false, fired: false }),
+        clearTimeout: (id) => {
+            if (retryTimers[id - 1]) retryTimers[id - 1].cleared = true;
+        },
+    });
+
+    // 1. Timeout followed by a null rejection preserves timeouts count so initBackendService still abandons.
+    {
+        const api = new context.GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+        const abandoned = [];
+        api.abandonSession = (id) => abandoned.push(id);
+        let calls = 0;
+        api.sendPostRequest = () =>
+            ++calls === 1
+                ? Promise.reject(Object.assign(new Error("timed out"), { timeout: true }))
+                : Promise.reject(null);
+        const p = api.initBackendService("s-null-after-timeout");
+        await fireNextTimer(retryTimers);
+        await assert.rejects(
+            () => p,
+            (err) => err.message === "Could not start the session: unknown error" && err.cause?.timeouts === 1
+        );
+        assert.deepEqual(plain(abandoned), ["s-null-after-timeout"]);
+    }
+
+    // 2. Frozen transient object retries with a clean warning and wraps cleanly on exhaustion.
+    {
+        warnings.length = 0;
+        const api = new context.GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+        const frozen503 = Object.freeze({ status: 503 });
+        api.sendPostRequest = () => Promise.reject(frozen503);
+        const p = api.postWithRetry("/api/control", {}, { attempts: 2 });
+        await fireNextTimer(retryTimers);
+        await assert.rejects(
+            () => p,
+            (err) => err.message === "unknown error" && err.status === 503 && err.timeouts === 0 && err.cause === frozen503
+        );
+        assert.deepEqual(plain(warnings), ["POST /api/control failed (unknown error); retrying..."]);
+    }
+
+    // 3. Empty-message TypeError logs its name instead of empty parens.
+    {
+        warnings.length = 0;
+        const api = new context.GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+        let calls = 0;
+        api.sendPostRequest = () => (++calls === 1 ? Promise.reject(new TypeError("")) : Promise.resolve({ ok: true }));
+        const p = api.postWithRetry("/api/control", {}, { attempts: 2 });
+        await fireNextTimer(retryTimers);
+        assert.deepEqual(plain(await p), { ok: true });
+        assert.deepEqual(plain(warnings), ["POST /api/control failed (TypeError); retrying..."]);
+    }
+});
