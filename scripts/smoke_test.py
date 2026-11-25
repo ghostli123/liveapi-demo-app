@@ -35,9 +35,20 @@ COMMON_BAG_ENVIRONMENTS = (
 )
 
 
+def _server_content(message: dict) -> dict:
+    content = message.get("serverContent") or message.get("server_content")
+    return content if isinstance(content, dict) else {}
+
+
+def is_turn_complete(message: dict) -> bool:
+    """Returns True when a server message signals the end of a model turn."""
+    content = _server_content(message)
+    return bool(content.get("turnComplete") or content.get("turn_complete"))
+
+
 def summarize(message: dict, stats: dict) -> None:
     """Folds one server message into the running stats."""
-    content = message.get("serverContent") or message.get("server_content") or {}
+    content = _server_content(message)
     turn = content.get("modelTurn") or content.get("model_turn") or {}
     for part in turn.get("parts", []):
         if "text" in part:
@@ -49,8 +60,9 @@ def summarize(message: dict, stats: dict) -> None:
             stats[f"{kind}_chunks"] += 1
             stats[f"{kind}_bytes"] += len(inline.get("data", "")) * 3 // 4
     for key in ("outputTranscription", "output_transcription"):
-        if content.get(key, {}).get("text"):
-            stats["transcript"].append(content[key]["text"])
+        transcription = content.get(key)
+        if isinstance(transcription, dict) and transcription.get("text"):
+            stats["transcript"].append(transcription["text"])
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -70,9 +82,16 @@ async def run(args: argparse.Namespace) -> int:
                 "location": args.location,
             },
         ) as resp:
-            body = await resp.json()
-            print(f"control: HTTP {resp.status} {body}")
-            if resp.status != 200:
+            raw = await resp.text(errors="replace")
+            try:
+                body = json.loads(raw)
+            except json.JSONDecodeError:
+                body = None
+            display = body if body is not None else raw.strip()[:300]
+            print(f"control: HTTP {resp.status} {display}".rstrip())
+            if resp.status != 200 or not isinstance(body, dict):
+                if resp.status == 200:
+                    print("FAIL: /api/control did not return a JSON object")
                 return 1
         project_id = body.get("project_id")
 
@@ -149,8 +168,7 @@ async def run(args: argparse.Namespace) -> int:
                             stats["audio_chunks"] + stats["video_chunks"]
                         ):
                             first_media_s = time.monotonic() - start
-                        content = data.get("serverContent") or {}
-                        if content.get("turnComplete"):
+                        if is_turn_complete(data):
                             turn_complete = True
                             break
             except TimeoutError:
