@@ -1014,7 +1014,9 @@ function handleReceiveResponse(messageResponse) {
             break;
         case "FUNCTION_CALL":
             closeTranscriptLine("input");
-            handleFunctionCallRequest(messageResponse.data);
+            handleFunctionCallRequest(messageResponse.data).catch((error) => {
+                console.error("Failed to handle function call request:", error);
+            });
             break;
         case "FUNCTION_CALL_CANCELLATION":
             cancelFunctionCalls(messageResponse.data);
@@ -1245,7 +1247,7 @@ async function simulateFunctionResponse(funcCall, sessionId, webSocket, call) {
         const message =
             reason === "timeout"
                 ? `the simulator didn't answer within ${FUNCTION_RESPONSE_TIMEOUT_MS / 1000} s`
-                : error.message;
+                : error?.message ?? String(error);
         console.error(`Simulating ${funcCall.name} failed:`, error);
         // After a disconnect or reconnect the old session is gone; that isn't the function's fault.
         if (AppState.geminiLiveApi.webSocket === webSocket && AppState.geminiLiveApi.sessionId === sessionId) {
@@ -1259,18 +1261,22 @@ async function simulateFunctionResponse(funcCall, sessionId, webSocket, call) {
 }
 
 async function handleFunctionCallRequest(functionCalls) {
-    console.log("Function call requested: ", functionCalls);
+    if (!Array.isArray(functionCalls)) return;
+    const validCalls = functionCalls.filter(
+        (call) =>
+            call &&
+            typeof call === "object" &&
+            !Array.isArray(call) &&
+            typeof call.name === "string" &&
+            call.name.trim().length > 0
+    );
+    if (!validCalls.length) return;
+    console.log("Function call requested: ", validCalls);
     const api = AppState.geminiLiveApi;
     const webSocket = api.webSocket;
     const sessionId = api.sessionId;
     const endCount = endSessionCount;
-    const calls = functionCalls.map((funcCall) => {
-        newSystemMessage(`Function call: ${funcCall.name}(${JSON.stringify(funcCall.args || {})})`);
-        const call = { controller: new AbortController(), cancelled: false };
-        activeFunctionCalls.add(call.controller);
-        if (funcCall.id) pendingFunctionCalls.set(funcCall.id, call);
-        return call;
-    });
+    const calls = [];
 
     // Scheduling only applies to NON_BLOCKING functions.
     const schedulingVal =
@@ -1280,18 +1286,37 @@ async function handleFunctionCallRequest(functionCalls) {
     // Sequential, since the simulator is one chat session per connection.
     const responses = [];
     try {
-        for (const [i, funcCall] of functionCalls.entries()) {
+        for (const funcCall of validCalls) {
+            let argsText;
+            try {
+                argsText = JSON.stringify(funcCall.args || {});
+            } catch {
+                argsText = "{}";
+            }
+            newSystemMessage(`Function call: ${funcCall.name}(${argsText})`);
+            const call = { controller: new AbortController(), cancelled: false };
+            calls.push(call);
+            activeFunctionCalls.add(call.controller);
+            if (typeof funcCall.id === "string" && funcCall.id.length > 0) {
+                pendingFunctionCalls.set(funcCall.id, call);
+            }
+        }
+        for (const [i, funcCall] of validCalls.entries()) {
             if (api.webSocket !== webSocket) break;
             if (calls[i].cancelled || calls[i].controller.signal.aborted) continue; // Cancelled before it started.
             const response = await simulateFunctionResponse(funcCall, sessionId, webSocket, calls[i]);
             if (!response) continue;
             if (schedulingVal) response.scheduling = schedulingVal;
-            responses.push({ call: calls[i], item: { id: funcCall.id, name: funcCall.name, response } });
+            const id = typeof funcCall.id === "string" ? funcCall.id : undefined;
+            responses.push({ call: calls[i], item: { id, name: funcCall.name, response } });
         }
     } finally {
-        for (const [i, funcCall] of functionCalls.entries()) {
-            activeFunctionCalls.delete(calls[i].controller);
-            if (pendingFunctionCalls.get(funcCall.id) === calls[i]) pendingFunctionCalls.delete(funcCall.id);
+        for (const [i, call] of calls.entries()) {
+            const funcCall = validCalls[i];
+            activeFunctionCalls.delete(call.controller);
+            if (typeof funcCall.id === "string" && pendingFunctionCalls.get(funcCall.id) === call) {
+                pendingFunctionCalls.delete(funcCall.id);
+            }
         }
     }
     // Calls cancelled while a later one ran aren't answered either.

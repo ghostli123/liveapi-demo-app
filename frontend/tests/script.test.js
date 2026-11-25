@@ -2375,8 +2375,15 @@ test("superseded startAudioInput during getUserMedia does not restart MicLevelMe
 function loadFunctionCalls({ abortRejects = true } = {}) {
     const timers = [];
     const errors = [];
+    const controllers = [];
+    class TrackedAbortController extends AbortController {
+        constructor() {
+            super();
+            controllers.push(this);
+        }
+    }
     const app = loadApp({
-        AbortController,
+        AbortController: TrackedAbortController,
         clearInterval() {},
         setTimeout: (callback, ms) => timers.push({ callback, ms }) - 1,
         clearTimeout: (id) => {
@@ -2426,7 +2433,7 @@ function loadFunctionCalls({ abortRejects = true } = {}) {
     api.sendMessage = (message) => api.sent.push(message);
     const chat = [];
     app.element("text-chat").appendChild = (line) => chat.push(line.textContent);
-    return { ...app, api, posts, timers, chat, errors };
+    return { ...app, api, posts, timers, chat, errors, controllers };
 }
 
 /** Lets the awaits between one simulator answer and the next request run. */
@@ -3798,4 +3805,133 @@ test("cancelFunctionCalls filters non-string IDs and ignores empty or non-array 
     assert.equal(chat[chat.length - 1], "Function calls cancelled: c1");
     await done;
     assert.equal(api.sent.length, 0);
+});
+
+test("handleFunctionCallRequest ignores malformed entries and runs valid ones without rejecting", async () => {
+    const { context, api, posts, chat } = loadFunctionCalls();
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+        for (const bad of [
+            null,
+            undefined,
+            "fn",
+            {},
+            [],
+            [
+                null,
+                [],
+                { id: "c0" },
+                { id: "c1", name: "" },
+                { id: "c2", name: "   " },
+                { id: "c3", name: 123 },
+                { id: "c4", name: { toString: null }, args: {} },
+            ],
+        ]) {
+            assert.doesNotThrow(() => context.handleReceiveResponse({ type: "FUNCTION_CALL", data: bad }));
+        }
+        await settle();
+        assert.equal(posts.length, 0);
+        assert.equal(chat.length, 0);
+
+        const circular = {};
+        circular.self = circular;
+        const done = context.handleFunctionCallRequest([
+            { id: "bad", name: { toString: null }, args: {} },
+            { id: "c1", name: "ok", args: { a: 1 } },
+            { id: { toString: null }, name: "badId", args: circular },
+        ]);
+        assert.equal(posts.length, 1);
+        assert.equal(posts[0].name, "ok");
+        posts[0].resolve({ response: "first" });
+        await settle();
+        assert.equal(posts.length, 2);
+        assert.equal(posts[1].name, "badId");
+        posts[1].resolve({ response: "second" });
+        await done;
+
+        assert.deepEqual(plainJson(api.sent), [
+            {
+                toolResponse: {
+                    functionResponses: [
+                        { id: "c1", name: "ok", response: { result: { response: "first" } } },
+                        { name: "badId", response: { result: { response: "second" } } },
+                    ],
+                },
+            },
+        ]);
+        assert.ok(chat.includes('Function call: ok({"a":1})'));
+        assert.ok(chat.includes("Function call: badId({})"));
+    } finally {
+        process.off("unhandledRejection", onUnhandled);
+    }
+    assert.deepEqual(unhandled, []);
+});
+
+test("handleReceiveResponse catches unexpected rejections from handleFunctionCallRequest and cleans up", async () => {
+    const { context, api, posts, errors, element, controllers } = loadFunctionCalls();
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+        api.sendMessage = () => {
+            throw new Error("socket send failed");
+        };
+        context.handleReceiveResponse({
+            type: "FUNCTION_CALL",
+            data: [{ id: "c1", name: "ok", args: {} }],
+        });
+        assert.equal(posts.length, 1);
+        posts[0].resolve({ response: "done" });
+        await settle();
+        await settle();
+
+        assert.ok(
+            errors.some((line) => line.includes("Failed to handle function call request:") && line.includes("socket send failed")),
+            `expected logged error, got ${JSON.stringify(errors)}`
+        );
+
+        // If chat rendering throws mid-batch, already-registered calls are still cleaned up.
+        let calls = 0;
+        element("text-chat").appendChild = () => {
+            if (++calls === 2) throw new Error("dom boom");
+        };
+        context.handleReceiveResponse({
+            type: "FUNCTION_CALL",
+            data: [
+                { id: "c2", name: "first", args: {} },
+                { id: "c3", name: "second", args: {} },
+            ],
+        });
+        await settle();
+        assert.equal(posts.length, 1, "failed setup must not start simulator requests");
+        assert.equal(controllers.length, 2);
+        assert.ok(
+            errors.some((line) => line.includes("Failed to handle function call request:") && line.includes("dom boom")),
+            `expected logged dom boom error, got ${JSON.stringify(errors)}`
+        );
+        // Neither cancellation nor endSession should touch c2's controller if it was cleaned up.
+        context.handleReceiveResponse({ type: "FUNCTION_CALL_CANCELLATION", data: ["c2"] });
+        context.endSession();
+        assert.equal(controllers[1].signal.aborted, false);
+    } finally {
+        process.off("unhandledRejection", onUnhandled);
+    }
+    assert.deepEqual(unhandled, []);
+});
+
+test("simulateFunctionResponse handles non-Error rejections without throwing", async () => {
+    const { context, api, posts, chat } = loadFunctionCalls();
+    const done = context.handleFunctionCallRequest([{ id: "c1", name: "failNonError", args: {} }]);
+    posts[0].reject("plain failure");
+    await done;
+    assert.deepEqual(plainJson(api.sent), [
+        {
+            toolResponse: {
+                functionResponses: [{ id: "c1", name: "failNonError", response: { error: "plain failure" } }],
+            },
+        },
+    ]);
+    assert.ok(chat.includes("Function failNonError failed: plain failure"));
 });

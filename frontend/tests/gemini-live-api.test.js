@@ -231,6 +231,25 @@ test("parseAll drops function calls that aren't plain objects and keeps the rest
     );
 });
 
+test("parseAll drops function calls without a non-empty string name", () => {
+    const bad = [
+        { id: "c0" },
+        { id: "c1", name: "" },
+        { id: "c2", name: "   " },
+        { id: "c3", name: 42 },
+        { id: "c4", name: { toString: null }, args: {} },
+        { id: "c5", name: ["fn"] },
+    ];
+    const events = GeminiLiveResponseMessage.parseAll({
+        toolCall: { functionCalls: [...bad, { id: "c6", name: "ok", args: { a: 1 } }] },
+    });
+    assert.deepEqual(types(events), ["FUNCTION_CALL"]);
+    assert.deepEqual(plain(events[0].data), [{ id: "c6", name: "ok", args: { a: 1 } }]);
+
+    assert.deepEqual(types(GeminiLiveResponseMessage.parseAll({ toolCall: { functionCalls: bad } })), []);
+    assert.deepEqual(types(GeminiLiveResponseMessage.parseAll({ tool_call: { function_calls: bad } })), []);
+});
+
 test("a non-string resumption handle is ignored, not offered for a resume", () => {
     // A stored non-string handle made the resume's setup throw on .trim().
     const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");

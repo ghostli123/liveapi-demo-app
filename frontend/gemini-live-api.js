@@ -46,7 +46,12 @@ class GeminiLiveResponseMessage {
 
         const toolCall = field(raw, "toolCall", "tool_call");
         const functionCalls = list(field(toolCall, "functionCalls", "function_calls")).filter(
-            (call) => call && typeof call === "object" && !Array.isArray(call)
+            (call) =>
+                call &&
+                typeof call === "object" &&
+                !Array.isArray(call) &&
+                typeof call.name === "string" &&
+                call.name.trim().length > 0
         );
         if (functionCalls.length) {
             add("FUNCTION_CALL", functionCalls);
