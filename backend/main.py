@@ -644,6 +644,16 @@ async def handle_fr_post_request(request: web.Request):
                 except Exception as e:
                     logging.exception("Function response simulator request failed")
                     return _json_error(_simulator_error(e), 502)
+                response_text = getattr(response, "text", None)
+                if not isinstance(response_text, str) or not response_text.strip():
+                    logging.warning(
+                        "Function response simulator returned an empty response (session %s)",
+                        session_id,
+                    )
+                    return _json_error(
+                        "Function response simulator returned an empty response",
+                        502,
+                    )
                 if send_definitions:
                     chat_session.fc_definitions_sent = True
     except TimeoutError:
@@ -656,8 +666,8 @@ async def handle_fr_post_request(request: web.Request):
             f"Function response simulator didn't answer within {FR_SIMULATOR_TIMEOUT_S} s",
             504,
         )
-    logging.debug("Sending back frontend with response:\n%s", response.text)
-    return web.json_response({"response": response.text})
+    logging.debug("Sending back frontend with response:\n%s", response_text)
+    return web.json_response({"response": response_text})
 
 
 async def handle_control_request(request: web.Request):

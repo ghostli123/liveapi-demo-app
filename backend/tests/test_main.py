@@ -752,6 +752,112 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(resp.status, 502)
                     self.assertEqual((await resp.json())["error"], expected)
 
+    async def test_fr_endpoint_rejects_empty_or_none_response(self):
+        # Empty candidates, thought-only parts, or blank text leave
+        # GenerateContentResponse.text None or blank; return 502 instead of
+        # HTTP 200 {"response": null} and keep fc_definitions_sent False so
+        # a later call still supplies the declarations if chat history dropped them.
+        types = main.genai.types
+        empty_responses = [
+            ("empty_response", types.GenerateContentResponse()),
+            ("empty_candidates", types.GenerateContentResponse(candidates=[])),
+            (
+                "thought_only",
+                types.GenerateContentResponse(
+                    candidates=[
+                        types.Candidate(
+                            content=types.Content(
+                                parts=[types.Part(thought=True, text="thinking")]
+                            )
+                        )
+                    ]
+                ),
+            ),
+            (
+                "empty_text",
+                types.GenerateContentResponse(
+                    candidates=[
+                        types.Candidate(
+                            content=types.Content(parts=[types.Part(text="")])
+                        )
+                    ]
+                ),
+            ),
+            (
+                "whitespace_text",
+                types.GenerateContentResponse(
+                    candidates=[
+                        types.Candidate(
+                            content=types.Content(parts=[types.Part(text="  \n\t ")])
+                        )
+                    ]
+                ),
+            ),
+            ("none_response", None),
+        ]
+        good_response = types.GenerateContentResponse(
+            candidates=[
+                types.Candidate(
+                    content=types.Content(
+                        parts=[types.Part(text='{"temperature": 72}')]
+                    )
+                )
+            ]
+        )
+        seen_parts: list[list[str]] = []
+
+        class StubChat:
+            def __init__(self):
+                self._replies = [r for _, r in empty_responses] + [
+                    good_response,
+                    good_response,
+                ]
+
+            async def send_message(self, parts):
+                seen_parts.append([p.text for p in parts])
+                return self._replies.pop(0)
+
+        with mock.patch.object(
+            main, "initialize_gemini_chat_session", return_value=StubChat()
+        ):
+            await self.connect_session("s5_empty")
+        def_resp = await self.client.post(
+            "/api/post_endpoint",
+            json={
+                "session_id": "s5_empty",
+                "objective": "fc_definition",
+                "function_declarations": [{"name": "get_weather"}],
+            },
+        )
+        self.assertEqual(def_resp.status, 200)
+
+        body = {
+            "session_id": "s5_empty",
+            "objective": "fr_generate",
+            "functionName": "get_weather",
+        }
+        with self.assertLogs("absl", level="WARNING") as logs:
+            for label, _ in empty_responses:
+                with self.subTest(case=label):
+                    resp = await self.client.post("/api/post_endpoint", json=body)
+                    self.assertEqual(resp.status, 502)
+                    self.assertEqual(
+                        (await resp.json())["error"],
+                        "Function response simulator returned an empty response",
+                    )
+        self.assertIn("empty response", "\n".join(logs.output))
+
+        # Every empty attempt kept fc_definitions_sent False, so the first
+        # non-empty call still receives the definitions, and the next does not.
+        ok1 = await self.client.post("/api/post_endpoint", json=body)
+        self.assertEqual(ok1.status, 200)
+        self.assertEqual(await ok1.json(), {"response": '{"temperature": 72}'})
+        self.assertIn("The definition of the functions are:", seen_parts[-1])
+
+        ok2 = await self.client.post("/api/post_endpoint", json=body)
+        self.assertEqual(ok2.status, 200)
+        self.assertNotIn("The definition of the functions are:", seen_parts[-1])
+
     async def test_fr_endpoint_rejects_invalid_session_ids(self):
         # A list or object used to reach the session dict and fail with 500.
         for session_id in (["s4"], {"id": "s4"}, 5, None, "bad id"):
