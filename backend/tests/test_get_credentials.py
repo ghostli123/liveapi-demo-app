@@ -226,6 +226,65 @@ class GetAccessTokenTest(unittest.TestCase):
             self.assertEqual(get_credentials.get_access_token().source, "gcloud")
         adc.refresh.assert_called_once()
 
+    def test_adc_rejects_invalid_and_malformed_tokens_and_falls_through(self):
+        missing_tokens = (
+            None,
+            "",
+            "   ",
+            "\n\t\r ",
+            12345,
+            True,
+            b"tok.secret",
+            ["t"],
+        )
+        for raw in missing_tokens:
+            with self.subTest(missing=raw):
+                get_credentials._cached_token = None
+                adc = mock.Mock(token=raw, expiry=None)
+                with mock.patch.object(get_credentials, "_adc_credentials", adc):
+                    with self.assertRaisesRegex(RuntimeError, "no token") as ctx:
+                        get_credentials._token_from_adc()
+                    self.assertNotIn("tok.secret", str(ctx.exception))
+                    self.use_sources(
+                        get_credentials._token_from_adc, lambda: _token(60, "gcloud")
+                    )
+                    token = get_credentials.get_access_token()
+                self.assertEqual(token.source, "gcloud")
+                self.assertEqual(get_credentials._cached_token, token)
+
+        malformed_tokens = (
+            "tok.secret\r\nX-Injected: 1",
+            "tok.secret extra",
+            "tok.secret\textra",
+            "tok.secret\x00",
+            "\x1ftok.secret",
+            "tok.secret\x0c",
+            "tok.secret\x7f",
+            "tok.secret\u00e9",
+            "\u00a0",
+        )
+        for raw in malformed_tokens:
+            with self.subTest(malformed=raw):
+                get_credentials._cached_token = None
+                adc = mock.Mock(token=raw, expiry=None)
+                with mock.patch.object(get_credentials, "_adc_credentials", adc):
+                    with self.assertRaisesRegex(RuntimeError, "malformed token") as ctx:
+                        get_credentials._token_from_adc()
+                    self.assertNotIn("tok.secret", str(ctx.exception))
+                    self.assertNotIn("X-Injected", str(ctx.exception))
+                    self.use_sources(
+                        get_credentials._token_from_adc, lambda: _token(60, "gcloud")
+                    )
+                    token = get_credentials.get_access_token()
+                self.assertEqual(token.source, "gcloud")
+                self.assertEqual(get_credentials._cached_token, token)
+
+        # Surrounding ASCII whitespace on a valid ADC token is trimmed.
+        adc = mock.Mock(token="  adc-tok \r\n", expiry=None)
+        with mock.patch.object(get_credentials, "_adc_credentials", adc):
+            token = get_credentials._token_from_adc()
+        self.assertEqual((token.token, token.source), ("adc-tok", "adc"))
+
     def test_adc_token(self):
         adc = mock.Mock(token="adc-token", expiry=None)
         self.enterContext(mock.patch.object(get_credentials, "_adc_credentials", None))
@@ -366,8 +425,46 @@ class GetAccessTokenTest(unittest.TestCase):
             token = get_credentials._token_from_gcloud()
         self.assertEqual((token.token, token.source), ("gcloud-tok", "gcloud"))
 
+        malformed_tokens = (
+            "tok.secret\r\nX-Injected: 1",
+            "tok.secret extra",
+            "tok.secret\textra",
+            "tok.secret\x00",
+            "tok.secret\x0c",
+            "tok.secret\x7f",
+            "tok.secret\u00e9",
+            "\u00a0",
+        )
+        for bad in malformed_tokens:
+            with self.subTest(malformed=bad):
+                completed = subprocess.CompletedProcess(
+                    args=["gcloud"],
+                    returncode=0,
+                    stdout=json.dumps({"token": bad}),
+                    stderr="",
+                )
+                with (
+                    mock.patch.object(
+                        get_credentials.shutil, "which", return_value="/usr/bin/gcloud"
+                    ),
+                    mock.patch.object(
+                        get_credentials.subprocess, "run", return_value=completed
+                    ),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "malformed token") as ctx:
+                        get_credentials._token_from_gcloud()
+                self.assertNotIn("tok.secret", str(ctx.exception))
+                self.assertNotIn("X-Injected", str(ctx.exception))
+
     def test_gcloud_invalid_token_falls_through_and_is_not_cached(self):
-        for payload in ('{"token": ""}', '{"token": null}', '{"token": "   "}', "null"):
+        for payload in (
+            '{"token": ""}',
+            '{"token": null}',
+            '{"token": "   "}',
+            '{"token": "tok.abc\\r\\nX-Injected: 1"}',
+            '{"token": "tok.abc def"}',
+            "null",
+        ):
             with self.subTest(payload=payload):
                 get_credentials._cached_token = None
                 completed = subprocess.CompletedProcess(
@@ -458,6 +555,63 @@ class GetAccessTokenTest(unittest.TestCase):
             self.assertEqual(token.token, "mock-loas")
             self.assertEqual(run_mock.call_args.kwargs.get("stdin"), subprocess.DEVNULL)
             self.assertTrue(run_mock.call_args.kwargs.get("capture_output"))
+
+    def test_loas_rejects_empty_and_malformed_tokens_and_does_not_cache(self):
+        with mock.patch.object(get_credentials.os.path, "exists", return_value=True):
+            # CRLF line endings, surrounding spaces, and trailing blank lines are trimmed.
+            completed = subprocess.CompletedProcess(
+                args=["par"],
+                returncode=0,
+                stdout="noisy banner\r\n  loas-tok \r\n\r\n",
+                stderr="",
+            )
+            with mock.patch.object(
+                get_credentials.subprocess, "run", return_value=completed
+            ):
+                token = get_credentials._token_from_loas()
+            self.assertEqual((token.token, token.source), ("loas-tok", "loas"))
+
+            for empty_stdout in ("", "   \t\r\n  "):
+                with self.subTest(empty_stdout=empty_stdout):
+                    completed = subprocess.CompletedProcess(
+                        args=["par"], returncode=0, stdout=empty_stdout, stderr=""
+                    )
+                    with mock.patch.object(
+                        get_credentials.subprocess, "run", return_value=completed
+                    ):
+                        with self.assertRaisesRegex(RuntimeError, "no token"):
+                            get_credentials._token_from_loas()
+
+            malformed_outputs = (
+                "WARNING: gcert expired\n",
+                "noisy banner\ntok.secret extra\n",
+                "tok.secret\textra\n",
+                "tok.secret\rX-Injected\n",
+                "tok.secret\x00\n",
+                "tok.secret\x0bdef\n",
+                "tok.secret\x0c\n",
+                "tok.secret\x7f\n",
+                "tok.secret\u00e9\n",
+            )
+            for bad_stdout in malformed_outputs:
+                with self.subTest(malformed_stdout=bad_stdout):
+                    get_credentials._cached_token = None
+                    completed = subprocess.CompletedProcess(
+                        args=["par"], returncode=0, stdout=bad_stdout, stderr=""
+                    )
+                    with mock.patch.object(
+                        get_credentials.subprocess, "run", return_value=completed
+                    ):
+                        with self.assertRaisesRegex(
+                            RuntimeError, "malformed token"
+                        ) as ctx:
+                            get_credentials._token_from_loas()
+                        self.assertNotIn("tok.secret", str(ctx.exception))
+                        self.assertNotIn("X-Injected", str(ctx.exception))
+                        self.use_sources(get_credentials._token_from_loas)
+                        with self.assertRaises(RuntimeError):
+                            get_credentials.get_access_token()
+                    self.assertIsNone(get_credentials._cached_token)
 
     def test_chain_credentials_refresh(self):
         self.use_sources(lambda: _token(60))

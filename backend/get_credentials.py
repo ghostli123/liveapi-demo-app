@@ -104,6 +104,23 @@ class _TimedRequest(google.auth.transport.requests.Request):
         return super().__call__(url, method, body, headers, timeout, **kwargs)
 
 
+def _validate_token(raw: object, source: str) -> str:
+    """Validates and trims a bearer token from a credential source.
+
+    Rejects non-strings, empty/whitespace-only values, and any character outside
+    printable non-whitespace ASCII (0x21-0x7E) so embedded whitespace, control
+    characters, or non-ASCII bytes can't corrupt the Authorization header.
+    """
+    if not isinstance(raw, str):
+        raise RuntimeError(f"{source} returned no token")
+    token = raw.strip(" \t\r\n")
+    if not token:
+        raise RuntimeError(f"{source} returned no token")
+    if any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in token):
+        raise RuntimeError(f"{source} returned a malformed token")
+    return token
+
+
 def _token_from_adc() -> AccessToken:
     global _adc_credentials
     credentials = _adc_credentials
@@ -112,9 +129,8 @@ def _token_from_adc() -> AccessToken:
         _adc_credentials = credentials
     # Only called when the cache is stale, so always refresh.
     credentials.refresh(_TimedRequest())
-    if not credentials.token:
-        raise RuntimeError("ADC refresh returned no token")
-    return AccessToken(credentials.token, _as_utc(credentials.expiry), "adc")
+    token = _validate_token(credentials.token, "ADC refresh")
+    return AccessToken(token, _as_utc(credentials.expiry), "adc")
 
 
 def _token_from_gcloud() -> AccessToken:
@@ -135,15 +151,13 @@ def _token_from_gcloud() -> AccessToken:
     data = json.loads(result.stdout)
     if not isinstance(data, dict):
         raise RuntimeError("gcloud returned unexpected JSON")
-    token = data.get("token")
-    if not isinstance(token, str) or not token.strip():
-        raise RuntimeError("gcloud returned no token")
+    token = _validate_token(data.get("token"), "gcloud")
     expiry = None
     try:
         expiry = datetime.datetime.fromisoformat(data["expiry"]["datetime"])
     except (KeyError, TypeError, ValueError):
         pass
-    return AccessToken(token.strip(), _as_utc(expiry), "gcloud")
+    return AccessToken(token, _as_utc(expiry), "gcloud")
 
 
 def _token_from_loas() -> AccessToken:
@@ -160,10 +174,9 @@ def _token_from_loas() -> AccessToken:
     if result.returncode != 0:
         stderr = result.stderr.strip().splitlines()
         raise RuntimeError(stderr[-1] if stderr else f"exit code {result.returncode}")
-    out = result.stdout.strip()
-    token = out.splitlines()[-1].strip() if out else ""
-    if not token:
-        raise RuntimeError("helper printed an empty token")
+    out = result.stdout.replace("\r\n", "\n").strip(" \t\n")
+    raw_token = out.split("\n")[-1] if out else ""
+    token = _validate_token(raw_token, "LOAS helper")
     return AccessToken(token, _utcnow() + datetime.timedelta(minutes=50), "loas")
 
 
