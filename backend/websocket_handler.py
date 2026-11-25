@@ -106,11 +106,30 @@ def describe_connect_error(error: Exception) -> str:
     return f"Could not connect to the Live API ({type(error).__name__}); see the server log"
 
 
+_SENSITIVE_HEADER_NAMES = frozenset(
+    {"authorization", "proxy-authorization", "cookie", "set-cookie"}
+)
+
+
 def connect_error_detail(error: Exception) -> str:
     """An upstream handshake failure as one line for the server log."""
     if isinstance(error, websockets.InvalidProxy):
         # Its text repeats the proxy URL, which can hold a user and password.
         return _one_line(f"Invalid proxy setting: {error.msg}")
+    if isinstance(error, websockets.InvalidHeaderValue) or (
+        isinstance(error, websockets.InvalidHeader)
+        and error.name.lower() in _SENSITIVE_HEADER_NAMES
+    ):
+        # Its text repeats the header value, which can hold a bearer token or
+        # proxy credentials.
+        kind = (
+            "missing"
+            if error.value is None
+            else "empty"
+            if error.value == ""
+            else "invalid"
+        )
+        return _one_line(f"{type(error).__name__}: {kind} {error.name} header")
     if isinstance(error, websockets.ProxyError):
         # InvalidProxyStatus carries the proxy's response, not the Live API's.
         return _one_line(f"{type(error).__name__}: {error}")

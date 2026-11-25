@@ -111,6 +111,64 @@ class DescribeConnectErrorTest(unittest.TestCase):
         self.assertTrue(reason.startswith("OSError: a b ccc"))
         self.assertEqual(len(reason), websocket_handler._MAX_CONNECT_ERROR_CHARS)
 
+    def test_invalid_header_value_redacts_header_values(self):
+        secret = "fake-bearer-secret"
+        error = websockets.InvalidHeaderValue(
+            "Authorization", f"Bearer {secret}\r\nX-Inject: 1"
+        )
+        for fn in (
+            websocket_handler.connect_error_detail,
+            websocket_handler.describe_connect_error,
+        ):
+            reason = fn(error)
+            self.assertEqual(reason, "InvalidHeaderValue: invalid Authorization header")
+            self.assertNotIn(secret, reason)
+            self.assertNotIn("X-Inject", reason)
+
+        self.assertEqual(
+            websocket_handler.connect_error_detail(
+                websockets.InvalidHeaderValue("Authorization", None)
+            ),
+            "InvalidHeaderValue: missing Authorization header",
+        )
+        self.assertEqual(
+            websocket_handler.connect_error_detail(
+                websockets.InvalidHeaderValue("Authorization", "")
+            ),
+            "InvalidHeaderValue: empty Authorization header",
+        )
+        self.assertEqual(
+            websocket_handler.describe_connect_error(
+                websockets.InvalidHeaderValue("Sec-WebSocket-Accept", "bad-accept-val")
+            ),
+            "InvalidHeaderValue: invalid Sec-WebSocket-Accept header",
+        )
+
+    def test_sensitive_invalid_header_subclasses_redact_values(self):
+        secret = "Basic dXNlcjpodW50ZXIy"
+        for error in (
+            websockets.InvalidHeader("Proxy-Authorization", secret),
+            websockets.InvalidHeaderFormat(
+                "Authorization", "expected token", f"Bearer {secret}", 0
+            ),
+            websockets.InvalidHeader("Set-Cookie", f"sid={secret}"),
+        ):
+            for fn in (
+                websocket_handler.connect_error_detail,
+                websocket_handler.describe_connect_error,
+            ):
+                reason = fn(error)
+                self.assertNotIn(secret, reason)
+                self.assertIn(error.name, reason)
+
+        # Non-sensitive handshake errors still keep their diagnostic value.
+        self.assertEqual(
+            websocket_handler.describe_connect_error(
+                websockets.InvalidUpgrade("Upgrade", "h2c")
+            ),
+            "InvalidUpgrade: invalid Upgrade header: h2c",
+        )
+
 
 class UpstreamRejectionLogTest(unittest.IsolatedAsyncioTestCase):
     async def test_html_error_page_is_logged_as_one_short_line(self):
@@ -669,6 +727,21 @@ class UpstreamUnauthorizedTest(TlsUpstreamTestCase):
         get_credentials._cached_token = _access_token("old")
         await self.run_session("Publisher Model `gemini-x` was not found")
         self.assertEqual(get_credentials._cached_token.token, "token-old")
+
+    async def test_invalid_header_value_from_websockets_hides_bearer_token(self):
+        # Defense in depth: even if a malformed token reaches websockets,
+        # neither the server log (checked by open_upstream) nor the browser
+        # close reason echoes the header value.
+        get_credentials._cached_token = _access_token("secret\r\nX-Inject: 1")
+        handler, upstream = await self.open_upstream(set())
+        self.assertIsNone(upstream)
+        self.assertEqual(handler.close_code, 1011)
+        self.assertEqual(
+            handler.close_reason,
+            "InvalidHeaderValue: invalid Authorization header",
+        )
+        self.assertNotIn("secret", handler.close_reason)
+        self.assertNotIn("X-Inject", handler.close_reason)
 
 
 class FakeConnection:
