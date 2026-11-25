@@ -111,11 +111,40 @@ _SENSITIVE_HEADER_NAMES = frozenset(
 )
 
 
+def _format_error_line(prefix: str, detail: object) -> str:
+    """Formats `prefix: detail` as one line, omitting `: ` when detail is blank."""
+    text = _one_line(str(detail)) if detail is not None else ""
+    return _one_line(f"{prefix}: {text}" if text else prefix)
+
+
+def _extract_http_error_detail(body: bytes) -> str:
+    """Extracts a human-readable error line from an upstream HTTP error body."""
+    raw = body.decode("utf-8", errors="replace")
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return _one_line(raw)
+    if isinstance(payload, dict) and "error" in payload:
+        err = payload["error"]
+        if isinstance(err, dict):
+            for field in ("message", "status"):
+                value = err.get(field)
+                if isinstance(value, str):
+                    cleaned = _one_line(value)
+                    if cleaned:
+                        return cleaned
+            return ""
+        if isinstance(err, str):
+            return _one_line(err)
+        return ""
+    return _one_line(raw)
+
+
 def connect_error_detail(error: Exception) -> str:
     """An upstream handshake failure as one line for the server log."""
     if isinstance(error, websockets.InvalidProxy):
         # Its text repeats the proxy URL, which can hold a user and password.
-        return _one_line(f"Invalid proxy setting: {error.msg}")
+        return _format_error_line("Invalid proxy setting", error.msg)
     if isinstance(error, websockets.InvalidHeaderValue) or (
         isinstance(error, websockets.InvalidHeader)
         and error.name.lower() in _SENSITIVE_HEADER_NAMES
@@ -132,19 +161,13 @@ def connect_error_detail(error: Exception) -> str:
         return _one_line(f"{type(error).__name__}: {kind} {error.name} header")
     if isinstance(error, websockets.ProxyError):
         # InvalidProxyStatus carries the proxy's response, not the Live API's.
-        return _one_line(f"{type(error).__name__}: {error}")
+        return _format_error_line(type(error).__name__, error)
     response = getattr(error, "response", None)
     status = getattr(response, "status_code", None)
     if status is None:
-        return _one_line(f"{type(error).__name__}: {error}")
+        return _format_error_line(type(error).__name__, error)
     body = getattr(response, "body", b"") or b""
-    detail = body.decode("utf-8", errors="replace")
-    try:
-        # Google APIs return {"error": {"message": ...}} on handshake errors.
-        detail = str(json.loads(detail)["error"]["message"])
-    except (ValueError, KeyError, TypeError):
-        pass
-    detail = _one_line(detail)
+    detail = _extract_http_error_detail(body)
     return f"Upstream HTTP {status}: {detail}" if detail else f"Upstream HTTP {status}"
 
 

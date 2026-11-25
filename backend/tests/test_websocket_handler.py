@@ -169,6 +169,95 @@ class DescribeConnectErrorTest(unittest.TestCase):
             "InvalidUpgrade: invalid Upgrade header: h2c",
         )
 
+    def test_null_or_non_string_error_message_and_blank_exceptions(self):
+        cases = [
+            (
+                "null message only",
+                RejectedHandshake(
+                    403, json.dumps({"error": {"message": None}}).encode()
+                ),
+                "Upstream HTTP 403",
+            ),
+            (
+                "null message with status",
+                RejectedHandshake(
+                    403,
+                    json.dumps(
+                        {"error": {"message": None, "status": "PERMISSION_DENIED"}}
+                    ).encode(),
+                ),
+                "Upstream HTTP 403: PERMISSION_DENIED",
+            ),
+            (
+                "blank message with status",
+                RejectedHandshake(
+                    403,
+                    json.dumps(
+                        {"error": {"message": "  \n ", "status": "PERMISSION_DENIED"}}
+                    ).encode(),
+                ),
+                "Upstream HTTP 403: PERMISSION_DENIED",
+            ),
+            (
+                "non-string message with status",
+                RejectedHandshake(
+                    500,
+                    json.dumps(
+                        {"error": {"message": {"nested": True}, "status": "INTERNAL"}}
+                    ).encode(),
+                ),
+                "Upstream HTTP 500: INTERNAL",
+            ),
+            (
+                "non-string message without status",
+                RejectedHandshake(
+                    500,
+                    json.dumps({"error": {"message": {"nested": True}}}).encode(),
+                ),
+                "Upstream HTTP 500",
+            ),
+            (
+                "status only",
+                RejectedHandshake(
+                    429,
+                    json.dumps({"error": {"status": "RESOURCE_EXHAUSTED"}}).encode(),
+                ),
+                "Upstream HTTP 429: RESOURCE_EXHAUSTED",
+            ),
+            (
+                "string error value",
+                RejectedHandshake(400, json.dumps({"error": "invalid_grant"}).encode()),
+                "Upstream HTTP 400: invalid_grant",
+            ),
+            (
+                "null error value",
+                RejectedHandshake(500, json.dumps({"error": None}).encode()),
+                "Upstream HTTP 500",
+            ),
+            ("bare TimeoutError", TimeoutError(), "TimeoutError"),
+            ("whitespace TimeoutError", TimeoutError("  \t "), "TimeoutError"),
+            ("bare ProxyError", websockets.ProxyError(), "ProxyError"),
+            (
+                "empty InvalidProxy message",
+                websockets.InvalidProxy("http://user:pw@proxy:80", "   "),
+                "Invalid proxy setting",
+            ),
+        ]
+        for label, error, expected in cases:
+            with self.subTest(case=label):
+                self.assertEqual(
+                    websocket_handler.connect_error_detail(error), expected
+                )
+                self.assertEqual(
+                    websocket_handler.describe_connect_error(error), expected
+                )
+
+        # Bare non-protocol error omits the trailing colon in connect_error_detail().
+        self.assertEqual(
+            websocket_handler.connect_error_detail(OSError()),
+            "OSError",
+        )
+
 
 class UpstreamRejectionLogTest(unittest.IsolatedAsyncioTestCase):
     async def test_html_error_page_is_logged_as_one_short_line(self):
