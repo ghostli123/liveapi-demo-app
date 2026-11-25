@@ -3246,6 +3246,106 @@ test("a function declarations file superseded by another file or Remove while it
     assert.match(dialogs[0], /^Loaded 1 function declaration\(s\) from "tools.json"/);
 });
 
+test("a function declarations file over the size limit is refused before it is read and keeps prior declarations", async () => {
+    const { context, element } = loadApp({
+        GeminiLiveAPI: class extends FakeGeminiLiveAPI {
+            static toFunctionDeclarations = (json) => (Array.isArray(json) ? json : [json]);
+        },
+    });
+    const dialogs = recordDialogs(context);
+
+    // Load a file right at the 512 KB limit first.
+    const atLimitInput = {
+        value: "at_limit.json",
+        files: [{ name: "at_limit.json", size: 512 * 1024, text: async () => '[{"name": "ok_fn"}]' }],
+    };
+    await context.handleFcFileInputChange({ target: atLimitInput });
+    assert.deepEqual(plainJson(context.AppState.functionCallDefinition), [{ name: "ok_fn" }]);
+    assert.equal(element("fcFileName").textContent, "File: at_limit.json (ok_fn)");
+    assert.equal(element("fcRemove").hidden, false);
+
+    // A file 1 byte over the limit is refused without calling file.text(), keeping the prior upload.
+    let read = false;
+    const hugeInput = {
+        value: "huge.json",
+        files: [
+            {
+                name: "huge.json",
+                size: 512 * 1024 + 1,
+                text: async () => {
+                    read = true;
+                    return '[{"name": "never_read"}]';
+                },
+            },
+        ],
+    };
+    await context.handleFcFileInputChange({ target: hugeInput });
+    assert.equal(read, false);
+    assert.equal(hugeInput.value, "");
+    assert.equal(
+        dialogs.at(-1),
+        'Could not use "huge.json": it is 513 KB; files are limited to 512 KB.'
+    );
+    assert.deepEqual(plainJson(context.AppState.functionCallDefinition), [{ name: "ok_fn" }]);
+    assert.equal(element("fcFileName").textContent, "File: at_limit.json (ok_fn)");
+
+    // Picking an oversized file also supersedes an earlier slow read in flight.
+    const slow = Promise.withResolvers();
+    const slowPick = context.handleFcFileInputChange({
+        target: { value: "slow.json", files: [{ name: "slow.json", size: 64, text: () => slow.promise }] },
+    });
+    await context.handleFcFileInputChange({
+        target: { value: "oversized.json", files: [{ name: "oversized.json", size: 600 * 1024, text: async () => "[]" }] },
+    });
+    slow.resolve('[{"name": "stale_fn"}]');
+    await slowPick;
+    assert.deepEqual(plainJson(context.AppState.functionCallDefinition), [{ name: "ok_fn" }]);
+    assert.equal(element("fcFileName").textContent, "File: at_limit.json (ok_fn)");
+    assert.equal(dialogs.length, 3);
+    assert.equal(
+        dialogs[2],
+        'Could not use "oversized.json": it is 600 KB; files are limited to 512 KB.'
+    );
+});
+
+test("function declarations with empty or whitespace-only names are refused and keep prior declarations", async () => {
+    const { context, element } = loadApp({
+        GeminiLiveAPI: class extends FakeGeminiLiveAPI {
+            static toFunctionDeclarations = (json) => {
+                const list = Array.isArray(json) ? json : Array.isArray(json?.tools) ? json.tools : [json];
+                return list.map((entry) =>
+                    entry && entry.type === "function" && entry.function ? entry.function : entry
+                );
+            };
+        },
+    });
+    const pick = async (name, body) => {
+        const input = { value: name, files: [{ name, size: body.length, text: async () => body }] };
+        await context.handleFcFileInputChange({ target: input });
+        return element("dialogMessage").textContent;
+    };
+
+    // Seed a valid declaration so we verify rejections leave it intact.
+    await pick("valid.json", '[{"name": " get_weather "}]');
+    assert.equal(element("fcFileName").textContent, "File: valid.json (get_weather)");
+
+    for (const [filename, body] of [
+        ["empty_name.json", '[{"name": ""}]'],
+        ["spaces_name.json", '[{"name": "   "}]'],
+        ["tabs_name.json", '[{"name": "\\t\\n"}]'],
+        ["mixed.json", '[{"name": "good_fn"}, {"name": "   "}]'],
+        ["openai_blank.json", '{"tools": [{"type": "function", "function": {"name": "  "}}]}'],
+    ]) {
+        const dialog = await pick(filename, body);
+        assert.equal(
+            dialog,
+            `Could not use "${filename}": expected a list of function declarations, each with a non-empty name`
+        );
+        assert.deepEqual(plainJson(context.AppState.functionCallDefinition), [{ name: " get_weather " }]);
+        assert.equal(element("fcFileName").textContent, "File: valid.json (get_weather)");
+    }
+});
+
 test("a recording stops itself at the sample limit and is kept, cut to the limit", async () => {
     const devices = fakeRecordingDevices();
     const { timers } = devices;

@@ -672,6 +672,11 @@ const MAX_VOICE_SAMPLE_S = 300;
 // stereo WAV is 173 MB.
 const MAX_VOICE_FILE_BYTES = 200 * 1024 * 1024;
 const MAX_AVATAR_IMAGE_BYTES = 20 * 1024 * 1024;
+// Function declarations are posted to /api/post_endpoint, where aiohttp's
+// default client_max_size is 1 MiB. Capping the file at 512 KB leaves headroom
+// for the JSON envelope and rejects oversized files at pick time rather than
+// failing every Connect with HTTP 413.
+const MAX_FC_FILE_BYTES = 512 * 1024;
 const AVATAR_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 const BrandedVoices = new Map(); // voice-dropdown value -> base64 WAV
 
@@ -728,6 +733,11 @@ function formatMinutes(seconds) {
 /** Rounds up, as above. */
 function formatMegabytes(bytes) {
     return `${Math.ceil(bytes / 104857.6) / 10} MB`;
+}
+
+/** Rounds up, as above. */
+function formatKilobytes(bytes) {
+    return `${Math.ceil(bytes / 1024)} KB`;
 }
 
 /** Adds a voice to the Branded Voice dropdown and selects it. */
@@ -836,6 +846,11 @@ async function handleFcFileInputChange(event) {
     const attempt = ++AppState.fcAttempt;
 
     try {
+        if (file.size > MAX_FC_FILE_BYTES) {
+            throw new Error(
+                `it is ${formatKilobytes(file.size)}; files are limited to ${formatKilobytes(MAX_FC_FILE_BYTES)}.`
+            );
+        }
         // Rejects if the file was moved or changed since it was picked. The
         // browsers' messages ("The operation was aborted.") don't say that.
         const text = await file.text().catch((error) => {
@@ -843,12 +858,12 @@ async function handleFcFileInputChange(event) {
         });
         if (attempt !== AppState.fcAttempt) return;
         const declarations = GeminiLiveAPI.toFunctionDeclarations(JSON.parse(text));
-        const unnamed = declarations.filter((d) => !d || typeof d.name !== "string");
+        const unnamed = declarations.filter((d) => !d || typeof d.name !== "string" || !d.name.trim());
         if (declarations.length === 0 || unnamed.length > 0) {
-            throw new Error("expected a list of function declarations, each with a name");
+            throw new Error("expected a list of function declarations, each with a non-empty name");
         }
         AppState.functionCallDefinition = declarations;
-        const names = declarations.map((d) => d.name).join(", ");
+        const names = declarations.map((d) => d.name.trim()).join(", ");
         AppUI.setText("fcFileName", `File: ${file.name} (${names})`);
         AppUI.setHidden("fcRemove", false);
         AppUI.showModal(
