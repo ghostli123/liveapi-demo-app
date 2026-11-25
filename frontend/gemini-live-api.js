@@ -165,7 +165,7 @@ const VOICE_ACTIVITY_EVENTS = new Set(["ACTIVITY_START", "ACTIVITY_END"]);
  */
 function describeDuration(ms) {
     const seconds = Math.round(ms / 1000);
-    const [count, unit] = seconds % 60 === 0 ? [seconds / 60, "minute"] : [seconds, "second"];
+    const [count, unit] = seconds > 0 && seconds % 60 === 0 ? [seconds / 60, "minute"] : [seconds, "second"];
     return `${count} ${unit}${count === 1 ? "" : "s"}`;
 }
 
@@ -646,12 +646,15 @@ class GeminiLiveAPI {
      * Initiates the overall connection process: prepares the session and establishes the WebSocket.
      */
     async connect() {
+        // Tear down any previous session first so direct callers that invoke
+        // connect() without disconnect() cannot orphan a socket or timers.
+        this.cancelPrepare();
+        this._teardownSession();
         // A fresh ID per connection, so cleanup of the previous connection on
         // the backend can't remove this one.
         const sessionId = randomId();
         this.sessionId = sessionId;
         this.latestResumptionHandle = "";
-        this.cancelPrepare();
         const attempt = ++this.connectAttempt;
         this.autoResumeTimes = [];
         try {
@@ -708,6 +711,7 @@ class GeminiLiveAPI {
      * @returns {Promise<void>} Rejects if the new session could not be prepared or opened.
      */
     async resume(handle) {
+        const oldSessionId = this.sessionId;
         const oldWebSocket = this.webSocket;
         this.webSocket = null;
         this.isSetupComplete = false;
@@ -728,6 +732,11 @@ class GeminiLiveAPI {
         this.sessionId = sessionId;
         this.cancelPrepare();
         const attempt = ++this.connectAttempt;
+        if (oldWebSocket && oldWebSocket.readyState === WebSocket.CONNECTING) {
+            // Like _teardownSession(): a handshake that never finished may not
+            // have reached the backend, so release its pending record now.
+            this.abandonSession(oldSessionId);
+        }
         let finishClose = () => {};
         let closeSettled = !oldWebSocket;
         const closed = oldWebSocket
@@ -912,9 +921,12 @@ class GeminiLiveAPI {
                 this.idleTimer = wait(left);
                 return;
             }
-            this.onIdleTimeout(
-                `Disconnected after ${describeDuration(this.idleTimeoutMs)} without activity.`
-            );
+            const message = `Disconnected after ${describeDuration(this.idleTimeoutMs)} without activity.`;
+            // Tear down before notifying so standalone callers that don't call
+            // disconnect() in onIdleTimeout still release the socket, timers,
+            // WebRTC peer connection, and any in-flight resume().
+            this.disconnect();
+            this.onIdleTimeout(message);
         };
         const left = keepActivity ? this.lastActivityAt + this.idleTimeoutMs - performance.now() : this.idleTimeoutMs;
         this.idleTimer = wait(left);
@@ -1217,9 +1229,11 @@ class GeminiLiveAPI {
         this.bytesIn = 0;
         this.bytesOut = 0;
         this.history = [];
-        for (const id of ["upload-speed", "download-speed"]) {
-            const element = document.getElementById(id);
-            if (element) element.textContent = "0.00";
+        if (typeof document !== "undefined") {
+            for (const id of ["upload-speed", "download-speed"]) {
+                const element = document.getElementById(id);
+                if (element) element.textContent = "0.00";
+            }
         }
     }
 

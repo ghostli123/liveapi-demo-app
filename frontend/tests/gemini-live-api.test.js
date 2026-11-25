@@ -1510,11 +1510,14 @@ test("typed bitrates are sent as positive integers or not at all", async () => {
 
 // A connected session whose server set --idle_timeout_s=idleS.
 async function idleApi(idleS = 120) {
-    const api = connectedApi();
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    api.setTransportMode("websocket");
     api.idleMessages = [];
     api.onIdleTimeout = (message) => api.idleMessages.push(message);
     api.sendPostRequest = async () => ({ project_id: "p", idle_timeout_s: idleS });
-    api.setupWebSocketToService = () => {};
+    api.setupWebSocketToService = () => {
+        api.webSocket = new FakeWebSocket();
+    };
     await api.connect();
     return api;
 }
@@ -2107,4 +2110,129 @@ test("setupTimer timeout, onopen setup failure, and setup-callback errors tear d
     assert.equal(fbIdle.cleared, true);
     assert.equal(onFallbackFail.idleTimer, null);
     assert.equal(onFallbackFail.intervalId, null);
+});
+
+test("idle timeout tears down session resources and cancels an in-flight resume() without caller disconnect()", async () => {
+    // 1. Active session with open WebSocket, bandwidth interval, setupTimer, and WebRTC.
+    const api = await idleApi(10);
+    api.setupWebSocketToService = GeminiLiveAPI.prototype.setupWebSocketToService;
+    api.setupWebSocketToService();
+    const ws = api.webSocket;
+    const setupTimer = timers[api.setupTimer - 1];
+    let wsClosed = 0;
+    let rtcClosed = 0;
+    ws.close = () => wsClosed++;
+    api.webRtcManager = { close: () => rtcClosed++ };
+    assert.notEqual(api.intervalId, null);
+
+    fireIdleTimer(api, 10000);
+    assert.deepEqual(plain(api.idleMessages), ["Disconnected after 10 seconds without activity."]);
+    assert.equal(api.webSocket, null);
+    assert.equal(wsClosed, 1);
+    assert.equal(setupTimer.cleared, true);
+    assert.equal(api.setupTimer, null);
+    assert.equal(api.intervalId, null);
+    assert.equal(rtcClosed, 1);
+    assert.equal(api.idleTimer, null);
+
+    // 2. Idle timer fires mid-resume() while prepare() is pending.
+    const resuming = await idleApi(10);
+    resuming.webSocket.close = () => {};
+    resuming.webSocket.readyState = FakeWebSocket.CLOSED;
+    let resolveConnect;
+    const abandoned = [];
+    let opened = 0;
+    resuming.setupWebSocketToService = () => opened++;
+    resuming.sendPostRequest = (url, body) => {
+        if (body.command === "disconnect") {
+            abandoned.push(body.session_id);
+            return Promise.resolve({});
+        }
+        return new Promise((resolve) => {
+            resolveConnect = () => resolve({ project_id: "p", idle_timeout_s: 10 });
+        });
+    };
+    const resumePromise = resuming.resume("h1");
+    await new Promise((resolve) => setImmediate(resolve));
+    const resumedId = resuming.sessionId;
+
+    fireIdleTimer(resuming, 10000);
+    resolveConnect();
+    await resumePromise;
+
+    assert.equal(resuming.idleMessages.length, 1);
+    assert.equal(opened, 0);
+    assert.equal(resuming.webSocket, null);
+    assert.deepEqual(plain(abandoned), [resumedId]);
+});
+
+test("overlapping connect() tears down the previous session before starting a new one", async () => {
+    const api = await idleApi(60);
+    api.setupWebSocketToService = GeminiLiveAPI.prototype.setupWebSocketToService;
+    api.setupWebSocketToService();
+    const ws1 = api.webSocket;
+    const firstId = api.sessionId;
+    const firstSetup = timers[api.setupTimer - 1];
+    const firstIdle = timers[api.idleTimer - 1];
+    let ws1Closed = 0;
+    let rtcClosed = 0;
+    ws1.readyState = FakeWebSocket.CONNECTING;
+    ws1.close = () => ws1Closed++;
+    api.webRtcManager = { close: () => rtcClosed++ };
+    const abandoned = [];
+    api.sendPostRequest = (url, body) => {
+        if (body.command === "disconnect") abandoned.push(body.session_id);
+        return Promise.resolve({ project_id: "p", idle_timeout_s: 60 });
+    };
+
+    await api.connect();
+    assert.notEqual(api.webSocket, ws1);
+    assert.equal(ws1Closed, 1);
+    assert.equal(ws1.onmessage, null);
+    assert.equal(ws1.onclose, null);
+    assert.equal(firstSetup.cleared, true);
+    assert.equal(firstIdle.cleared, true);
+    assert.equal(rtcClosed, 1);
+    assert.deepEqual(plain(abandoned), [firstId]);
+    api.disconnect();
+});
+
+test("resume() while the old WebSocket is still CONNECTING abandons the old pending session", async () => {
+    const api = await idleApi(60);
+    const oldId = api.sessionId;
+    const ws1 = api.webSocket;
+    ws1.readyState = FakeWebSocket.CONNECTING;
+    ws1.close = () => {
+        ws1.readyState = FakeWebSocket.CLOSED;
+        ws1.onclose?.();
+    };
+    const commands = [];
+    api.sendPostRequest = (url, body) => {
+        commands.push([body.command, body.session_id]);
+        return Promise.resolve({ project_id: "p", idle_timeout_s: 60 });
+    };
+
+    await api.resume("h1");
+    assert.deepEqual(
+        plain(commands),
+        [
+            ["disconnect", oldId],
+            ["connect", api.sessionId],
+        ]
+    );
+    api.disconnect();
+});
+
+test("describeDuration formats sub-second positive durations as seconds, not 0 minutes", async () => {
+    const api = await idleApi(0.4);
+    fireIdleTimer(api, 1000);
+    assert.deepEqual(plain(api.idleMessages), ["Disconnected after 0 seconds without activity."]);
+
+    const oneSec = await idleApi(1);
+    fireIdleTimer(oneSec, 1000);
+    assert.deepEqual(plain(oneSec.idleMessages), ["Disconnected after 1 second without activity."]);
+
+    const oneMin = await idleApi(60);
+    fireIdleTimer(oneMin, 60000);
+    assert.deepEqual(plain(oneMin.idleMessages), ["Disconnected after 1 minute without activity."]);
 });
