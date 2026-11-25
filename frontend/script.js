@@ -763,8 +763,12 @@ function selectBrandedVoice() {
 // --- Custom avatar image ---
 /** Sets the avatar image, unless a later avatar choice than `attempt` was made meanwhile. */
 async function setAvatarImage(blob, name, attempt) {
-    if (!AVATAR_IMAGE_TYPES.has(blob.type)) {
+    const mimeType = typeof blob.type === "string" ? blob.type.split(";", 1)[0].trim().toLowerCase() : "";
+    if (!AVATAR_IMAGE_TYPES.has(mimeType)) {
         throw new Error("use a PNG, JPEG or WebP image.");
+    }
+    if (blob.size === 0) {
+        throw new Error("the image is empty.");
     }
     if (blob.size > MAX_AVATAR_IMAGE_BYTES) {
         throw new Error(
@@ -773,7 +777,10 @@ async function setAvatarImage(blob, name, attempt) {
     }
     const base64 = await blobToBase64(blob);
     if (attempt !== AppState.avatarAttempt) return;
-    AppState.customAvatar = { image: base64, mimeType: blob.type };
+    if (!base64) {
+        throw new Error("the image is empty.");
+    }
+    AppState.customAvatar = { image: base64, mimeType };
     AppUI.setText("avatarName", `Avatar: ${name}`);
     AppUI.setHidden("avatarStockLink", false);
 }

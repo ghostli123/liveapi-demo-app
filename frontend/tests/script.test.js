@@ -3045,6 +3045,75 @@ test("an avatar image too large or of an unsupported type is refused and the pre
     assert.equal(element("avatarName").textContent, "Avatar: face.jpg");
 });
 
+test("empty avatar images are refused and parameterized or uppercase MIME types are normalized", async () => {
+    let readerCalls = 0;
+    class CountingFileReader extends FakeFileReader {
+        readAsDataURL(blob) {
+            readerCalls++;
+            return super.readAsDataURL(blob);
+        }
+    }
+    let sampleBlob = { type: "IMAGE/PNG; charset=binary", size: 3, bytes: "png" };
+    const { context, element } = loadApp({
+        FileReader: CountingFileReader,
+        fetch: async () => ({ ok: true, blob: async () => sampleBlob }),
+    });
+    const dialogs = recordDialogs(context);
+    element("avatarStockLink").hidden = true;
+    element("avatarName").textContent = "Avatar: Piper (stock)";
+
+    // A 0-byte file is refused before reading and leaves the stock avatar untouched.
+    await context.handleAvatarFileInputChange({
+        target: { value: "empty.png", files: [{ name: "empty.png", type: "image/png", size: 0, bytes: "" }] },
+    });
+    assert.equal(readerCalls, 0);
+    assert.deepEqual(dialogs.splice(0), ['Could not use "empty.png" as the avatar: the image is empty.']);
+    assert.deepEqual(plainJson(context.AppState.customAvatar), { image: "", mimeType: "image/png" });
+    assert.equal(element("avatarName").textContent, "Avatar: Piper (stock)");
+    assert.equal(element("avatarStockLink").hidden, true);
+
+    // Parameterized uppercase MIME types (e.g. from fetch Content-Type) are accepted and normalized.
+    await context.useSampleAvatar();
+    assert.deepEqual(dialogs.splice(0), []);
+    assert.deepEqual(plainJson(context.AppState.customAvatar), { image: "cG5n", mimeType: "image/png" });
+    assert.equal(element("avatarName").textContent, "Avatar: sample image");
+    assert.equal(element("avatarStockLink").hidden, false);
+
+    await context.handleAvatarFileInputChange({
+        target: {
+            value: "pic.webp",
+            files: [{ name: "pic.webp", type: "  Image/WebP ; version=1 ", size: 3, bytes: "abc" }],
+        },
+    });
+    assert.deepEqual(dialogs.splice(0), []);
+    assert.deepEqual(plainJson(context.AppState.customAvatar), { image: "YWJj", mimeType: "image/webp" });
+    assert.equal(element("avatarName").textContent, "Avatar: pic.webp");
+
+    // Empty base64 (even with non-zero reported size) is refused and keeps the previous avatar.
+    await context.handleAvatarFileInputChange({
+        target: { value: "blank.png", files: [{ name: "blank.png", type: "image/png", size: 4, bytes: "" }] },
+    });
+    assert.deepEqual(dialogs.splice(0), ['Could not use "blank.png" as the avatar: the image is empty.']);
+    assert.deepEqual(plainJson(context.AppState.customAvatar), { image: "YWJj", mimeType: "image/webp" });
+    assert.equal(element("avatarName").textContent, "Avatar: pic.webp");
+
+    // A 0-byte sample response is refused and keeps the previous avatar.
+    sampleBlob = { type: "image/png; charset=binary", size: 0, bytes: "" };
+    await context.useSampleAvatar();
+    assert.deepEqual(dialogs.splice(0), ["Could not load the sample avatar image: the image is empty."]);
+    assert.deepEqual(plainJson(context.AppState.customAvatar), { image: "YWJj", mimeType: "image/webp" });
+    assert.equal(element("avatarName").textContent, "Avatar: pic.webp");
+
+    // Non-string MIME type is cleanly rejected with the unsupported-type message.
+    await context.handleAvatarFileInputChange({
+        target: { value: "notype.png", files: [{ name: "notype.png", type: null, size: 3, bytes: "abc" }] },
+    });
+    assert.deepEqual(dialogs.splice(0), [
+        'Could not use "notype.png" as the avatar: use a PNG, JPEG or WebP image.',
+    ]);
+    assert.deepEqual(plainJson(context.AppState.customAvatar), { image: "YWJj", mimeType: "image/webp" });
+});
+
 test("a voice file over the size limit is refused before it is read", async () => {
     const { context, element } = loadApp({ OfflineAudioContext: fakeOfflineAudioContext(12), FileReader: FakeFileReader });
     let read = false;
