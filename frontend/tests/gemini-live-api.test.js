@@ -310,6 +310,87 @@ test("empty functionCallDefinition omits function_declarations and skips fc_defi
     assert.equal(posted, 0);
 });
 
+test("malformed entries in functionCallDefinition are filtered from tools config and fc_definition POST", async () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    const namedArray = Object.assign([], { name: "arr" });
+    const nullProto = Object.assign(Object.create(null), { name: "null_proto" });
+    const namedFn = function named() {};
+    const valid = { name: "ok", description: "runs ok" };
+    const invalidEntries = [
+        null,
+        undefined,
+        123,
+        "str",
+        true,
+        [],
+        namedArray,
+        namedFn,
+        {},
+        { name: "" },
+        { name: "   " },
+        { name: 123 },
+        { name: null },
+        { name: { toString: () => "coerced" } },
+    ];
+
+    api.setFunctionCall([valid, ...invalidEntries, nullProto]);
+    api.toolBehavior = "BLOCKING";
+    assert.deepEqual(plain(api._buildToolsConfig()), [
+        { function_declarations: [{ name: "ok", description: "runs ok" }, { name: "null_proto" }] },
+    ]);
+
+    api.toolBehavior = "NON_BLOCKING";
+    assert.deepEqual(plain(api._buildToolsConfig()), [
+        {
+            function_declarations: [
+                { name: "ok", description: "runs ok", behavior: "NON_BLOCKING" },
+                { name: "null_proto", behavior: "NON_BLOCKING" },
+            ],
+        },
+    ]);
+
+    const posted = [];
+    api.sendPostRequest = async (_url, body) => {
+        posted.push(body);
+        return {};
+    };
+    await api.setupFuncDeclarationToService("s1");
+    assert.deepEqual(plain(posted), [
+        {
+            objective: "fc_definition",
+            session_id: "s1",
+            functionDefinition: [{ name: "ok", description: "runs ok" }, { name: "null_proto" }],
+        },
+    ]);
+
+    // A single valid declaration object is normalized into a one-element list.
+    posted.length = 0;
+    api.setFunctionCall({ name: "solo" });
+    api.toolBehavior = "BLOCKING";
+    assert.deepEqual(plain(api._buildToolsConfig()), [{ function_declarations: [{ name: "solo" }] }]);
+    await api.setupFuncDeclarationToService("s1");
+    assert.deepEqual(plain(posted), [
+        { objective: "fc_definition", session_id: "s1", functionDefinition: [{ name: "solo" }] },
+    ]);
+
+    // When no valid declarations remain, omit tools (or keep only googleSearch) and skip POST.
+    posted.length = 0;
+    for (const bad of [invalidEntries, 123, "foo", true, {}, { name: "   " }, namedArray, namedFn]) {
+        api.setFunctionCall(bad);
+        api.googleSearchEnabled = false;
+        api.toolBehavior = "BLOCKING";
+        assert.equal(api._buildToolsConfig(), null);
+        api.toolBehavior = "NON_BLOCKING";
+        assert.equal(api._buildToolsConfig(), null);
+
+        api.googleSearchEnabled = true;
+        assert.deepEqual(plain(api._buildToolsConfig()), [{ googleSearch: {} }]);
+
+        await api.setupFuncDeclarationToService("s1");
+    }
+    assert.equal(posted.length, 0);
+});
+
 test("realtime input is dropped until the server confirms setup", () => {
     const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
     api.webSocket = new FakeWebSocket();

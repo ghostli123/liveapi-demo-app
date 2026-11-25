@@ -878,7 +878,7 @@ class GeminiLiveAPI {
         const funcDeclarationMessage = {
             objective: "fc_definition",
             session_id: sessionId,
-            functionDefinition: this.functionCallDefinition,
+            functionDefinition: declarations,
         };
         try {
             await this.sendPostRequest(this.frUrl, funcDeclarationMessage, {
@@ -1418,17 +1418,26 @@ class GeminiLiveAPI {
     }
 
     /**
-     * Normalizes `this.functionCallDefinition` into a list of declarations,
-     * returning `[]` when unset or empty.
+     * Normalizes `this.functionCallDefinition` into a list of valid
+     * declarations (non-array objects with a non-empty string `name`),
+     * returning `[]` when unset, empty, or none are valid.
      * @returns {Object[]}
      */
     _functionDeclarations() {
         if (!this.functionCallDefinition) {
             return [];
         }
-        return Array.isArray(this.functionCallDefinition)
+        const entries = Array.isArray(this.functionCallDefinition)
             ? this.functionCallDefinition
             : [this.functionCallDefinition];
+        return entries.filter(
+            (entry) =>
+                Boolean(entry) &&
+                typeof entry === "object" &&
+                !Array.isArray(entry) &&
+                typeof entry.name === "string" &&
+                entry.name.trim().length > 0
+        );
     }
 
     _buildToolsConfig() {
