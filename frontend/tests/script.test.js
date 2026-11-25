@@ -2392,7 +2392,18 @@ function loadFunctionCalls({ abortRejects = true } = {}) {
         console: {
             log() {},
             warn() {},
-            error: (...args) => errors.push(args.join(" ")),
+            error: (...args) =>
+                errors.push(
+                    args
+                        .map((a) => {
+                            try {
+                                return String(a);
+                            } catch {
+                                return "[unprintable]";
+                            }
+                        })
+                        .join(" ")
+                ),
         },
     });
     const { AppState } = app.context;
@@ -4103,4 +4114,225 @@ test("simulateFunctionResponse handles non-Error rejections without throwing", a
         },
     ]);
     assert.ok(chat.includes("Function failNonError failed: plain failure"));
+});
+
+test("upload and recording error dialogs handle null and empty-message rejections without throwing", async () => {
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+
+    try {
+        let readerError = null;
+        let readerSyncThrow = false;
+        class FailingFileReader {
+            readAsDataURL() {
+                if (readerSyncThrow) throw null;
+                this.error = readerError;
+                queueMicrotask(() => {
+                    this.onerror?.();
+                    this.onloadend?.();
+                });
+            }
+        }
+        let fetchImpl = async () => {
+            throw null;
+        };
+        let decodeRejection = null;
+        class RejectDecodeOfflineAudioContext {
+            async decodeAudioData() {
+                throw decodeRejection;
+            }
+        }
+        let fcDeclImpl = () => {
+            throw null;
+        };
+        const devices = fakeRecordingDevices();
+        const { context, element } = loadApp({
+            ...devices.globals,
+            FileReader: FailingFileReader,
+            OfflineAudioContext: RejectDecodeOfflineAudioContext,
+            Blob,
+            fetch: (...args) => fetchImpl(...args),
+            GeminiLiveAPI: class extends FakeGeminiLiveAPI {
+                static toFunctionDeclarations = (json) => fcDeclImpl(json);
+            },
+        });
+        const dialogs = recordDialogs(context);
+
+        // 1. handleAvatarFileInputChange: FileReader.onerror with null error, empty-message DOMException, and sync null throw.
+        const avatarFile = { name: "face.png", type: "image/png", size: 12 };
+        readerError = null;
+        await context.handleAvatarFileInputChange({ target: { value: "face.png", files: [avatarFile] } });
+        assert.deepEqual(dialogs.splice(0), ['Could not use "face.png" as the avatar: could not read the file.']);
+
+        readerError = { name: "NotReadableError", message: "" };
+        await context.handleAvatarFileInputChange({ target: { value: "face.png", files: [avatarFile] } });
+        assert.deepEqual(dialogs.splice(0), ['Could not use "face.png" as the avatar: NotReadableError']);
+
+        readerSyncThrow = true;
+        await context.handleAvatarFileInputChange({ target: { value: "face.png", files: [avatarFile] } });
+        assert.deepEqual(dialogs.splice(0), ['Could not use "face.png" as the avatar: unknown error']);
+        readerSyncThrow = false;
+
+        // 2. useSampleAvatar: null fetch rejection, empty-message blob() rejection, and null FileReader error.
+        fetchImpl = async () => {
+            throw null;
+        };
+        await context.useSampleAvatar();
+        assert.deepEqual(dialogs.splice(0), ["Could not load the sample avatar image: unknown error"]);
+
+        fetchImpl = async () => ({
+            ok: true,
+            blob: async () => {
+                throw { name: "AbortError", message: "   " };
+            },
+        });
+        await context.useSampleAvatar();
+        assert.deepEqual(dialogs.splice(0), ["Could not load the sample avatar image: AbortError"]);
+
+        readerError = null;
+        fetchImpl = async () => ({
+            ok: true,
+            blob: async () => ({ type: "image/png", size: 8 }),
+        });
+        await context.useSampleAvatar();
+        assert.deepEqual(dialogs.splice(0), ["Could not load the sample avatar image: could not read the file."]);
+
+        // 3. handleAudioFileInputChange: Safari-style null decodeAudioData() rejection and empty-message EncodingError.
+        const voiceFile = { name: "a.wav", size: 64, arrayBuffer: async () => new ArrayBuffer(64) };
+        decodeRejection = null;
+        await context.handleAudioFileInputChange({ target: { value: "a.wav", files: [voiceFile] } });
+        assert.deepEqual(dialogs.splice(0), ['Could not use "a.wav" as a voice sample: unknown error']);
+
+        decodeRejection = { name: "EncodingError", message: "" };
+        await context.handleAudioFileInputChange({ target: { value: "a.wav", files: [voiceFile] } });
+        assert.deepEqual(dialogs.splice(0), ['Could not use "a.wav" as a voice sample: EncodingError']);
+
+        // 4. handleFcFileInputChange: null / whitespace-message file.text() rejection and null / empty-message parse error.
+        const rejectText = (reason) => ({
+            name: "tools.json",
+            size: 16,
+            text: async () => {
+                throw reason;
+            },
+        });
+        await context.handleFcFileInputChange({ target: { value: "tools.json", files: [rejectText(null)] } });
+        assert.deepEqual(dialogs.splice(0), ['Could not use "tools.json": the file can\'t be read (unknown error)']);
+
+        await context.handleFcFileInputChange({
+            target: { value: "tools.json", files: [rejectText({ name: "NotReadableError", message: "   " })] },
+        });
+        assert.deepEqual(dialogs.splice(0), [
+            'Could not use "tools.json": the file can\'t be read (NotReadableError)',
+        ]);
+
+        const okText = { name: "tools.json", size: 16, text: async () => "{}" };
+        fcDeclImpl = () => {
+            throw null;
+        };
+        await context.handleFcFileInputChange({ target: { value: "tools.json", files: [okText] } });
+        assert.deepEqual(dialogs.splice(0), ['Could not use "tools.json": unknown error']);
+
+        fcDeclImpl = () => {
+            throw { name: "SyntaxError", message: "" };
+        };
+        await context.handleFcFileInputChange({ target: { value: "tools.json", files: [okText] } });
+        assert.deepEqual(dialogs.splice(0), ['Could not use "tools.json": SyntaxError']);
+
+        // 5. recorder.onstop: null and empty-message decodeAudioData() rejections still show dialog and reset button.
+        for (const [reason, expected] of [
+            [null, "Could not process the recording: unknown error"],
+            [{ name: "EncodingError", message: "" }, "Could not process the recording: EncodingError"],
+        ]) {
+            decodeRejection = reason;
+            context.openModal();
+            element("newVoiceName").value = "Kai";
+            const click = context.handleRecordClick();
+            devices.prompts.at(-1).grant();
+            await click;
+            devices.recorders.at(-1).stop();
+            await flush();
+            assert.deepEqual(dialogs.splice(0), [expected]);
+            assert.equal(element("recordButton").disabled, false);
+            assert.equal(element("processingSpinner").hidden, true);
+            assert.equal(element("newVoiceName").value, "Kai");
+        }
+    } finally {
+        process.off("unhandledRejection", onUnhandled);
+    }
+    assert.deepEqual(unhandled, []);
+});
+
+test("resumption, simulator, screen, and recording start errors handle null and empty-message rejections", async () => {
+    // handleSessionResumptionReconnect: empty-message DOMException and null throw before api.resume().
+    for (const [thrown, expected] of [
+        [{ name: "InvalidStateError", message: "" }, "Could not resume the session: InvalidStateError"],
+        [null, "Could not resume the session: unknown error"],
+    ]) {
+        const app = loadSession();
+        const { context, api, dialogText } = app;
+        api.transportMode = "websocket";
+        api.latestResumptionHandle = "h1";
+        api.resume = async () => {
+            throw new Error("should not reach resume");
+        };
+        reconnect(app);
+        context.AppState.liveVideoOutputManager.initMediaSource = () => {
+            throw thrown;
+        };
+        await context.handleSessionResumptionReconnect();
+        assert.equal(dialogText(), expected);
+    }
+
+    // simulateFunctionResponse: empty-message DOMException, blank/plain objects, null/undefined, and throwing toString.
+    for (const [reason, expected] of [
+        [{ name: "AbortError", message: "  " }, "AbortError"],
+        [{ name: "  ", message: "  " }, "unknown error"],
+        [{}, "unknown error"],
+        [null, "unknown error"],
+        [undefined, "unknown error"],
+        [Object.create(null), "unknown error"],
+        [{ toString() { throw new Error("nope"); } }, "unknown error"],
+        [{ toString() { return "  custom failure  "; } }, "custom failure"],
+        ["", "unknown error"],
+        ["   ", "unknown error"],
+    ]) {
+        const { context, api, posts, chat } = loadFunctionCalls();
+        const done = context.handleFunctionCallRequest([{ id: "c1", name: "failEdge", args: {} }]);
+        posts[0].reject(reason);
+        await done;
+        assert.deepEqual(plainJson(api.sent), [
+            {
+                toolResponse: {
+                    functionResponses: [{ id: "c1", name: "failEdge", response: { error: expected } }],
+                },
+            },
+        ]);
+        assert.ok(chat.includes(`Function failEdge failed: ${expected}`));
+    }
+
+    // startScreenCapture & handleRecordClick: null rejections don't crash on .name check.
+    const { context } = loadApp({
+        navigator: {
+            mediaDevices: {
+                getUserMedia: async () => {
+                    throw null;
+                },
+            },
+        },
+        LiveScreenManager: class extends FakeFrameSource {
+            async startCapture() {
+                throw null;
+            }
+        },
+    });
+    const dialogs = recordDialogs(context);
+    context.AppState.liveScreenManager = new context.LiveScreenManager();
+    await context.startScreenCapture();
+    assert.deepEqual(dialogs.splice(0), ["Could not share the screen: unknown error"]);
+
+    context.openModal();
+    context.AppUI.getElement("newVoiceName").value = "Kai";
+    await context.handleRecordClick();
+    assert.deepEqual(dialogs.splice(0), ["Could not start recording: unknown error"]);
 });

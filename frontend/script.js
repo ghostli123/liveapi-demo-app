@@ -680,11 +680,28 @@ const MAX_FC_FILE_BYTES = 512 * 1024;
 const AVATAR_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 const BrandedVoices = new Map(); // voice-dropdown value -> base64 WAV
 
+/** Extracts a non-empty human-readable reason from a caught error or rejection value. */
+function errorReason(error) {
+    if (error && typeof error === "object") {
+        if (typeof error.message === "string" && error.message.trim()) return error.message.trim();
+        if (typeof error.name === "string" && error.name.trim()) return error.name.trim();
+    }
+    if (error !== null && error !== undefined) {
+        try {
+            const text = String(error).trim();
+            if (text && text !== "[object Object]") return text;
+        } catch {
+            // E.g. Object.create(null) or a throwing toString().
+        }
+    }
+    return "unknown error";
+}
+
 function blobToBase64(blob) {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onloadend = () => resolve(String(reader.result).split(",")[1] || "");
-        reader.onerror = () => reject(reader.error);
+        reader.onerror = () => reject(reader.error || new Error("could not read the file."));
         reader.readAsDataURL(blob);
     });
 }
@@ -794,7 +811,7 @@ async function handleAvatarFileInputChange(event) {
         await setAvatarImage(file, file.name, attempt);
     } catch (error) {
         if (attempt !== AppState.avatarAttempt) return;
-        AppUI.showModal(`Could not use "${file.name}" as the avatar: ${error.message}`);
+        AppUI.showModal(`Could not use "${file.name}" as the avatar: ${errorReason(error)}`);
     }
 }
 
@@ -806,7 +823,7 @@ async function useSampleAvatar() {
         await setAvatarImage(await response.blob(), "sample image", attempt);
     } catch (error) {
         if (attempt !== AppState.avatarAttempt) return;
-        AppUI.showModal(`Could not load the sample avatar image: ${error.message}`);
+        AppUI.showModal(`Could not load the sample avatar image: ${errorReason(error)}`);
     }
 }
 
@@ -842,7 +859,7 @@ async function handleAudioFileInputChange(event) {
     } catch (error) {
         console.error("Could not read voice sample:", error);
         if (attempt !== AppState.voiceAttempt) return;
-        AppUI.showModal(`Could not use "${file.name}" as a voice sample: ${error.message}`);
+        AppUI.showModal(`Could not use "${file.name}" as a voice sample: ${errorReason(error)}`);
     }
 }
 
@@ -861,7 +878,7 @@ async function handleFcFileInputChange(event) {
         // Rejects if the file was moved or changed since it was picked. The
         // browsers' messages ("The operation was aborted.") don't say that.
         const text = await file.text().catch((error) => {
-            throw new Error(`the file can't be read (${(error && (error.message || error.name)) || error})`);
+            throw new Error(`the file can't be read (${errorReason(error)})`);
         });
         if (attempt !== AppState.fcAttempt) return;
         const declarations = GeminiLiveAPI.toFunctionDeclarations(JSON.parse(text));
@@ -879,7 +896,7 @@ async function handleFcFileInputChange(event) {
         );
     } catch (error) {
         if (attempt !== AppState.fcAttempt) return;
-        AppUI.showModal(`Could not use "${file.name}": ${error.message}`);
+        AppUI.showModal(`Could not use "${file.name}": ${errorReason(error)}`);
     }
 }
 
@@ -1186,7 +1203,7 @@ async function handleSessionResumptionReconnect() {
         }
     } catch (error) {
         console.error("Session resumption setup failed:", error);
-        api.onErrorMessage(`Could not resume the session: ${error?.message ?? error}`);
+        api.onErrorMessage(`Could not resume the session: ${errorReason(error)}`);
         return;
     }
     try {
@@ -1269,7 +1286,7 @@ async function simulateFunctionResponse(funcCall, sessionId, webSocket, call) {
         const message =
             reason === "timeout"
                 ? `the simulator didn't answer within ${FUNCTION_RESPONSE_TIMEOUT_MS / 1000} s`
-                : error?.message ?? String(error);
+                : errorReason(error);
         console.error(`Simulating ${funcCall.name} failed:`, error);
         // After a disconnect or reconnect the old session is gone; that isn't the function's fault.
         if (AppState.geminiLiveApi.webSocket === webSocket && AppState.geminiLiveApi.sessionId === sessionId) {
@@ -1516,7 +1533,7 @@ function showCameraState(on) {
 function deviceErrorReason(err) {
     if (window.isSecureContext === false) return INSECURE_PAGE_REASON;
     if (err && err.name === "OverconstrainedError") return "the selected device isn't available";
-    return (err && (err.message || err.name)) || String(err);
+    return errorReason(err);
 }
 
 async function startAudioInput() {
@@ -1748,7 +1765,7 @@ async function startScreenCapture() {
         if (!(await screen.startCapture({ sendFrames: !webRtcManagerIfActive() }))) return;
     } catch (err) {
         // NotAllowedError means the user closed the picker.
-        if (err.name !== "NotAllowedError") {
+        if (!err || err.name !== "NotAllowedError") {
             AppUI.showModal(`Could not share the screen: ${deviceErrorReason(err)}`);
         }
         return;
@@ -2328,7 +2345,7 @@ async function handleRecordClick() {
                     console.error("Could not process the recording:", error);
                     if (abandoned()) return;
                     resetRecordButton();
-                    AppUI.showModal(`Could not process the recording: ${error.message}`);
+                    AppUI.showModal(`Could not process the recording: ${errorReason(error)}`);
                 }
             };
 
@@ -2349,7 +2366,7 @@ async function handleRecordClick() {
             if (stream) stream.getTracks().forEach((track) => track.stop());
             if (attempt !== AppState.recordingAttempt) return;
             AppUI.showModal(
-                error.name === "NotAllowedError"
+                error && error.name === "NotAllowedError"
                     ? "Could not access the microphone. Please check your browser permissions."
                     : `Could not start recording: ${deviceErrorReason(error)}`
             );
