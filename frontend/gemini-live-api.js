@@ -185,6 +185,32 @@ function randomId() {
 }
 
 /**
+ * Extracts a trimmed error detail from a failed JSON response body, falling
+ * back to `statusText`. Handles string `error` values and nested
+ * `{ error: { message, status } }` objects, ignoring blank or non-string fields.
+ * @param {*} receivedData
+ * @param {*} statusText
+ * @returns {string}
+ */
+function httpErrorDetail(receivedData, statusText) {
+    if (receivedData && typeof receivedData === "object" && !Array.isArray(receivedData)) {
+        const err = receivedData.error;
+        if (typeof err === "string" && err.trim()) {
+            return err.trim();
+        }
+        if (err && typeof err === "object" && !Array.isArray(err)) {
+            if (typeof err.message === "string" && err.message.trim()) {
+                return err.message.trim();
+            }
+            if (typeof err.status === "string" && err.status.trim()) {
+                return err.status.trim();
+            }
+        }
+    }
+    return typeof statusText === "string" ? statusText.trim() : "";
+}
+
+/**
  * Main Client API class for interacting with Gemini Live Realtime connections.
  * Manages WebSocket connections, HTTP backend control requests, tool declarations,
  * and real-time bandwidth statistics.
@@ -1672,7 +1698,7 @@ class GeminiLiveAPI {
             // Not JSON; fall through to the status check.
         }
         if (!response.ok) {
-            const detail = receivedData?.error || response.statusText;
+            const detail = httpErrorDetail(receivedData, response.statusText);
             throw Object.assign(
                 new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`),
                 { status: response.status }

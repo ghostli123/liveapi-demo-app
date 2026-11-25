@@ -813,11 +813,11 @@ function apiWithFetch(reply) {
         if (answer === "network") {
             throw new TypeError("Failed to fetch");
         }
-        const { status = 200, type = null, text = "" } = answer;
+        const { status = 200, statusText = "", type = null, text = "" } = answer;
         return {
             ok: status >= 200 && status < 300,
             status,
-            statusText: "",
+            statusText,
             headers: { get: (name) => (name.toLowerCase() === "content-type" ? type : null) },
             json: async () => JSON.parse(text),
         };
@@ -1153,6 +1153,108 @@ test("sendPostRequest() returns a JSON object and rejects any other 2xx reply", 
 test("an HTTP error still reports the server's error text", async () => {
     const { api } = apiWithFetch(() => ({ status: 503, type: "application/json", text: '{"error": "Too many sessions"}' }));
     await assert.rejects(api.sendPostRequest("/api/control", {}), { message: "HTTP 503: Too many sessions", status: 503 });
+});
+
+test("fetchJson() normalizes nested, non-string, and blank HTTP error fields", async () => {
+    const cases = {
+        nestedMessage: {
+            reply: {
+                status: 500,
+                statusText: "Internal Server Error",
+                type: "application/json",
+                text: '{"error": {"message": "  Backend failed  ", "status": "INTERNAL"}}',
+            },
+            message: "HTTP 500: Backend failed",
+        },
+        nestedStatus: {
+            reply: {
+                status: 429,
+                statusText: "Too Many Requests",
+                type: "application/json",
+                text: '{"error": {"message": "   ", "status": " RESOURCE_EXHAUSTED "}}',
+            },
+            message: "HTTP 429: RESOURCE_EXHAUSTED",
+        },
+        nestedNonString: {
+            reply: {
+                status: 500,
+                statusText: "Internal Server Error",
+                type: "application/json",
+                text: '{"error": {"code": 500, "message": null, "status": 42}}',
+            },
+            message: "HTTP 500: Internal Server Error",
+        },
+        trimmedError: {
+            reply: {
+                status: 400,
+                statusText: "Bad Request",
+                type: "application/json",
+                text: '{"error": "  bad field  "}',
+            },
+            message: "HTTP 400: bad field",
+        },
+        whitespaceError: {
+            reply: {
+                status: 502,
+                statusText: "  Bad Gateway  ",
+                type: "application/json",
+                text: '{"error": "   "}',
+            },
+            message: "HTTP 502: Bad Gateway",
+        },
+        whitespaceBoth: {
+            reply: {
+                status: 502,
+                statusText: "   ",
+                type: "application/json",
+                text: '{"error": "   "}',
+            },
+            message: "HTTP 502",
+        },
+        numericError: {
+            reply: {
+                status: 500,
+                statusText: "Internal Server Error",
+                type: "application/json",
+                text: '{"error": 123}',
+            },
+            message: "HTTP 500: Internal Server Error",
+        },
+        arrayError: {
+            reply: {
+                status: 500,
+                statusText: "Internal Server Error",
+                type: "application/json",
+                text: '{"error": ["a", "b"]}',
+            },
+            message: "HTTP 500: Internal Server Error",
+        },
+        nonObjectBody: {
+            reply: {
+                status: 502,
+                statusText: "Bad Gateway",
+                type: "application/json",
+                text: '["raw"]',
+            },
+            message: "HTTP 502: Bad Gateway",
+        },
+        nonJsonBlankStatus: {
+            reply: {
+                status: 504,
+                statusText: "  ",
+                type: "text/plain",
+                text: "not json",
+            },
+            message: "HTTP 504",
+        },
+    };
+    const { api } = apiWithFetch((body) => cases[body.kind].reply);
+    for (const [kind, expected] of Object.entries(cases)) {
+        await assert.rejects(api.sendPostRequest("/api/control", { kind }), {
+            message: expected.message,
+            status: expected.reply.status,
+        });
+    }
 });
 
 test("disconnect() while a resume waits for the old WebSocket releases the new session", async () => {
