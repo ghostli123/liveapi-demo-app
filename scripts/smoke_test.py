@@ -15,6 +15,7 @@ import json
 import sys
 import time
 import uuid
+from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 
@@ -35,6 +36,19 @@ COMMON_BAG_ENVIRONMENTS = (
 )
 
 
+def _ws_url(server: str, session_id: str) -> str:
+    """Builds the /ws URL from an http(s) server URL."""
+    parts = urlsplit(server.strip())
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https") or not parts.netloc:
+        raise ValueError(
+            f"--server must be an http:// or https:// URL (got {server!r})"
+        )
+    ws_scheme = "wss" if scheme == "https" else "ws"
+    path = parts.path.rstrip("/") + "/ws"
+    return urlunsplit((ws_scheme, parts.netloc, path, f"session_id={session_id}", ""))
+
+
 def _server_content(message: dict) -> dict:
     content = message.get("serverContent") or message.get("server_content")
     return content if isinstance(content, dict) else {}
@@ -49,20 +63,30 @@ def is_turn_complete(message: dict) -> bool:
 def summarize(message: dict, stats: dict) -> None:
     """Folds one server message into the running stats."""
     content = _server_content(message)
-    turn = content.get("modelTurn") or content.get("model_turn") or {}
-    for part in turn.get("parts", []):
-        if "text" in part:
-            stats["text"].append(part["text"])
-        inline = part.get("inlineData") or part.get("inline_data")
-        if inline:
-            mime = inline.get("mimeType") or inline.get("mime_type") or ""
-            kind = "video" if mime.startswith(("video/", "image/")) else "audio"
-            stats[f"{kind}_chunks"] += 1
-            stats[f"{kind}_bytes"] += len(inline.get("data", "")) * 3 // 4
+    turn = content.get("modelTurn") or content.get("model_turn")
+    parts = turn.get("parts") if isinstance(turn, dict) else None
+    if isinstance(parts, list):
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if isinstance(text, str):
+                stats["text"].append(text)
+            inline = part.get("inlineData") or part.get("inline_data")
+            if isinstance(inline, dict):
+                raw_mime = inline.get("mimeType") or inline.get("mime_type")
+                mime = raw_mime.strip().lower() if isinstance(raw_mime, str) else ""
+                kind = "video" if mime.startswith(("video/", "image/")) else "audio"
+                stats[f"{kind}_chunks"] += 1
+                data = inline.get("data")
+                if isinstance(data, str):
+                    stats[f"{kind}_bytes"] += len(data) * 3 // 4
     for key in ("outputTranscription", "output_transcription"):
         transcription = content.get(key)
-        if isinstance(transcription, dict) and transcription.get("text"):
-            stats["transcript"].append(transcription["text"])
+        if isinstance(transcription, dict):
+            text = transcription.get("text")
+            if isinstance(text, str) and text:
+                stats["transcript"].append(text)
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -70,7 +94,12 @@ async def run(args: argparse.Namespace) -> int:
     environment = args.environment
     endpoint = ENVIRONMENT_ENDPOINTS.get(environment, environment)
     is_common_bag = environment in COMMON_BAG_ENVIRONMENTS
-    server = args.server.rstrip("/")
+    server = args.server.strip().rstrip("/")
+    try:
+        ws_url = _ws_url(server, session_id)
+    except ValueError as err:
+        print(f"FAIL: {err}")
+        return 1
 
     async with aiohttp.ClientSession() as http:
         async with http.post(
@@ -111,7 +140,6 @@ async def run(args: argparse.Namespace) -> int:
         if args.modality == "VIDEO":
             setup["setup"]["avatar_config"] = {"avatar_name": "Piper"}
 
-        ws_url = server.replace("http", "ws", 1) + f"/ws?session_id={session_id}"
         stats = {
             "text": [],
             "transcript": [],
@@ -140,7 +168,20 @@ async def run(args: argparse.Namespace) -> int:
                             break
                         if msg.type != aiohttp.WSMsgType.TEXT:
                             break
-                        data = json.loads(msg.data)
+                        try:
+                            data = json.loads(msg.data)
+                        except json.JSONDecodeError:
+                            print(
+                                f"FAIL: received non-JSON text frame: "
+                                f"{msg.data.strip()[:300]}"
+                            )
+                            return 1
+                        if not isinstance(data, dict):
+                            print(
+                                f"FAIL: received non-object JSON frame: "
+                                f"{type(data).__name__}"
+                            )
+                            return 1
                         if "setupComplete" in data or "setup_complete" in data:
                             setup_complete = True
                             print(

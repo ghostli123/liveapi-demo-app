@@ -94,6 +94,84 @@ class SmokeTestHelpersTest(unittest.TestCase):
         self.assertEqual(stats["audio_chunks"], 1)
         self.assertEqual(stats["video_chunks"], 1)
 
+    def test_summarize_handles_malformed_parts_and_uppercase_mimes(self):
+        stats = {
+            "text": [],
+            "transcript": [],
+            "audio_chunks": 0,
+            "audio_bytes": 0,
+            "video_chunks": 0,
+            "video_bytes": 0,
+        }
+        cases = [
+            {"serverContent": {"modelTurn": None}},
+            {"serverContent": {"modelTurn": "not-a-dict"}},
+            {"serverContent": {"modelTurn": {"parts": None}}},
+            {"serverContent": {"modelTurn": {"parts": "not-a-list"}}},
+            {
+                "serverContent": {
+                    "modelTurn": {
+                        "parts": [
+                            None,
+                            "bad-part",
+                            123,
+                            {"text": None},
+                            {"text": 42},
+                            {"text": "ok"},
+                            {"inlineData": "not-a-dict"},
+                            {"inlineData": {"mimeType": "audio/pcm", "data": None}},
+                            {"inlineData": {"mimeType": 123, "data": "AAAA"}},
+                            {"inlineData": {"mimeType": "VIDEO/MP4", "data": "AAAA"}},
+                            {
+                                "inline_data": {
+                                    "mime_type": "  IMAGE/JPEG; quality=90 ",
+                                    "data": "BBBB",
+                                }
+                            },
+                        ]
+                    },
+                    "outputTranscription": {"text": None},
+                    "output_transcription": {"text": 999},
+                }
+            },
+        ]
+        for msg in cases:
+            smoke_test.summarize(msg, stats)
+
+        self.assertEqual(stats["text"], ["ok"])
+        self.assertEqual(stats["transcript"], [])
+        self.assertEqual(stats["audio_chunks"], 2)
+        self.assertEqual(stats["audio_bytes"], 3)
+        self.assertEqual(stats["video_chunks"], 2)
+        self.assertEqual(stats["video_bytes"], 6)
+        # Ensure printing stats["text"] / stats["transcript"] won't crash on join.
+        self.assertEqual("".join(stats["text"]), "ok")
+        self.assertEqual("".join(stats["transcript"]), "")
+
+    def test_ws_url_converts_case_insensitive_schemes_and_rejects_invalid(self):
+        for server, expected in [
+            ("http://localhost:8080", "ws://localhost:8080/ws?session_id=s1"),
+            ("HTTP://localhost:8080/", "ws://localhost:8080/ws?session_id=s1"),
+            (
+                "Https://example.com:8443/app/",
+                "wss://example.com:8443/app/ws?session_id=s1",
+            ),
+            ("  HTTPS://http.example.com  ", "wss://http.example.com/ws?session_id=s1"),
+        ]:
+            with self.subTest(server=server):
+                self.assertEqual(smoke_test._ws_url(server, "s1"), expected)
+
+        for bad in [
+            "",
+            "localhost:8080",
+            "ftp://localhost:8080",
+            "ws://localhost:8080",
+            "http://",
+        ]:
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    smoke_test._ws_url(bad, "s1")
+
 
 class SmokeTestRunTest(unittest.IsolatedAsyncioTestCase):
     async def _start_app(self, app: web.Application) -> test_utils.TestServer:
@@ -255,6 +333,111 @@ class SmokeTestRunTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(rc, 1)
             self.assertIn("control: HTTP 403", out)
             self.assertIn("is not allowed", out)
+
+    async def test_malformed_and_non_object_ws_frames_return_1_without_crashing(self):
+        for label, frame, expected in [
+            ("invalid json", "not-json{", "FAIL: received non-JSON text frame"),
+            (
+                "json list",
+                '["unexpected"]',
+                "FAIL: received non-object JSON frame: list",
+            ),
+            ("json null", "null", "FAIL: received non-object JSON frame: NoneType"),
+            ("json number", "42", "FAIL: received non-object JSON frame: int"),
+        ]:
+            with self.subTest(case=label):
+                app = web.Application()
+
+                async def control(_request: web.Request) -> web.Response:
+                    return web.json_response(
+                        {"status": "ok", "project_id": "test-proj"}
+                    )
+
+                async def ws_handler(
+                    request: web.Request, payload: str = frame
+                ) -> web.WebSocketResponse:
+                    ws = web.WebSocketResponse()
+                    await ws.prepare(request)
+                    await ws.receive_str()
+                    await ws.send_str(payload)
+                    async for _ in ws:
+                        pass
+                    return ws
+
+                app.router.add_post("/api/control", control)
+                app.router.add_get("/ws", ws_handler)
+                server = await self._start_app(app)
+
+                rc, out = await self._run_captured(
+                    _make_args(str(server.make_url("")), timeout=1.5)
+                )
+                self.assertEqual(rc, 1, out)
+                self.assertIn(expected, out)
+
+    async def test_uppercase_http_server_scheme_connects_and_passes(self):
+        app = web.Application()
+
+        async def control(_request: web.Request) -> web.Response:
+            return web.json_response({"status": "ok", "project_id": "test-proj"})
+
+        async def ws_handler(request: web.Request) -> web.WebSocketResponse:
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            await ws.receive_str()
+            await ws.send_str(json.dumps({"setupComplete": {}}))
+            await ws.receive_str()
+            await ws.send_str(
+                json.dumps(
+                    {
+                        "serverContent": {
+                            "modelTurn": {
+                                "parts": [
+                                    {"text": None},
+                                    {"text": "upper ok"},
+                                    {
+                                        "inlineData": {
+                                            "mimeType": "VIDEO/MP4",
+                                            "data": "AAAA",
+                                        }
+                                    },
+                                ]
+                            },
+                            "turnComplete": True,
+                        }
+                    }
+                )
+            )
+            async for _ in ws:
+                pass
+            return ws
+
+        app.router.add_post("/api/control", control)
+        app.router.add_get("/ws", ws_handler)
+        server = await self._start_app(app)
+
+        upper_url = str(server.make_url("")).replace("http://", "HTTP://", 1)
+        seen_ws_urls: list[str] = []
+        orig_ws_connect = smoke_test.aiohttp.ClientSession.ws_connect
+
+        def spy_ws_connect(session, url, *args, **kwargs):
+            seen_ws_urls.append(url)
+            return orig_ws_connect(session, url, *args, **kwargs)
+
+        with mock.patch.object(
+            smoke_test.aiohttp.ClientSession, "ws_connect", new=spy_ws_connect
+        ):
+            rc, out = await self._run_captured(_make_args(upper_url, timeout=1.5))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(seen_ws_urls), 1)
+        self.assertTrue(seen_ws_urls[0].startswith("ws://"), seen_ws_urls[0])
+        self.assertIn("text: upper ok", out)
+        self.assertIn("video: 1 chunks / 3 B", out)
+        self.assertIn("PASS", out)
+
+    async def test_invalid_server_scheme_returns_1_without_crashing(self):
+        rc, out = await self._run_captured(_make_args("ftp://localhost:8080"))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL: --server must be an http:// or https:// URL", out)
 
 
 if __name__ == "__main__":
