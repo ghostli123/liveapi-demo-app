@@ -827,11 +827,27 @@ def _simulator_error(error: Exception) -> str:
     """The browser's text for a failed simulator call; the log has the rest.
 
     A Gemini API error keeps its HTTP code and status (e.g. 429
-    RESOURCE_EXHAUSTED). Other errors, a failed token fetch among them, carry
-    gcloud's output, file paths or internal hosts, so only their type is shown.
+    RESOURCE_EXHAUSTED), omitting either part when missing or blank. Other
+    errors, a failed token fetch among them, carry gcloud's output, file paths
+    or internal hosts, so only their type is shown.
     """
     if isinstance(error, genai_errors.APIError):
-        return f"Function response simulator failed ({error.code} {error.status})"
+        parts = []
+        code = error.code
+        if isinstance(code, int) and not isinstance(code, bool):
+            if code:
+                parts.append(str(code))
+        elif isinstance(code, str):
+            code = code.strip()
+            if code:
+                parts.append(code)
+        status = error.status
+        if isinstance(status, str):
+            status = status.strip()
+            if status:
+                parts.append(status)
+        if parts:
+            return f"Function response simulator failed ({' '.join(parts)})"
     return f"Function response simulator failed ({type(error).__name__}); see the server log"
 
 

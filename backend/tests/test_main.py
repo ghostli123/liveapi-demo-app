@@ -681,6 +681,77 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("common_bag_ws_proxy.par", "\n".join(logs.output))
 
+    async def test_fr_endpoint_api_error_omits_missing_or_blank_code_and_status(self):
+        # Non-JSON gateway errors (e.g. 502/503) or partial APIError payloads
+        # can leave status or code None/blank; avoid "(502 None)" or "(None None)".
+        cases = [
+            (
+                main.genai_errors.ServerError(502, {}),
+                "Function response simulator failed (502)",
+            ),
+            (
+                main.genai_errors.ServerError(503, {"error": {"status": ""}}),
+                "Function response simulator failed (503)",
+            ),
+            (
+                main.genai_errors.ServerError(503, {"error": {"status": "   "}}),
+                "Function response simulator failed (503)",
+            ),
+            (
+                main.genai_errors.ServerError(
+                    502, {"error": {"status": "  Bad Gateway  "}}
+                ),
+                "Function response simulator failed (502 Bad Gateway)",
+            ),
+            (
+                main.genai_errors.APIError(0, {"error": {"status": "UNAVAILABLE"}}),
+                "Function response simulator failed (UNAVAILABLE)",
+            ),
+            (
+                main.genai_errors.APIError(0, {}),
+                "Function response simulator failed (APIError); see the server log",
+            ),
+            (
+                main.genai_errors.ServerError(0, {}),
+                "Function response simulator failed (ServerError); see the server log",
+            ),
+            (
+                main.genai_errors.APIError(
+                    0, {"error": {"code": "   ", "status": "  "}}
+                ),
+                "Function response simulator failed (APIError); see the server log",
+            ),
+            (
+                main.genai_errors.APIError(
+                    0, {"error": {"code": {"secret": "x"}, "status": ["y"]}}
+                ),
+                "Function response simulator failed (APIError); see the server log",
+            ),
+            (
+                main.genai_errors.APIError(
+                    0, {"error": {"code": "504", "status": "DEADLINE_EXCEEDED"}}
+                ),
+                "Function response simulator failed (504 DEADLINE_EXCEEDED)",
+            ),
+        ]
+        chat = mock.Mock()
+        chat.send_message = mock.AsyncMock(side_effect=[err for err, _ in cases])
+        with mock.patch.object(
+            main, "initialize_gemini_chat_session", return_value=chat
+        ):
+            await self.connect_session("s5_partial")
+        body = {
+            "session_id": "s5_partial",
+            "objective": "fr_generate",
+            "functionName": "f",
+        }
+        with self.assertLogs("absl", level="ERROR"):
+            for err, expected in cases:
+                with self.subTest(code=err.code, status=err.status):
+                    resp = await self.client.post("/api/post_endpoint", json=body)
+                    self.assertEqual(resp.status, 502)
+                    self.assertEqual((await resp.json())["error"], expected)
+
     async def test_fr_endpoint_rejects_invalid_session_ids(self):
         # A list or object used to reach the session dict and fail with 500.
         for session_id in (["s4"], {"id": "s4"}, 5, None, "bad id"):
