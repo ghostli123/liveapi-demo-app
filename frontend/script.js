@@ -268,7 +268,10 @@ const SETTINGS_KEY = "liveapi-demo-settings";
 function loadSavedSettings() {
     let saved = {};
     try {
-        saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "null") || {};
+        const parsed = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "null");
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            saved = parsed;
+        }
     } catch {
         // Missing or corrupt; start from the page defaults.
     }

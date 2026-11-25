@@ -132,6 +132,7 @@ function loadApp(globals = {}, { radios = [] } = {}) {
         "handleRecordClick",
         "openModal",
         "closeModal",
+        "loadSavedSettings",
         "restoreSettings",
         "handleEnvironmentChange",
         "handleModelChange",
@@ -620,6 +621,59 @@ test("a malformed old settings cookie is skipped and deleted; restore goes on", 
     app.element("systemInstructions").value = "Edited";
     for (const listener of app.element("systemInstructions").listeners.input) listener();
     assert.equal(JSON.parse(storage.getItem(SETTINGS_KEY)).systemInstructions, "Edited");
+});
+
+test("loadSavedSettings ignores non-object localStorage JSON and preserves cookie migration", async () => {
+    for (const raw of ["123", '"abc"', "true", "[1,2]", "null", "false", "0", '""']) {
+        const storage = fakeStorage(new Map([[SETTINGS_KEY, raw]]));
+        const app = loadApp({ localStorage: storage });
+        const saved = app.context.loadSavedSettings();
+        assert.equal(typeof saved, "object", `raw=${raw} should yield an object`);
+        assert.notEqual(saved, null, `raw=${raw} should not yield null`);
+        assert.equal(Array.isArray(saved), false, `raw=${raw} should not yield an array`);
+        assert.deepEqual(JSON.parse(JSON.stringify(saved)), {});
+
+        const writes = [];
+        Object.defineProperty(app.document, "cookie", {
+            get: () => "CookieJar_location=europe-west1; CookieJar_systemInstructions=Be%20brief",
+            set: (value) => {
+                writes.push(value);
+            },
+        });
+        Object.assign(app.element("location"), {
+            value: "us-central1",
+            options: [{ value: "us-central1" }, { value: "europe-west1" }],
+        });
+        app.element("systemInstructions").value = "Page default";
+
+        await app.context.restoreSettings();
+        assert.equal(app.element("location").value, "europe-west1", `raw=${raw} dropped CookieJar_location`);
+        assert.equal(
+            app.element("systemInstructions").value,
+            "Be brief",
+            `raw=${raw} dropped CookieJar_systemInstructions`
+        );
+        assert.deepEqual(
+            writes.map((cookie) => cookie.split("=")[0]),
+            ["CookieJar_systemInstructions", "CookieJar_location"]
+        );
+        const persisted = JSON.parse(storage.getItem(SETTINGS_KEY));
+        assert.equal(persisted.location, "europe-west1");
+        assert.equal(persisted.systemInstructions, "Be brief");
+    }
+
+    // A valid saved object still takes precedence over legacy cookies.
+    const validStorage = fakeStorage(
+        new Map([[SETTINGS_KEY, JSON.stringify({ location: "us-west1", enableAvatarMode: false })]])
+    );
+    const validApp = loadApp({ localStorage: validStorage });
+    validApp.document.cookie = "CookieJar_location=europe-west1; CookieJar_systemInstructions=From%20cookie";
+    const merged = validApp.context.loadSavedSettings();
+    assert.deepEqual(JSON.parse(JSON.stringify(merged)), {
+        location: "us-west1",
+        enableAvatarMode: false,
+        systemInstructions: "From cookie",
+    });
 });
 
 /** The "Start speaking" / text input path, with a microphone that starts when the test says. */
