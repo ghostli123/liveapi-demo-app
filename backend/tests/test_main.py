@@ -1388,6 +1388,146 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(await main.SESSION_MANAGER.search_item("s10-race"), pending)
         await main.SESSION_MANAGER.delete_item("s10-race", pending)
 
+    async def test_shutdown_rejects_inflight_connect_without_leaking_expiry_task(self):
+        init_entered = threading.Event()
+        release_init = threading.Event()
+        before_tasks = set(asyncio.all_tasks())
+
+        def slow_init():
+            init_entered.set()
+            release_init.wait(timeout=5)
+            return mock.Mock()
+
+        with mock.patch.object(
+            main, "initialize_gemini_chat_session", side_effect=slow_init
+        ):
+            req_task = asyncio.create_task(
+                self.client.post(
+                    "/api/control",
+                    json={
+                        "command": "connect",
+                        "session_id": "s10-inflight-connect",
+                        "endpoint": "autopush-common",
+                        "location": "us-central1",
+                    },
+                )
+            )
+            await asyncio.wait_for(asyncio.to_thread(init_entered.wait, 5), 5)
+            await main.close_sessions_on_shutdown(self.client.app)
+            release_init.set()
+            resp = await asyncio.wait_for(req_task, 5)
+            body = await resp.json()
+
+        self.assertEqual(resp.status, 503)
+        self.assertIn("shutting down", body["error"].lower())
+        self.assertIsNone(
+            await main.SESSION_MANAGER.search_item("s10-inflight-connect")
+        )
+        # No pending expiry task should have been armed after shutdown began.
+        leaked = [
+            t
+            for t in (set(asyncio.all_tasks()) - before_tasks)
+            if not t.done()
+            and getattr(t.get_coro(), "__qualname__", None)
+            == "_remove_if_never_connected"
+        ]
+        self.assertEqual(leaked, [])
+
+        # Subsequent connect and /ws requests also fail fast with 503.
+        late_connect = await self.client.post(
+            "/api/control",
+            json={
+                "command": "connect",
+                "session_id": "s10-after-shutdown",
+                "endpoint": "autopush-common",
+                "location": "us-central1",
+            },
+        )
+        self.assertEqual(late_connect.status, 503)
+        self.assertIsNone(await main.SESSION_MANAGER.search_item("s10-after-shutdown"))
+
+        late_ws = await self.client.get("/ws?session_id=s10-after-shutdown")
+        self.assertEqual(late_ws.status, 503)
+
+    async def test_shutdown_closes_ws_suspended_in_prepare_with_going_away(self):
+        prepare_entered = asyncio.Event()
+        release_prepare = asyncio.Event()
+        orig_prepare = web.WebSocketResponse.prepare
+        orig_close = web.WebSocketResponse.close
+        close_errors: list[Exception] = []
+        start_called = False
+
+        async def slow_prepare(ws_self, request):
+            prepare_entered.set()
+            await release_prepare.wait()
+            return await orig_prepare(ws_self, request)
+
+        async def spy_close(ws_self, *args, **kwargs):
+            try:
+                return await orig_close(ws_self, *args, **kwargs)
+            except Exception as err:
+                close_errors.append(err)
+                raise
+
+        async def fake_start(wb_self):
+            nonlocal start_called
+            start_called = True
+
+        with (
+            mock.patch.object(web.WebSocketResponse, "prepare", slow_prepare),
+            mock.patch.object(web.WebSocketResponse, "close", spy_close),
+            mock.patch.object(
+                main.websocket_handler.WebsocketHandler,
+                "start_websocket",
+                fake_start,
+            ),
+        ):
+            await self.connect_session("s10-prepare-race")
+            ws_task = asyncio.create_task(
+                self.client.ws_connect("/ws?session_id=s10-prepare-race")
+            )
+            await asyncio.wait_for(prepare_entered.wait(), 5)
+
+            # Run shutdown while ws.prepare() has not yet created _writer.
+            await main.close_sessions_on_shutdown(self.client.app)
+            self.assertEqual(close_errors, [])
+
+            release_prepare.set()
+            ws = await asyncio.wait_for(ws_task, 5)
+            msg = await asyncio.wait_for(ws.receive(), 5)
+            await ws.close()
+
+        self.assertFalse(start_called)
+        self.assertEqual(close_errors, [])
+        self.assertEqual(msg.type, aiohttp.WSMsgType.CLOSE)
+        self.assertEqual(msg.data, 1001)
+        self.assertEqual(msg.extra, "Server restarting")
+        self.assertIsNone(await main.SESSION_MANAGER.search_item("s10-prepare-race"))
+
+    async def test_shutdown_discards_pending_record_reused_or_added_mid_shutdown(self):
+        await self.connect_session("s10-reuse-race")
+        orig_reuse = main.SESSION_MANAGER.reuse_pending
+
+        async def shutdown_during_reuse(session_id, ws_host):
+            result = await orig_reuse(session_id, ws_host)
+            await main.close_sessions_on_shutdown(self.client.app)
+            return result
+
+        with mock.patch.object(
+            main.SESSION_MANAGER, "reuse_pending", side_effect=shutdown_during_reuse
+        ):
+            resp = await self.client.post(
+                "/api/control",
+                json={
+                    "command": "connect",
+                    "session_id": "s10-reuse-race",
+                    "endpoint": "autopush-common",
+                    "location": "us-central1",
+                },
+            )
+        self.assertEqual(resp.status, 503)
+        self.assertIsNone(await main.SESSION_MANAGER.search_item("s10-reuse-race"))
+
     async def test_session_without_websocket_expires(self):
         with mock.patch.object(main, "PENDING_SESSION_TTL_S", 0.3):
             await self.connect_session("s5")

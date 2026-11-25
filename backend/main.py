@@ -76,6 +76,12 @@ SHUTDOWN_TIMEOUT_S = 5
 # SIGTERM before escalating to SIGKILL (fits inside Cloud Run's 10 s budget
 # alongside SHUTDOWN_TIMEOUT_S).
 GATEWAY_SHUTDOWN_TIMEOUT_S = 2
+_SHUTDOWN_CLOSE_CODE = 1001
+_SHUTDOWN_CLOSE_REASON = "Server restarting"
+_SHUTDOWN_CLOSE_TIMEOUT_S = 2
+_SHUTTING_DOWN_KEY: web.AppKey[asyncio.Event] = web.AppKey(
+    "shutting_down", asyncio.Event
+)
 
 _LOCATION_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
 _HOSTNAME_RE = re.compile(
@@ -449,6 +455,8 @@ class AiohttpToWebsocketsAdapter:
         raise websockets.exceptions.ConnectionClosed(None, None)
 
     async def close(self, code=1000, reason=""):
+        if not self.aio_ws.prepared:
+            return
         await self.aio_ws.close(code=code, message=reason.encode())
 
     @property
@@ -459,13 +467,35 @@ class AiohttpToWebsocketsAdapter:
 # --- HANDLERS ---
 
 
+def _is_shutting_down(app: web.Application) -> bool:
+    event = app.get(_SHUTTING_DOWN_KEY)
+    return event is not None and event.is_set()
+
+
+async def _discard_pending_on_shutdown(
+    session_id: str, record: session_management.SessionBaseModel
+) -> None:
+    if (
+        await SESSION_MANAGER.delete_if_pending(
+            session_id, record, reason="was pending at shutdown"
+        )
+        and record.expiry_task is not None
+    ):
+        await asyncio.gather(record.expiry_task, return_exceptions=True)
+
+
 async def aiohttp_websocket_handler(request: web.Request) -> web.StreamResponse:
     """Bridges a browser WebSocket to the upstream Live API session."""
+    if _is_shutting_down(request.app):
+        return web.Response(text="Server is shutting down", status=503)
+
     session_id = request.query.get("session_id")
     if not _is_valid_session_id(session_id):
         return web.Response(text="Missing or invalid session_id", status=400)
 
     session_handler = await SESSION_MANAGER.search_item(session_id)
+    if _is_shutting_down(request.app):
+        return web.Response(text="Server is shutting down", status=503)
     if not session_handler:
         return web.Response(text="No config record for session", status=404)
     if session_handler.websocket_handler:
@@ -498,12 +528,35 @@ async def aiohttp_websocket_handler(request: web.Request) -> web.StreamResponse:
     if not await SESSION_MANAGER.claim_websocket(
         session_id, session_handler, wb_handler
     ):
+        if _is_shutting_down(request.app):
+            return web.Response(text="Server is shutting down", status=503)
         return web.Response(text="Session already has a WebSocket", status=409)
+    if _is_shutting_down(request.app):
+        await SESSION_MANAGER.delete_item(session_id, session_handler)
+        return web.Response(text="Server is shutting down", status=503)
     try:
         await ws.prepare(request)
     except BaseException:
         await SESSION_MANAGER.delete_item(session_id, session_handler)
         raise
+
+    if _is_shutting_down(request.app):
+        await SESSION_MANAGER.delete_item(session_id, session_handler)
+        if not ws.closed:
+            try:
+                await asyncio.wait_for(
+                    ws.close(
+                        code=_SHUTDOWN_CLOSE_CODE,
+                        message=_SHUTDOWN_CLOSE_REASON.encode("utf-8"),
+                    ),
+                    timeout=_SHUTDOWN_CLOSE_TIMEOUT_S,
+                )
+            except TimeoutError:
+                logging.warning(
+                    "Session %s didn't acknowledge the shutdown close in time",
+                    session_id,
+                )
+        return ws
 
     try:
         await wb_handler.start_websocket()
@@ -623,6 +676,8 @@ async def handle_control_request(request: web.Request):
         return web.json_response({"removed": removed})
     if command != "connect":
         return _json_error("Invalid command", 400)
+    if _is_shutting_down(request.app):
+        return _json_error("Server is shutting down", 503)
 
     location = request_body.get("location")
     if isinstance(location, str):
@@ -639,6 +694,9 @@ async def handle_control_request(request: web.Request):
     if already_connected:
         return _json_error("Already running", 409)
     if existing:
+        if _is_shutting_down(request.app):
+            await _discard_pending_on_shutdown(session_id, existing)
+            return _json_error("Server is shutting down", 503)
         # Keep the pending record (preserving any fc_definitions already
         # posted to it) with the updated ws_host and refresh its expiry window
         # without re-running simulator init.
@@ -650,6 +708,8 @@ async def handle_control_request(request: web.Request):
         await SESSION_MANAGER.check_can_add(session_id, MAX_SESSIONS.value)
     except session_management.SessionAddError as e:
         return _add_refused_response(session_id, e)
+    if _is_shutting_down(request.app):
+        return _json_error("Server is shutting down", 503)
 
     fr_session, fr_error = None, ""
     try:
@@ -663,6 +723,8 @@ async def handle_control_request(request: web.Request):
             fr_error,
             err,
         )
+    if _is_shutting_down(request.app):
+        return _json_error("Server is shutting down", 503)
     session_handler = session_management.SessionBaseModel(
         session_id=session_id, ws_host=ws_host, fr_session=fr_session, fr_error=fr_error
     )
@@ -679,6 +741,11 @@ async def handle_control_request(request: web.Request):
     if record is None:
         await session_handler.del_session()
         return _json_error("Already running", 409)
+    if _is_shutting_down(request.app):
+        await _discard_pending_on_shutdown(session_id, record)
+        if record is not session_handler:
+            await session_handler.del_session()
+        return _json_error("Server is shutting down", 503)
     logging.info("Websocket host for session %s is set to: %s", session_id, ws_host)
     _arm_pending_expiry(session_id, record)
     if record is not session_handler:
@@ -1236,6 +1303,9 @@ async def close_sessions_on_shutdown(app: web.Application) -> None:
     drops them (browsers see 1006), and pending sessions' expiry tasks stay
     running until the loop closes.
     """
+    shutting_down = app.get(_SHUTTING_DOWN_KEY)
+    if shutting_down is not None:
+        shutting_down.set()
     sessions = await SESSION_MANAGER.all_items()
     if sessions:
         logging.info("Closing %d session(s) for shutdown", len(sessions))
@@ -1259,7 +1329,7 @@ async def close_sessions_on_shutdown(app: web.Application) -> None:
         return
     closing = asyncio.gather(
         *(
-            ws.close(code=1001, reason="Server restarting")
+            ws.close(code=_SHUTDOWN_CLOSE_CODE, reason=_SHUTDOWN_CLOSE_REASON)
             for ws in websockets_to_close
         ),
         return_exceptions=True,
@@ -1267,13 +1337,14 @@ async def close_sessions_on_shutdown(app: web.Application) -> None:
     # close() waits for each browser to acknowledge; don't let one that has
     # gone silent (asleep, offline) hold up the shutdown.
     try:
-        await asyncio.wait_for(closing, timeout=2)
+        await asyncio.wait_for(closing, timeout=_SHUTDOWN_CLOSE_TIMEOUT_S)
     except TimeoutError:
         logging.warning("Some sessions didn't acknowledge the close in time")
 
 
 async def create_app():
     app = web.Application(middlewares=[reject_cross_origin, revalidate_static_files])
+    app[_SHUTTING_DOWN_KEY] = asyncio.Event()
     app.on_shutdown.append(close_sessions_on_shutdown)
 
     # API and WS Routes
