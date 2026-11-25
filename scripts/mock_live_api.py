@@ -45,6 +45,42 @@ AUDIO_MIME_TYPE = f"audio/pcm;rate={OUTPUT_RATE}"
 REPLY_AUDIO_CHUNKS = 3
 DEFAULT_GOAWAY_S = 1.0
 MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+# Close codes allowed in RFC 6455 close frames (excluding 1004-1006 and 1015).
+VALID_STANDARD_CLOSE_CODES = frozenset(
+    {1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014}
+)
+MAX_CLOSE_REASON_BYTES = 123
+
+
+def _parse_goaway_seconds(args: list[str]) -> float | None:
+    """Returns a non-negative finite delay for /goaway [seconds], or None."""
+    if not args:
+        return DEFAULT_GOAWAY_S
+    if len(args) > 1:
+        return None
+    try:
+        seconds = float(args[0])
+    except ValueError:
+        return None
+    if not math.isfinite(seconds) or seconds < 0 or math.copysign(1.0, seconds) < 0:
+        return None
+    return seconds
+
+
+def _parse_close_args(args: list[str]) -> tuple[int, str] | None:
+    """Returns (code, reason) for /close <code> [reason], or None if invalid."""
+    if not args:
+        return None
+    try:
+        code = int(args[0])
+    except ValueError:
+        return None
+    if code not in VALID_STANDARD_CLOSE_CODES and not (3000 <= code < 5000):
+        return None
+    reason = args[1] if len(args) > 1 else ""
+    if len(reason.encode("utf-8")) > MAX_CLOSE_REASON_BYTES:
+        return None
+    return code, reason
 
 
 def tone_chunk(index: int, duration_s: float = 0.1, frequency: float = 440) -> str:
@@ -110,6 +146,8 @@ class MockLiveApi:
         try:
             first = json.loads(await connection.recv())
             setup = first["setup"]
+            if not isinstance(setup, dict):
+                raise TypeError("setup must be a JSON object")
         except (ValueError, KeyError, TypeError):
             await connection.close(1007, "The first message must be a setup message")
             return
@@ -159,16 +197,30 @@ class MockSession:
         await self.connection.send(json.dumps(message).encode())
 
     async def run(self) -> None:
-        await self.send({"setupComplete": {}})
-        async for raw in self.connection:
-            message = json.loads(raw)
-            content = _field(message, "clientContent", "client_content")
-            tool_response = _field(message, "toolResponse", "tool_response")
-            if content:
-                await self.on_text_turn(content)
-            elif tool_response and self.pending_turn is not None:
-                await self.on_tool_response(tool_response)
-            # Realtime audio and video are accepted and ignored.
+        try:
+            await self.send({"setupComplete": {}})
+            async for raw in self.connection:
+                try:
+                    message = json.loads(raw)
+                except (ValueError, TypeError):
+                    await self.connection.close(1007, "Messages must be JSON objects")
+                    return
+                if not isinstance(message, dict):
+                    await self.connection.close(1007, "Messages must be JSON objects")
+                    return
+                content = _field(message, "clientContent", "client_content")
+                tool_response = _field(message, "toolResponse", "tool_response")
+                if isinstance(content, dict) and content:
+                    await self.on_text_turn(content)
+                elif (
+                    isinstance(tool_response, dict)
+                    and tool_response
+                    and self.pending_turn is not None
+                ):
+                    await self.on_tool_response(tool_response)
+                # Realtime audio and video are accepted and ignored.
+        finally:
+            await self._cancel_expiry()
 
     async def on_text_turn(self, content: dict) -> None:
         text = " ".join(
@@ -247,18 +299,46 @@ class MockSession:
                 {"sessionResumptionUpdate": {"newHandle": handle, "resumable": True}}
             )
 
+    async def _cancel_expiry(self) -> None:
+        task = self.expiry
+        self.expiry = None
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
     async def close_after(self, seconds: float) -> None:
-        await asyncio.sleep(seconds)
-        await self.connection.close(1001, "Connection expired")
+        try:
+            await asyncio.sleep(seconds)
+            await self.connection.close(1001, "Connection expired")
+        except websockets.exceptions.ConnectionClosed:
+            pass
 
     async def on_command(self, text: str) -> None:
         command, *args = text.split(maxsplit=2)
         if command == "/goaway":
-            seconds = float(args[0]) if args else DEFAULT_GOAWAY_S
+            seconds = _parse_goaway_seconds(args)
+            if seconds is None:
+                await self.reply(
+                    text,
+                    "Invalid /goaway command: expected /goaway [non-negative seconds]",
+                )
+                return
+            await self._cancel_expiry()
             await self.send({"goAway": {"timeLeft": f"{seconds:g}s"}})
             self.expiry = asyncio.create_task(self.close_after(seconds))
-        elif command == "/close" and args:
-            await self.connection.close(int(args[0]), args[1] if len(args) > 1 else "")
+        elif command == "/close":
+            parsed = _parse_close_args(args)
+            if parsed is None:
+                await self.reply(
+                    text,
+                    "Invalid /close command: expected /close <valid code> [reason <= 123 UTF-8 bytes]",
+                )
+                return
+            code, reason = parsed
+            await self._cancel_expiry()
+            await self.connection.close(code, reason)
         else:
             await self.reply(text, f"Unknown command: {command}")
 

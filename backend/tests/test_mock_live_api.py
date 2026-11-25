@@ -223,14 +223,178 @@ class MockLiveApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(msg.extra, "Internal error")
 
 
+def _close_after_tasks():
+    code = mock_live_api.MockSession.close_after.__code__
+    return [
+        t
+        for t in asyncio.all_tasks()
+        if not t.done() and getattr(t.get_coro(), "cr_code", None) is code
+    ]
+
+
+async def _wait_for_no_close_after_tasks(timeout: float = TIMEOUT_S) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while _close_after_tasks():
+        if asyncio.get_running_loop().time() >= deadline:
+            break
+        await asyncio.sleep(0.02)
+
+
 class MockLiveApiDirectTest(unittest.IsolatedAsyncioTestCase):
     async def test_first_message_must_be_setup(self):
         async with mock_live_api.MockLiveApi() as api:
+            for payload in (
+                text_turn("hi"),
+                {"setup": None},
+                {"setup": ["not-an-object"]},
+            ):
+                with self.subTest(payload=payload):
+                    async with websockets.connect(f"ws://127.0.0.1:{api.port}/x") as ws:
+                        await ws.send(json.dumps(payload))
+                        with self.assertRaises(websockets.exceptions.ConnectionClosed):
+                            await asyncio.wait_for(ws.recv(), TIMEOUT_S)
+                        self.assertEqual(ws.close_code, 1007)
+
+    async def test_goaway_cancels_prior_task_and_cleans_up_on_disconnect(self):
+        async with mock_live_api.MockLiveApi() as api:
             async with websockets.connect(f"ws://127.0.0.1:{api.port}/x") as ws:
-                await ws.send(json.dumps(text_turn("hi")))
+                await ws.send(json.dumps(setup_message(["TEXT"])))
+                self.assertEqual(
+                    json.loads(await asyncio.wait_for(ws.recv(), TIMEOUT_S)),
+                    {"setupComplete": {}},
+                )
+                await ws.send(json.dumps(text_turn("/goaway 10")))
+                self.assertEqual(
+                    json.loads(await asyncio.wait_for(ws.recv(), TIMEOUT_S)),
+                    {"goAway": {"timeLeft": "10s"}},
+                )
+                first_tasks = _close_after_tasks()
+                self.assertEqual(len(first_tasks), 1)
+
+                await ws.send(json.dumps(text_turn("/goaway 20")))
+                self.assertEqual(
+                    json.loads(await asyncio.wait_for(ws.recv(), TIMEOUT_S)),
+                    {"goAway": {"timeLeft": "20s"}},
+                )
+                self.assertTrue(first_tasks[0].cancelled())
+                second_tasks = _close_after_tasks()
+                self.assertEqual(len(second_tasks), 1)
+                self.assertIsNot(second_tasks[0], first_tasks[0])
+
+            await _wait_for_no_close_after_tasks()
+            self.assertEqual(_close_after_tasks(), [])
+            self.assertTrue(second_tasks[0].cancelled())
+
+    async def test_close_command_cancels_pending_goaway_task(self):
+        async with mock_live_api.MockLiveApi() as api:
+            async with websockets.connect(f"ws://127.0.0.1:{api.port}/x") as ws:
+                await ws.send(json.dumps(setup_message(["TEXT"])))
+                await asyncio.wait_for(ws.recv(), TIMEOUT_S)
+                await ws.send(json.dumps(text_turn("/goaway 10")))
+                await asyncio.wait_for(ws.recv(), TIMEOUT_S)
+                tasks = _close_after_tasks()
+                self.assertEqual(len(tasks), 1)
+
+                await ws.send(json.dumps(text_turn("/close 3000 Custom close")))
                 with self.assertRaises(websockets.exceptions.ConnectionClosed):
                     await asyncio.wait_for(ws.recv(), TIMEOUT_S)
-                self.assertEqual(ws.close_code, 1007)
+                self.assertEqual(ws.close_code, 3000)
+                self.assertEqual(ws.close_reason, "Custom close")
+
+            await _wait_for_no_close_after_tasks()
+            self.assertEqual(_close_after_tasks(), [])
+            self.assertTrue(tasks[0].cancelled())
+
+    async def test_malformed_goaway_and_close_commands_reply_without_crashing(self):
+        async with mock_live_api.MockLiveApi() as api:
+            async with websockets.connect(f"ws://127.0.0.1:{api.port}/x") as ws:
+                await ws.send(json.dumps(setup_message(["TEXT"])))
+                await asyncio.wait_for(ws.recv(), TIMEOUT_S)
+
+                async def receive_text_reply():
+                    text = ""
+                    while True:
+                        msg = json.loads(await asyncio.wait_for(ws.recv(), TIMEOUT_S))
+                        parts = (
+                            msg.get("serverContent", {})
+                            .get("modelTurn", {})
+                            .get("parts", [])
+                        )
+                        for part in parts:
+                            text += part.get("text", "")
+                        if msg.get("serverContent", {}).get("turnComplete"):
+                            return text
+
+                for cmd in (
+                    "/goaway abc",
+                    "/goaway -1",
+                    "/goaway -0",
+                    "/goaway nan",
+                    "/goaway inf",
+                    "/goaway 1 extra",
+                ):
+                    with self.subTest(cmd=cmd):
+                        await ws.send(json.dumps(text_turn(cmd)))
+                        self.assertIn(
+                            "Invalid /goaway command", await receive_text_reply()
+                        )
+                        self.assertEqual(_close_after_tasks(), [])
+
+                for cmd in (
+                    "/close",
+                    "/close abc",
+                    "/close 5 x",
+                    "/close 1004",
+                    "/close 1005",
+                    "/close 1006",
+                    "/close 1015",
+                    "/close 2999",
+                    "/close 5000",
+                    "/close 1008 " + "x" * 124,
+                ):
+                    with self.subTest(cmd=cmd):
+                        await ws.send(json.dumps(text_turn(cmd)))
+                        self.assertIn(
+                            "Invalid /close command", await receive_text_reply()
+                        )
+
+                # Session stays alive and still accepts valid turns and commands.
+                await ws.send(json.dumps(text_turn("still here")))
+                self.assertIn("You said: still here", await receive_text_reply())
+
+                # A malformed /goaway does not cancel an active valid /goaway.
+                await ws.send(json.dumps(text_turn("/goaway 0.3")))
+                self.assertEqual(
+                    json.loads(await asyncio.wait_for(ws.recv(), TIMEOUT_S)),
+                    {"goAway": {"timeLeft": "0.3s"}},
+                )
+                await ws.send(json.dumps(text_turn("/goaway abc")))
+                self.assertIn("Invalid /goaway command", await receive_text_reply())
+                with self.assertRaises(websockets.exceptions.ConnectionClosed):
+                    await asyncio.wait_for(ws.recv(), TIMEOUT_S)
+                self.assertEqual(ws.close_code, 1001)
+
+            await _wait_for_no_close_after_tasks()
+            self.assertEqual(_close_after_tasks(), [])
+
+    async def test_malformed_post_setup_frame_closes_1007_and_cancels_expiry(self):
+        async with mock_live_api.MockLiveApi() as api:
+            for raw in ("not-json", "[]", "null"):
+                with self.subTest(raw=raw):
+                    async with websockets.connect(f"ws://127.0.0.1:{api.port}/x") as ws:
+                        await ws.send(json.dumps(setup_message(["TEXT"])))
+                        await asyncio.wait_for(ws.recv(), TIMEOUT_S)
+                        await ws.send(json.dumps(text_turn("/goaway 10")))
+                        await asyncio.wait_for(ws.recv(), TIMEOUT_S)
+                        self.assertEqual(len(_close_after_tasks()), 1)
+
+                        await ws.send(raw)
+                        with self.assertRaises(websockets.exceptions.ConnectionClosed):
+                            await asyncio.wait_for(ws.recv(), TIMEOUT_S)
+                        self.assertEqual(ws.close_code, 1007)
+
+                    await _wait_for_no_close_after_tasks()
+                    self.assertEqual(_close_after_tasks(), [])
 
 
 if __name__ == "__main__":
