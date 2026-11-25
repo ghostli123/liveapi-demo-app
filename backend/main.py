@@ -971,6 +971,11 @@ def _validated_port(parts: urllib.parse.SplitResult) -> int | None:
     return port
 
 
+def _has_control_or_space(value: str) -> bool:
+    """Whether `value` contains whitespace or ASCII control chars (0x00-0x1F, 0x7F)."""
+    return any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in value)
+
+
 def _allowed_host_entry(entry: str) -> tuple[str, int | None]:
     """One --allowed_hosts entry as (bare host name, port or None).
 
@@ -986,6 +991,8 @@ def _allowed_host_entry(entry: str) -> tuple[str, int | None]:
         raise ValueError("non-ASCII host name; use punycode")
     if "*" in entry:
         raise ValueError("wildcards are not supported; use '*' alone or a host name")
+    if _has_control_or_space(entry):
+        raise ValueError("not a host name")
     parts = urllib.parse.urlsplit("//" + entry)  # Raises for e.g. "[".
     port = _validated_port(parts)
     # A scheme or path ("https://demo.example") would otherwise parse to a
@@ -994,7 +1001,6 @@ def _allowed_host_entry(entry: str) -> tuple[str, int | None]:
         parts.netloc != entry
         or "@" in entry
         or "\\" in entry
-        or any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in entry)
         or not parts.hostname
         or not _has_valid_host_labels(parts.hostname)
     ):
@@ -1035,11 +1041,11 @@ _DEFAULT_PORTS = {"http": 80, "https": 443}
 def _parse_origin(origin: str) -> tuple[str, str, int] | None:
     """Parses an HTTP(S) Origin header into (scheme, hostname, port), or None.
 
-    Rejects non-ASCII, whitespace, non-HTTP(S) schemes, userinfo, backslashes,
-    trailing empty ports, invalid ports, malformed dot-labels, and
-    path/query/fragment components.
+    Rejects non-ASCII, whitespace, ASCII control characters, non-HTTP(S)
+    schemes, userinfo, backslashes, trailing empty ports, invalid ports,
+    malformed dot-labels, and path/query/fragment components.
     """
-    if not origin.isascii() or any(c.isspace() for c in origin):
+    if not origin.isascii() or _has_control_or_space(origin):
         return None
     try:
         parts = urllib.parse.urlsplit(origin)
@@ -1138,13 +1144,14 @@ def _parse_host_header(raw_host: str) -> tuple[str, int | None]:
     # other bytes to surrogates, which the 403 reply can't encode.
     if not raw_host.isascii():
         raise ValueError("non-ASCII Host")
+    if _has_control_or_space(raw_host):
+        raise ValueError("malformed Host")
     parts = urllib.parse.urlsplit("//" + raw_host)  # Raises for e.g. "[".
     port = _validated_port(parts)
     if (
         parts.netloc != raw_host
         or "@" in raw_host
         or "\\" in raw_host
-        or any(c.isspace() for c in raw_host)
         or not parts.hostname
         or not _has_valid_host_labels(parts.hostname)
     ):
@@ -1195,8 +1202,17 @@ async def reject_cross_origin(request: web.Request, handler):
                 text=f"Host {host!r} is not allowed; start the server with --allowed_hosts={host}",
                 status=403,
             )
-        origin = request.headers.get("Origin")
-        if origin is not None:
+        origins = request.headers.getall("Origin", ())
+        if len(origins) > 1:
+            logging.warning(
+                "Rejected %s %r with multiple Origin headers %r",
+                request.method,
+                request.path,
+                origins,
+            )
+            return web.Response(text="Cross-origin request rejected", status=403)
+        if origins:
+            origin = origins[0]
             # Only a same-origin match or an explicit --allowed_hosts entry: the
             # defaults above (e.g. any IP address) are fine for Host but not
             # for the page making the request.

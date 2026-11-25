@@ -563,9 +563,20 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             ):
                 status = await self._raw_request(method, path, f"Host: {bad_host}")
                 self.assertEqual(status, 400, (method, bad_host))
+        for bad_host in [
+            "localhost\x00:8080",
+            "localhost\x01:8080",
+            "localhost\x1f:8080",
+            "localhost\x7f:8080",
+            "localhost\t:8080",
+            "localhost\r:8080",
+            "localhost\n:8080",
+        ]:
+            with self.assertRaises(ValueError, msg=repr(bad_host)):
+                main._parse_host_header(bad_host)
         # Malformed Origin headers (non-HTTP(S) scheme, userinfo, trailing empty
-        # port, malformed dot-labels, or path/query/fragment) must be rejected
-        # even if their hostname matches Host or --allowed_hosts.
+        # port, malformed dot-labels, control characters, or path/query/fragment)
+        # must be rejected even if their hostname matches Host or --allowed_hosts.
         for bad_origin in [
             "http://.",
             "http://..",
@@ -574,8 +585,15 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             "http://localhost..",
             "http://localhost:",
             "http://[::1]:",
+            "http://localhost\x00:8080",
+            "http://localhost\x01:8080",
+            "http://localhost\x1f:8080",
+            "http://localhost\x7f:8080",
+            "http://localhost\t:8080",
+            "http://localhost\r:8080",
+            "http://localhost\n:8080",
         ]:
-            self.assertIsNone(main._parse_origin(bad_origin), bad_origin)
+            self.assertIsNone(main._parse_origin(bad_origin), repr(bad_origin))
         own_netloc = f"{self.client.host}:{self.client.port}"
         for bad_origin in [
             f"javascript://{own_netloc}",
@@ -2384,6 +2402,81 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resp.status, 200)
 
+    async def test_rejects_duplicate_origin_headers(self):
+        own_origin = f"http://{self.client.host}:{self.client.port}"
+        payload = json.dumps(
+            {
+                "command": "connect",
+                "session_id": "s7-dup",
+                "endpoint": "autopush-common",
+                "location": "us-central1",
+            }
+        ).encode()
+
+        async def send_raw(method: str, path: str, headers: list[tuple[str, str]]):
+            reader, writer = await asyncio.open_connection(
+                self.client.host, self.client.port
+            )
+            try:
+                head = [
+                    f"{method} {path} HTTP/1.1",
+                    f"Host: {self.client.host}:{self.client.port}",
+                    *(f"{name}: {value}" for name, value in headers),
+                ]
+                if method == "POST":
+                    head.extend(
+                        [
+                            "Content-Type: application/json",
+                            f"Content-Length: {len(payload)}",
+                        ]
+                    )
+                head.append("Connection: close")
+                raw = ("\r\n".join(head) + "\r\n\r\n").encode("latin-1")
+                if method == "POST":
+                    raw += payload
+                writer.write(raw)
+                await writer.drain()
+                data = await asyncio.wait_for(reader.read(4096), timeout=3)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+            head_bytes, _, body_bytes = data.partition(b"\r\n\r\n")
+            status = int(head_bytes.split(b"\r\n", 1)[0].split()[1])
+            return status, body_bytes.decode("utf-8", errors="replace")
+
+        cases = [
+            [("Origin", own_origin), ("Origin", "https://evil.example")],
+            [("Origin", own_origin), ("Origin", own_origin)],
+            [("Origin", own_origin), ("origin", "https://evil.example")],
+        ]
+        for header_list in cases:
+            for method, path in (
+                ("POST", "/api/control"),
+                ("POST", "/api/post_endpoint"),
+                ("GET", "/ws?session_id=s7-dup"),
+            ):
+                status, text = await send_raw(method, path, header_list)
+                self.assertEqual(status, 403, (method, path, header_list))
+                self.assertEqual(
+                    text,
+                    "Cross-origin request rejected",
+                    (method, path, header_list),
+                )
+
+        with flagsaver.flagsaver(allowed_hosts=["demo.example.com"]):
+            status, text = await send_raw(
+                "POST",
+                "/api/control",
+                [
+                    ("Origin", "https://demo.example.com"),
+                    ("Origin", "https://evil.example"),
+                ],
+            )
+            self.assertEqual(status, 403)
+            self.assertEqual(text, "Cross-origin request rejected")
+
+        self.assertIsNone(await main.SESSION_MANAGER.search_item("s7-dup"))
+
     async def test_same_origin_normalizes_host_case_and_default_ports(self):
         body = {
             "command": "connect",
@@ -2474,6 +2567,13 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
         requests = [(path, "Host: evil.example") for path in paths]
         requests += [(path, "Origin: https://evil.example") for path in paths]
         requests.append(("/api/control", "Origin: https://evil.example\x85" + forged))
+        own_origin = f"http://{self.client.host}:{self.client.port}"
+        requests.append(
+            (
+                "/api/control",
+                f"Origin: {own_origin}\r\nOrigin: https://evil.example\x85{forged}",
+            )
+        )
         for path, header in requests:
             with self.assertLogs("absl", level="WARNING") as logs:
                 status = await self._raw_request("POST", path, header)
