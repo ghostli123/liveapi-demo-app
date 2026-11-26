@@ -101,13 +101,22 @@ def _field(obj: dict, camel: str, snake: str):
 
 
 def declared_functions(setup: dict) -> list[str]:
-    names = []
-    for tool in setup.get("tools") or []:
-        for declaration in (
-            _field(tool, "functionDeclarations", "function_declarations") or []
-        ):
-            if declaration.get("name"):
-                names.append(declaration["name"])
+    names: list[str] = []
+    tools = setup.get("tools")
+    if not isinstance(tools, list):
+        return names
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        declarations = _field(tool, "functionDeclarations", "function_declarations")
+        if not isinstance(declarations, list):
+            continue
+        for declaration in declarations:
+            if not isinstance(declaration, dict):
+                continue
+            name = declaration.get("name")
+            if isinstance(name, str) and name.strip():
+                names.append(name)
     return names
 
 
@@ -145,6 +154,8 @@ class MockLiveApi:
     async def handler(self, connection) -> None:
         try:
             first = json.loads(await connection.recv())
+            if not isinstance(first, dict):
+                raise TypeError("first message must be a JSON object")
             setup = first["setup"]
             if not isinstance(setup, dict):
                 raise TypeError("setup must be a JSON object")
@@ -154,9 +165,15 @@ class MockLiveApi:
         except websockets.exceptions.ConnectionClosed:
             return
         self.setups.append(setup)
-        model = str(setup.get("model", "")).rsplit("/", 1)[-1]
+        raw_model = setup.get("model")
+        model = (
+            raw_model.rsplit("/", 1)[-1].strip() if isinstance(raw_model, str) else ""
+        )
         if not model or model.startswith("no-such-"):
-            await connection.close(1008, f"Publisher model `{model}` was not found")
+            reason = f"Publisher model `{model}` was not found"
+            if len(reason.encode("utf-8")) > MAX_CLOSE_REASON_BYTES:
+                reason = "Publisher model was not found"
+            await connection.close(1008, reason)
             return
         session = MockSession(self, connection, setup)
         logging.info("Session started: model %s", model)
@@ -176,19 +193,25 @@ class MockSession:
     def __init__(self, api: MockLiveApi, connection, setup: dict):
         self.api = api
         self.connection = connection
-        config = _field(setup, "generationConfig", "generation_config") or {}
+        config = _field(setup, "generationConfig", "generation_config")
+        if not isinstance(config, dict):
+            config = {}
         modalities = _field(config, "responseModalities", "response_modalities")
         self.text_only = modalities == ["TEXT"]
-        self.transcribe = (
-            _field(setup, "outputAudioTranscription", "output_audio_transcription")
-            is not None
+        self.transcribe = isinstance(
+            _field(setup, "outputAudioTranscription", "output_audio_transcription"),
+            dict,
         )
         self.functions = declared_functions(setup)
         resumption = _field(setup, "sessionResumption", "session_resumption")
-        self.resumable = resumption is not None
-        handle = (resumption or {}).get("handle")
+        self.resumable = isinstance(resumption, dict)
+        handle = resumption.get("handle") if isinstance(resumption, dict) else None
         # An unknown handle starts a new conversation.
-        self.history = list(api.conversations.get(handle or "", []))
+        self.history = (
+            list(api.conversations.get(handle, []))
+            if isinstance(handle, str) and handle
+            else []
+        )
         self.pending_turn: str | None = None
         self.expiry: asyncio.Task | None = None
 
@@ -223,11 +246,22 @@ class MockSession:
             await self._cancel_expiry()
 
     async def on_text_turn(self, content: dict) -> None:
-        text = " ".join(
-            part.get("text", "")
-            for turn in content.get("turns") or []
-            for part in turn.get("parts") or []
-        ).strip()
+        turns = content.get("turns")
+        texts: list[str] = []
+        if isinstance(turns, list):
+            for turn in turns:
+                if not isinstance(turn, dict):
+                    continue
+                parts = turn.get("parts")
+                if not isinstance(parts, list):
+                    continue
+                for part in parts:
+                    if not isinstance(part, dict):
+                        continue
+                    part_text = part.get("text")
+                    if isinstance(part_text, str):
+                        texts.append(part_text)
+        text = " ".join(texts).strip()
         if text.startswith("/"):
             await self.on_command(text)
             return
@@ -248,10 +282,16 @@ class MockSession:
 
     async def on_tool_response(self, tool_response: dict) -> None:
         responses = _field(tool_response, "functionResponses", "function_responses")
-        results = "; ".join(
-            f"{r.get('name')} returned {json.dumps(r.get('response'))}"
-            for r in responses or []
+        entries = (
+            [
+                f"{r.get('name')} returned {json.dumps(r.get('response'))}"
+                for r in responses
+                if isinstance(r, dict)
+            ]
+            if isinstance(responses, list)
+            else []
         )
+        results = "; ".join(entries)
         text, self.pending_turn = self.pending_turn or "", None
         await self.reply(text, results)
 

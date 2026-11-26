@@ -396,6 +396,226 @@ class MockLiveApiDirectTest(unittest.IsolatedAsyncioTestCase):
                     await _wait_for_no_close_after_tasks()
                     self.assertEqual(_close_after_tasks(), [])
 
+    def test_declared_functions_ignores_malformed_entries(self):
+        for bad_tools in (None, 123, "bad", {"function_declarations": []}):
+            with self.subTest(bad_tools=bad_tools):
+                self.assertEqual(
+                    mock_live_api.declared_functions({"tools": bad_tools}), []
+                )
+
+        setup = {
+            "tools": [
+                None,
+                123,
+                "bad",
+                [],
+                {"function_declarations": 123},
+                {"functionDeclarations": "bad"},
+                {
+                    "function_declarations": [
+                        None,
+                        42,
+                        "bad",
+                        [],
+                        {"name": None},
+                        {"name": 123},
+                        {"name": ["fn"]},
+                        {"name": ""},
+                        {"name": "   "},
+                        {"name": "get_weather"},
+                    ]
+                },
+                {
+                    "functionDeclarations": [
+                        {"name": "lookup_order"},
+                    ]
+                },
+            ]
+        }
+        self.assertEqual(
+            mock_live_api.declared_functions(setup),
+            ["get_weather", "lookup_order"],
+        )
+
+    async def test_malformed_setup_nested_fields_do_not_crash(self):
+        async with mock_live_api.MockLiveApi() as api:
+            for label, setup in (
+                (
+                    "non-dict generationConfig",
+                    {"model": "models/m", "generationConfig": "bad"},
+                ),
+                (
+                    "non-dict sessionResumption",
+                    {"model": "models/m", "sessionResumption": "bad"},
+                ),
+                (
+                    "unhashable resumption handle list",
+                    {"model": "models/m", "sessionResumption": {"handle": ["x"]}},
+                ),
+                (
+                    "unhashable resumption handle dict",
+                    {"model": "models/m", "sessionResumption": {"handle": {"a": 1}}},
+                ),
+                (
+                    "non-dict outputAudioTranscription",
+                    {"model": "models/m", "outputAudioTranscription": False},
+                ),
+                (
+                    "non-list tools",
+                    {"model": "models/m", "tools": 123},
+                ),
+                (
+                    "non-dict tool entry",
+                    {"model": "models/m", "tools": ["bad"]},
+                ),
+                (
+                    "non-list functionDeclarations",
+                    {"model": "models/m", "tools": [{"function_declarations": 123}]},
+                ),
+                (
+                    "non-dict declaration entry",
+                    {
+                        "model": "models/m",
+                        "tools": [{"function_declarations": ["bad"]}],
+                    },
+                ),
+                (
+                    "non-string declaration name",
+                    {
+                        "model": "models/m",
+                        "tools": [{"function_declarations": [{"name": 123}]}],
+                    },
+                ),
+            ):
+                with self.subTest(label=label):
+                    async with websockets.connect(f"ws://127.0.0.1:{api.port}/x") as ws:
+                        await ws.send(json.dumps({"setup": setup}))
+                        self.assertEqual(
+                            json.loads(await asyncio.wait_for(ws.recv(), TIMEOUT_S)),
+                            {"setupComplete": {}},
+                        )
+                        await ws.send(json.dumps(text_turn("hello")))
+                        messages = []
+                        while True:
+                            msg = json.loads(
+                                await asyncio.wait_for(ws.recv(), TIMEOUT_S)
+                            )
+                            messages.append(msg)
+                            if msg.get("serverContent", {}).get("turnComplete"):
+                                break
+                        if label == "non-dict outputAudioTranscription":
+                            self.assertFalse(
+                                any(
+                                    "outputTranscription" in m.get("serverContent", {})
+                                    for m in messages
+                                )
+                            )
+
+    async def test_invalid_or_overlong_model_closes_1008(self):
+        async with mock_live_api.MockLiveApi() as api:
+            for model in (
+                None,
+                123,
+                ["m"],
+                "models/   ",
+                "models/no-such-" + "a" * 200,
+            ):
+                with self.subTest(model=model):
+                    async with websockets.connect(f"ws://127.0.0.1:{api.port}/x") as ws:
+                        await ws.send(json.dumps({"setup": {"model": model}}))
+                        with self.assertRaises(websockets.exceptions.ConnectionClosed):
+                            await asyncio.wait_for(ws.recv(), TIMEOUT_S)
+                        self.assertEqual(ws.close_code, 1008)
+                        self.assertIsNotNone(ws.close_reason)
+                        assert ws.close_reason is not None
+                        self.assertLessEqual(
+                            len(ws.close_reason.encode("utf-8")),
+                            mock_live_api.MAX_CLOSE_REASON_BYTES,
+                        )
+
+    async def test_malformed_text_turns_and_tool_responses_do_not_crash(self):
+        async with mock_live_api.MockLiveApi() as api:
+            tools = [{"function_declarations": [{"name": "get_weather"}]}]
+            async with websockets.connect(f"ws://127.0.0.1:{api.port}/x") as ws:
+                await ws.send(json.dumps(setup_message(["TEXT"], tools=tools)))
+                await asyncio.wait_for(ws.recv(), TIMEOUT_S)
+
+                async def receive_text_reply():
+                    text = ""
+                    while True:
+                        msg = json.loads(await asyncio.wait_for(ws.recv(), TIMEOUT_S))
+                        parts = (
+                            msg.get("serverContent", {})
+                            .get("modelTurn", {})
+                            .get("parts", [])
+                        )
+                        for part in parts:
+                            text += part.get("text", "")
+                        if msg.get("serverContent", {}).get("turnComplete"):
+                            return text
+
+                for label, content, expected in (
+                    ("non-list turns", {"turns": 123}, "You said: "),
+                    ("string turns", {"turns": "bad"}, "You said: "),
+                    ("non-dict turn", {"turns": [None, "bad", 123]}, "You said: "),
+                    ("non-list parts", {"turns": [{"parts": 123}]}, "You said: "),
+                    (
+                        "non-dict part",
+                        {"turns": [{"parts": [None, "bad", 42]}]},
+                        "You said: ",
+                    ),
+                    (
+                        "non-string part text",
+                        {
+                            "turns": [
+                                {
+                                    "parts": [
+                                        {"text": None},
+                                        {"text": 42},
+                                        {"text": ["a"]},
+                                        {"text": "valid"},
+                                    ]
+                                }
+                            ]
+                        },
+                        "You said: valid",
+                    ),
+                ):
+                    with self.subTest(label=label):
+                        await ws.send(json.dumps({"client_content": content}))
+                        self.assertIn(expected, await receive_text_reply())
+
+                for label, responses, expected in (
+                    ("non-list functionResponses", 123, ""),
+                    ("string functionResponses", "bad", ""),
+                    (
+                        "mixed functionResponses entries",
+                        [
+                            None,
+                            "bad",
+                            42,
+                            {"name": "get_weather", "response": {"c": 21}},
+                        ],
+                        'get_weather returned {"c": 21}',
+                    ),
+                ):
+                    with self.subTest(label=label):
+                        await ws.send(json.dumps(text_turn("Call get_weather")))
+                        call_msg = json.loads(
+                            await asyncio.wait_for(ws.recv(), TIMEOUT_S)
+                        )
+                        self.assertIn("toolCall", call_msg)
+                        await ws.send(
+                            json.dumps(
+                                {"toolResponse": {"functionResponses": responses}}
+                            )
+                        )
+                        self.assertEqual(await receive_text_reply(), expected)
+
+                # Session remains healthy after malformed payloads.
+                await ws.send(json.dumps(text_turn("final check")))
+                self.assertIn("You said: final check", await receive_text_reply())
+
 
 if __name__ == "__main__":
     unittest.main()
