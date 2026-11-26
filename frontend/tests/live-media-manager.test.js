@@ -3245,3 +3245,190 @@ test("appendNextChunk and processQueue handle null, symbol, and null-prototype a
     assert.equal(manager.chunkQueue.length, 1);
     assert.deepEqual(errors, []);
 });
+
+test("initiateSession closes the partial peer connection on failure while preserving local media", async () => {
+    const scenarios = [
+        { name: "createDataChannel throws", failAt: "createDataChannel", thrown: new Error("dc boom") },
+        { name: "sendonly addTransceiver throws", failAt: "sendVideoTransceiver", thrown: new Error("send transceiver boom") },
+        { name: "mic replaceTrack rejects", failAt: "micReplaceTrack", thrown: new Error("mic replace boom") },
+        { name: "video replaceTrack rejects", failAt: "videoReplaceTrack", thrown: new Error("video replace boom") },
+        { name: "recvonly addTransceiver throws", failAt: "recvVideoTransceiver", thrown: new Error("recv transceiver boom") },
+        { name: "first setLocalDescription rejects", failAt: "setLocalDescription1", thrown: new Error("offer boom") },
+        { name: "second setLocalDescription rejects", failAt: "setLocalDescription2", thrown: new Error("post-ice boom") },
+        { name: "null rejection preserves thrown value", failAt: "setLocalDescription1", thrown: null },
+    ];
+
+    for (const { name, failAt, thrown } of scenarios) {
+        const stateEl = { textContent: "idle" };
+        const pcs = [];
+        class FakePeerConnection {
+            constructor() {
+                pcs.push(this);
+                this.iceGatheringState = "complete";
+                this.localDescription = { sdp: "v=0\r\n" };
+                this.closed = 0;
+                this.dcClosed = 0;
+                this.transceiverCalls = 0;
+                this.setLocalCalls = 0;
+            }
+            createDataChannel() {
+                if (failAt === "createDataChannel") throw thrown;
+                return { close: () => { this.dcClosed++; } };
+            }
+            addTransceiver(kind, { direction }) {
+                this.transceiverCalls++;
+                if (failAt === "sendVideoTransceiver" && kind === "video" && direction === "sendonly") {
+                    throw thrown;
+                }
+                if (failAt === "recvVideoTransceiver" && kind === "video" && direction === "recvonly") {
+                    throw thrown;
+                }
+                const sender = {
+                    replaceTrack: async () => {
+                        if (failAt === "micReplaceTrack" && kind === "audio") throw thrown;
+                        if (failAt === "videoReplaceTrack" && kind === "video") throw thrown;
+                    },
+                };
+                return { kind, direction, sender, receiver: { track: {} }, mid: String(this.transceiverCalls) };
+            }
+            async setLocalDescription() {
+                this.setLocalCalls++;
+                if (failAt === "setLocalDescription1" && this.setLocalCalls === 1) throw thrown;
+                if (failAt === "setLocalDescription2" && this.setLocalCalls === 2) throw thrown;
+            }
+            close() {
+                this.closed++;
+            }
+        }
+
+        const context = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
+            document: { getElementById: (id) => (id === "webrtc-state" ? stateEl : null) },
+            RTCPeerConnection: FakePeerConnection,
+            MediaStream: class { addTrack() {} },
+            randomId: () => "id",
+            clearTimeout,
+            clearInterval,
+        });
+        const manager = new context.G3RtcWebRtcManager(null);
+        const micTrack = fakeTrack();
+        const videoTrack = fakeTrack();
+        const micStream = { getAudioTracks: () => [micTrack], getTracks: () => [micTrack] };
+        manager.micStream = micStream;
+        manager.videoTrack = videoTrack;
+
+        let caught = Symbol("not-thrown");
+        try {
+            await manager.initiateSession({ wantsVideo: true });
+        } catch (err) {
+            caught = err;
+        }
+        assert.equal(caught, thrown, `${name}: should rethrow original error`);
+        assert.equal(pcs.length, 1, `${name}: one peer connection created`);
+        assert.equal(pcs[0].closed, 1, `${name}: partial peer connection closed`);
+        assert.equal(pcs[0].dcClosed, failAt === "createDataChannel" ? 0 : 1, `${name}: dataChannel closed when created`);
+        assert.equal(manager.pc, null, `${name}: pc cleared`);
+        assert.equal(manager.dataChannel, null, `${name}: dataChannel cleared`);
+        assert.equal(manager.audioSender, null, `${name}: audioSender cleared`);
+        assert.equal(manager.videoSender, null, `${name}: videoSender cleared`);
+        assert.equal(manager.remoteStream, null, `${name}: remoteStream cleared`);
+        assert.equal(stateEl.textContent, "closed", `${name}: webrtc-state reset from negotiating`);
+        assert.equal(manager.micStream, micStream, `${name}: micStream preserved`);
+        assert.equal(micTrack.readyState, "live", `${name}: mic track not stopped`);
+        assert.equal(manager.videoTrack, videoTrack, `${name}: videoTrack preserved`);
+        assert.equal(videoTrack.readyState, "live", `${name}: video track not stopped`);
+    }
+});
+
+test("a superseded initiateSession whose setLocalDescription rejects leaves the newer connection alone", async () => {
+    const stateEl = { textContent: "idle" };
+    const pcs = [];
+    let rejectFirstOffer;
+    class FakePeerConnection {
+        constructor() {
+            this.index = pcs.length;
+            pcs.push(this);
+            this.iceGatheringState = "complete";
+            this.localDescription = { sdp: "v=0\r\n" };
+            this.closed = 0;
+        }
+        createDataChannel() { return { close() {} }; }
+        addTransceiver(kind, { direction }) {
+            return { kind, direction, sender: { replaceTrack: async () => {} }, receiver: { track: {} }, mid: "0" };
+        }
+        setLocalDescription() {
+            if (this.index === 0) {
+                return new Promise((_, reject) => (rejectFirstOffer = reject));
+            }
+            return Promise.resolve();
+        }
+        close() {
+            this.closed++;
+        }
+    }
+    const context = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
+        document: { getElementById: (id) => (id === "webrtc-state" ? stateEl : null) },
+        RTCPeerConnection: FakePeerConnection,
+        MediaStream: class { addTrack() {} },
+        randomId: () => "id",
+        clearTimeout,
+        clearInterval,
+    });
+    const manager = new context.G3RtcWebRtcManager(null);
+    const first = manager.initiateSession().catch((error) => error);
+    await settle();
+    const second = manager.initiateSession();
+    await second;
+    assert.equal(manager.pc, pcs[1]);
+    assert.equal(pcs[0].closed, 1);
+    assert.equal(pcs[1].closed, 0);
+    assert.equal(stateEl.textContent, "negotiating");
+
+    const offerErr = new Error("first offer failed after close");
+    rejectFirstOffer(offerErr);
+    assert.equal(await first, offerErr);
+    assert.equal(manager.pc, pcs[1]);
+    assert.equal(pcs[0].closed, 1);
+    assert.equal(pcs[1].closed, 0);
+    assert.equal(stateEl.textContent, "negotiating");
+});
+
+test("initiateSession does not overwrite 'failed' or double-close if onConnectionFailed already closed pc", async () => {
+    const stateEl = { textContent: "idle" };
+    let pc;
+    class FakePeerConnection {
+        constructor() {
+            pc = this;
+            this.connectionState = "new";
+            this.iceGatheringState = "complete";
+            this.localDescription = { sdp: "v=0\r\n" };
+            this.closed = 0;
+        }
+        createDataChannel() { return { close() {} }; }
+        addTransceiver(kind, { direction }) {
+            return { kind, direction, sender: { replaceTrack: async () => {} }, receiver: { track: {} }, mid: "0" };
+        }
+        async setLocalDescription() {
+            this.connectionState = "failed";
+            this.onconnectionstatechange();
+            throw new Error("failed mid-offer");
+        }
+        close() {
+            this.closed++;
+        }
+    }
+    const context = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
+        document: { getElementById: (id) => (id === "webrtc-state" ? stateEl : null) },
+        RTCPeerConnection: FakePeerConnection,
+        MediaStream: class { addTrack() {} },
+        randomId: () => "id",
+        clearTimeout,
+        clearInterval,
+    });
+    const manager = new context.G3RtcWebRtcManager(null);
+    manager.onConnectionFailed = () => manager.close();
+
+    await assert.rejects(() => manager.initiateSession(), /failed mid-offer/);
+    assert.equal(pc.closed, 1);
+    assert.equal(manager.pc, null);
+    assert.equal(stateEl.textContent, "failed");
+});

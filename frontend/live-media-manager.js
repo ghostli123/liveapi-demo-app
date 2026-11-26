@@ -1377,88 +1377,95 @@ class G3RtcWebRtcManager {
             if (this.pc !== pc) throw new Error("The WebRTC session was closed.");
         };
 
-        // close() above showed "closed"; this connection is still being set up.
-        G3RtcWebRtcManager.showState("negotiating");
-        pc.onconnectionstatechange = () => {
-            const state = pc.connectionState;
-            console.log("[WebRTC] connectionState:", state);
-            if (this.pc !== pc) return; // A newer session replaced this one.
-            if (state === "failed") {
-                this.clearConnectTimer();
-                this._failConnection();
-                return;
+        try {
+            // close() above showed "closed"; this connection is still being set up.
+            G3RtcWebRtcManager.showState("negotiating");
+            pc.onconnectionstatechange = () => {
+                const state = pc.connectionState;
+                console.log("[WebRTC] connectionState:", state);
+                if (this.pc !== pc) return; // A newer session replaced this one.
+                if (state === "failed") {
+                    this.clearConnectTimer();
+                    this._failConnection();
+                    return;
+                }
+                G3RtcWebRtcManager.showState(state);
+                if (state === "connected") {
+                    this.hasConnected = true;
+                    // The connect timeout only covers getting connected. A later
+                    // drop shows as "disconnected", which can recover, and then
+                    // "failed" if it doesn't.
+                    this.clearConnectTimer();
+                }
+            };
+
+            this.dataChannel = pc.createDataChannel("g3rtc-media-stats");
+
+            const transceiverToGroupId = new Map();
+            const sendStreamGroupId = randomId();
+
+            const sendAudioTransceiver = pc.addTransceiver("audio", {
+                direction: "sendonly",
+            });
+            this.audioSender = sendAudioTransceiver.sender;
+            transceiverToGroupId.set(sendAudioTransceiver, sendStreamGroupId);
+
+            const sendVideoTransceiver = pc.addTransceiver("video", {
+                direction: "sendonly",
+            });
+            this.videoSender = sendVideoTransceiver.sender;
+            transceiverToGroupId.set(sendVideoTransceiver, sendStreamGroupId);
+
+            const micTrack = this.micStream && this.micStream.getAudioTracks()[0];
+            if (micTrack && micTrack.readyState === "live") {
+                await this._replaceTrack(sendAudioTransceiver.sender, micTrack);
+                ensureOpen();
             }
-            G3RtcWebRtcManager.showState(state);
-            if (state === "connected") {
-                this.hasConnected = true;
-                // The connect timeout only covers getting connected. A later
-                // drop shows as "disconnected", which can recover, and then
-                // "failed" if it doesn't.
-                this.clearConnectTimer();
+            if (this.videoTrack && this.videoTrack.readyState === "live") {
+                await this._replaceTrack(sendVideoTransceiver.sender, this.videoTrack);
+                ensureOpen();
             }
-        };
 
-        this.dataChannel = pc.createDataChannel("g3rtc-media-stats");
+            const remoteStream = new MediaStream();
+            this.remoteStream = remoteStream;
+            const recvGroupId = remoteStream.id || randomId();
 
-        const transceiverToGroupId = new Map();
-        const sendStreamGroupId = randomId();
-
-        const sendAudioTransceiver = pc.addTransceiver("audio", {
-            direction: "sendonly",
-        });
-        this.audioSender = sendAudioTransceiver.sender;
-        transceiverToGroupId.set(sendAudioTransceiver, sendStreamGroupId);
-
-        const sendVideoTransceiver = pc.addTransceiver("video", {
-            direction: "sendonly",
-        });
-        this.videoSender = sendVideoTransceiver.sender;
-        transceiverToGroupId.set(sendVideoTransceiver, sendStreamGroupId);
-
-        const micTrack = this.micStream && this.micStream.getAudioTracks()[0];
-        if (micTrack && micTrack.readyState === "live") {
-            await this._replaceTrack(sendAudioTransceiver.sender, micTrack);
-            ensureOpen();
-        }
-        if (this.videoTrack && this.videoTrack.readyState === "live") {
-            await this._replaceTrack(sendVideoTransceiver.sender, this.videoTrack);
-            ensureOpen();
-        }
-
-        const remoteStream = new MediaStream();
-        this.remoteStream = remoteStream;
-        const recvGroupId = remoteStream.id || randomId();
-
-        const recvAudioTransceiver = pc.addTransceiver("audio", {
-            direction: "recvonly",
-        });
-        remoteStream.addTrack(recvAudioTransceiver.receiver.track);
-        transceiverToGroupId.set(recvAudioTransceiver, recvGroupId);
-
-        if (wantsVideo) {
-            const recvVideoTransceiver = pc.addTransceiver("video", {
+            const recvAudioTransceiver = pc.addTransceiver("audio", {
                 direction: "recvonly",
             });
-            remoteStream.addTrack(recvVideoTransceiver.receiver.track);
-            transceiverToGroupId.set(recvVideoTransceiver, recvGroupId);
-        }
+            remoteStream.addTrack(recvAudioTransceiver.receiver.track);
+            transceiverToGroupId.set(recvAudioTransceiver, recvGroupId);
 
-        await pc.setLocalDescription();
-        ensureOpen();
-        await this.waitForIceGathering(3000);
-        ensureOpen();
-        await pc.setLocalDescription();
-        ensureOpen();
-
-        const midToGroupId = new Map();
-        for (const [transceiver, groupId] of transceiverToGroupId.entries()) {
-            if (transceiver.mid) {
-                midToGroupId.set(transceiver.mid, groupId);
+            if (wantsVideo) {
+                const recvVideoTransceiver = pc.addTransceiver("video", {
+                    direction: "recvonly",
+                });
+                remoteStream.addTrack(recvVideoTransceiver.receiver.track);
+                transceiverToGroupId.set(recvVideoTransceiver, recvGroupId);
             }
-        }
 
-        const rawSdp = pc.localDescription ? pc.localDescription.sdp : "";
-        return G3RtcWebRtcManager.applyG3rtcAttributesToSdp(rawSdp, midToGroupId);
+            await pc.setLocalDescription();
+            ensureOpen();
+            await this.waitForIceGathering(3000);
+            ensureOpen();
+            await pc.setLocalDescription();
+            ensureOpen();
+
+            const midToGroupId = new Map();
+            for (const [transceiver, groupId] of transceiverToGroupId.entries()) {
+                if (transceiver.mid) {
+                    midToGroupId.set(transceiver.mid, groupId);
+                }
+            }
+
+            const rawSdp = pc.localDescription ? pc.localDescription.sdp : "";
+            return G3RtcWebRtcManager.applyG3rtcAttributesToSdp(rawSdp, midToGroupId);
+        } catch (error) {
+            if (this.pc === pc) {
+                this.close({ keepLocalMedia: true });
+            }
+            throw error;
+        }
     }
 
     waitForIceGathering(timeoutMs = 3000) {
