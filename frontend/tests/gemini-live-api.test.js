@@ -2626,3 +2626,80 @@ test("postWithRetry() guards null, non-Error, and frozen rejections and formats 
         assert.deepEqual(plain(warnings), ["POST /api/control failed (TypeError); retrying..."]);
     }
 });
+
+test("prepare() trims valid control.project_id and ignores blank, non-string, or non-object values", async () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    api.setProjectId("existing-project");
+
+    for (const control of [
+        null,
+        undefined,
+        "my-project",
+        123,
+        ["my-project"],
+        {},
+        { project_id: "" },
+        { project_id: "   \t\n  " },
+        { project_id: 123 },
+        { project_id: true },
+        { project_id: {} },
+        { project_id: ["p"] },
+        { project_id: null },
+    ]) {
+        api.sendPostRequest = async () => control;
+        assert.equal(await api.prepare(), true);
+        assert.equal(api.projectId, "existing-project", `control=${JSON.stringify(control)}`);
+    }
+
+    api.sendPostRequest = async () => ({ project_id: "  trimmed-project \t " });
+    assert.equal(await api.prepare(), true);
+    assert.equal(api.projectId, "trimmed-project");
+});
+
+test("prepare() validates control.idle_timeout_s and rejects booleans, non-numbers, non-finite, and overflowing values", async () => {
+    for (const [label, control] of [
+        ["null control", null],
+        ["array control", [60]],
+        ["string control", "60"],
+        ["missing", { project_id: "p" }],
+        ["true", { project_id: "p", idle_timeout_s: true }],
+        ["false", { project_id: "p", idle_timeout_s: false }],
+        ["numeric string", { project_id: "p", idle_timeout_s: "60" }],
+        ["blank string", { project_id: "p", idle_timeout_s: "   " }],
+        ["array", { project_id: "p", idle_timeout_s: [60] }],
+        ["object", { project_id: "p", idle_timeout_s: { valueOf: () => 60 } }],
+        ["null", { project_id: "p", idle_timeout_s: null }],
+        ["zero", { project_id: "p", idle_timeout_s: 0 }],
+        ["negative", { project_id: "p", idle_timeout_s: -10 }],
+        ["NaN", { project_id: "p", idle_timeout_s: NaN }],
+        ["Infinity", { project_id: "p", idle_timeout_s: Infinity }],
+        ["-Infinity", { project_id: "p", idle_timeout_s: -Infinity }],
+        ["1e308 overflow", { project_id: "p", idle_timeout_s: 1e308 }],
+        ["MAX_VALUE overflow", { project_id: "p", idle_timeout_s: Number.MAX_VALUE }],
+    ]) {
+        const api = await idleApi(120);
+        assert.equal(api.idleTimeoutMs, 120000, label);
+        const prevTimer = timers[api.idleTimer - 1];
+        api.sendPostRequest = async () => control;
+        api.webSocket.close = () => {};
+        api.webSocket.readyState = FakeWebSocket.CLOSED;
+        await api.resume("h");
+        assert.equal(api.idleTimeoutMs, 0, label);
+        assert.equal(prevTimer.cleared, true, label);
+        assert.equal(api.idleTimer, null, label);
+    }
+
+    // Valid finite positive numbers (including fractional seconds) still work.
+    const fractional = await idleApi(0.5);
+    assert.equal(fractional.idleTimeoutMs, 500);
+    assert.equal(timers[fractional.idleTimer - 1].ms, 500);
+});
+
+test("startIdleTimer() ignores direct non-finite or non-positive idleTimeoutMs", () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    for (const bad of [0, -100, NaN, Infinity, -Infinity]) {
+        api.idleTimeoutMs = bad;
+        api.startIdleTimer();
+        assert.equal(api.idleTimer, null, `idleTimeoutMs=${bad}`);
+    }
+});

@@ -170,6 +170,21 @@ function describeDuration(ms) {
 }
 
 /**
+ * Converts a `/api/control` `idle_timeout_s` value into milliseconds, returning
+ * `0` (disabled) for missing, non-number, non-positive, non-finite, or
+ * overflowing values.
+ * @param {*} seconds
+ * @returns {number}
+ */
+function parseIdleTimeoutMs(seconds) {
+    if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) {
+        return 0;
+    }
+    const ms = seconds * 1000;
+    return Number.isFinite(ms) ? ms : 0;
+}
+
+/**
  * A random v4 UUID. `crypto.randomUUID` exists only in secure contexts (HTTPS
  * or localhost); over plain http from another machine the page builds one from
  * `crypto.getRandomValues`, which every context has.
@@ -583,10 +598,14 @@ class GeminiLiveAPI {
                 this.abandonSession(sessionId);
                 return false;
             }
-            if (control?.project_id) {
-                this.setProjectId(control.project_id);
+            const controlObj =
+                control && typeof control === "object" && !Array.isArray(control) ? control : null;
+            const projectId =
+                typeof controlObj?.project_id === "string" ? controlObj.project_id.trim() : "";
+            if (projectId) {
+                this.setProjectId(projectId);
             }
-            this.idleTimeoutMs = Math.max(0, Number(control?.idle_timeout_s) || 0) * 1000;
+            this.idleTimeoutMs = parseIdleTimeoutMs(controlObj?.idle_timeout_s);
 
             console.log("prepare(): Setting up function declarations...");
             await this.setupFuncDeclarationToService(sessionId, signal);
@@ -957,14 +976,14 @@ class GeminiLiveAPI {
         this.clearIdleTimer();
         // Even with the timeout off, so a resume that turns it on has a start.
         if (!keepActivity) this.noteActivity();
-        if (!this.idleTimeoutMs) return;
+        if (!(this.idleTimeoutMs > 0) || !Number.isFinite(this.idleTimeoutMs)) return;
         // Browsers run a timeout longer than 2^31-1 ms (~24.8 days) at once,
         // so a longer --idle_timeout_s would make check() spin; it re-arms.
         const wait = (ms) => setTimeout(check, Math.min(Math.max(0, ms), MAX_TIMEOUT_MS));
         const check = () => {
             this.idleTimer = null;
             // A resume's prepare() may have turned the timeout off.
-            if (!this.idleTimeoutMs) return;
+            if (!(this.idleTimeoutMs > 0) || !Number.isFinite(this.idleTimeoutMs)) return;
             const left = this.lastActivityAt + this.idleTimeoutMs - performance.now();
             if (left > 0) {
                 this.idleTimer = wait(left);
