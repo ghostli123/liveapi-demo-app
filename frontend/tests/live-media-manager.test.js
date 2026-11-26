@@ -3100,3 +3100,148 @@ test("close() resets the WebRTC frame rate and packet loss readouts", async () =
     assert.equal(element("webrtc-fps").textContent, "--");
     assert.equal(element("webrtc-packet-loss").textContent, "0");
 });
+
+test("initMediaSource and completeSession handle null and non-Error video.play() rejections without unhandled rejections", async () => {
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+        const { manager: videoOut, video } = videoOutputWithFakeMediaSource();
+        let mseBlocked = 0;
+        videoOut.onAutoplayBlocked = () => mseBlocked++;
+
+        for (const reason of [null, undefined, "autoplay denied", Object.create(null)]) {
+            video.play = () => Promise.reject(reason);
+            videoOut.initMediaSource();
+            await settle();
+        }
+        assert.equal(mseBlocked, 0);
+        // Null-prototype NotAllowedError still triggers the autoplay callback.
+        video.play = () => Promise.reject(Object.assign(Object.create(null), { name: "NotAllowedError" }));
+        videoOut.initMediaSource();
+        await settle();
+        assert.equal(mseBlocked, 1);
+
+        // Same guards on the WebRTC video.play() path in completeSession().
+        const rtcContext = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
+            document: { getElementById: () => null },
+            setInterval: () => ({}),
+            clearInterval() {},
+            setTimeout: () => ({}),
+            clearTimeout() {},
+            performance: { now: () => 0 },
+        });
+        let rtcPlayReject = null;
+        const rtcVideo = {
+            srcObject: null,
+            removeAttribute() {},
+            play: () => Promise.reject(rtcPlayReject),
+        };
+        const rtc = new rtcContext.G3RtcWebRtcManager(rtcVideo);
+        let rtcBlocked = 0;
+        rtc.onAutoplayBlocked = () => rtcBlocked++;
+        for (const reason of [null, undefined, "autoplay denied", Object.create(null)]) {
+            rtcPlayReject = reason;
+            rtc.pc = { connectionState: "connected", setRemoteDescription: async () => {}, close() {} };
+            rtc.remoteStream = {};
+            await rtc.completeSession("v=0\r\n");
+            await settle();
+        }
+        assert.equal(rtcBlocked, 0);
+        rtcPlayReject = Object.assign(Object.create(null), { name: "NotAllowedError" });
+        rtc.pc = { connectionState: "connected", setRemoteDescription: async () => {}, close() {} };
+        rtc.remoteStream = {};
+        await rtc.completeSession("v=0\r\n");
+        await settle();
+        assert.equal(rtcBlocked, 1);
+        rtc.close();
+
+        assert.deepEqual(unhandled, []);
+    } finally {
+        process.off("unhandledRejection", onUnhandled);
+    }
+});
+
+test("initMediaSource formats null, symbol, and null-prototype addSourceBuffer() throws safely", () => {
+    const cases = [
+        [null, "Error adding source buffer: unknown error"],
+        [undefined, "Error adding source buffer: unknown error"],
+        [Object.create(null), "Error adding source buffer: unknown error"],
+        [Object.assign(Object.create(null), { message: "bad codec" }), "Error adding source buffer: bad codec"],
+        [Object.assign(Object.create(null), { name: "NotSupportedError" }), "Error adding source buffer: NotSupportedError"],
+        [Symbol("bad"), "Error adding source buffer: Symbol(bad)"],
+        [{ toString() { throw new Error("boom"); } }, "Error adding source buffer: unknown error"],
+        [{ get message() { throw new Error("getter"); }, toString() { return "fallback"; } }, "Error adding source buffer: fallback"],
+    ];
+    for (const [thrown, expectedDetail] of cases) {
+        const { manager, fake, errors } = videoOutputWithFakeMediaSource();
+        manager.initMediaSource();
+        fake.mediaSources[0].addSourceBuffer = () => { throw thrown; };
+        assert.doesNotThrow(() => fake.mediaSources[0].open());
+        assert.equal(manager.unplayableDetail, expectedDetail);
+        manager.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+        assert.equal(manager.playbackFailed, true);
+        assert.equal(errors.length, 1);
+        assert.match(errors[0], /can't play the avatar video/);
+    }
+});
+
+test("appendNextChunk and processQueue handle null, symbol, and null-prototype appendBuffer() throws safely", () => {
+    // appendNextChunk() must rethrow the original null/undefined value instead of TypeError.
+    for (const thrown of [null, undefined]) {
+        const { manager } = videoOutputWithFakeMediaSource();
+        manager.chunkQueue.push(new ArrayBuffer(8));
+        manager.queuedBytes = 8;
+        let caught = Symbol("not-caught");
+        try {
+            manager.appendNextChunk({
+                appendBuffer() { throw thrown; },
+            });
+        } catch (err) {
+            caught = err;
+        }
+        assert.equal(caught, thrown);
+    }
+
+    // processQueue() formats non-Error / null-prototype / symbol throws without crashing.
+    const cases = [
+        [null, "Error appending video: unknown error"],
+        [undefined, "Error appending video: unknown error"],
+        [Object.create(null), "Error appending video: unknown error"],
+        [Object.assign(Object.create(null), { message: "append failed" }), "Error appending video: append failed"],
+        [Symbol("append"), "Error appending video: Symbol(append)"],
+        [{ toString() { throw new Error("boom"); } }, "Error appending video: unknown error"],
+    ];
+    for (const [thrown, expectedDetail] of cases) {
+        const logged = [];
+        const { manager, fake, errors } = videoOutputWithFakeMediaSource();
+        const origFail = manager.failPlayback.bind(manager);
+        manager.failPlayback = (detail, userMessage) => {
+            logged.push(detail);
+            return origFail(detail, userMessage);
+        };
+        manager.initMediaSource();
+        fake.mediaSources[0].open();
+        fake.mediaSources[0].sourceBuffer.appendBuffer = () => { throw thrown; };
+        assert.doesNotThrow(() => manager.playVideoChunk(VIDEO_CHUNK, "video/mp4"));
+        assert.equal(manager.playbackFailed, true);
+        assert.equal(manager.chunkQueue.length, 0);
+        assert.equal(errors.length, 1);
+        assert.match(errors[0], /stopped after a playback error/);
+        assert.deepEqual(logged, [expectedDetail]);
+    }
+
+    // A null-prototype QuotaExceededError still trims and retries instead of failing playback.
+    const { manager, fake, video, errors } = videoOutputWithFakeMediaSource();
+    manager.initMediaSource();
+    fake.mediaSources[0].open();
+    const sourceBuffer = fake.mediaSources[0].sourceBuffer;
+    fake.buffered = [0, 15];
+    video.currentTime = 12;
+    fake.appendError = Object.assign(Object.create(null), { name: "QuotaExceededError" });
+    assert.doesNotThrow(() => manager.playVideoChunk(VIDEO_CHUNK, "video/mp4"));
+    assert.equal(manager.playbackFailed, false);
+    assert.deepEqual(sourceBuffer.removed, [[0, 11]]);
+    assert.equal(manager.chunkQueue.length, 1);
+    assert.deepEqual(errors, []);
+});

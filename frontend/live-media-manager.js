@@ -823,6 +823,32 @@ const MAX_RECORDED_VIDEO_BYTES = 512 * 1024 * 1024;
 // at ~1 MB/s) so a stalled player can't grow tab memory without bound.
 const MAX_QUEUED_VIDEO_BYTES = 16 * 1024 * 1024;
 
+/**
+ * Extracts a non-empty human-readable description from a caught error or
+ * rejection value without throwing on null, symbols, or null-prototype objects.
+ * @param {*} error
+ * @returns {string}
+ */
+function formatMediaError(error) {
+    if (error && typeof error === "object") {
+        try {
+            if (typeof error.message === "string" && error.message.trim()) return error.message.trim();
+            if (typeof error.name === "string" && error.name.trim()) return error.name.trim();
+        } catch {
+            // E.g. an error object with a throwing getter.
+        }
+    }
+    if (error !== null && error !== undefined) {
+        try {
+            const text = String(error).trim();
+            if (text && text !== "[object Object]") return text;
+        } catch {
+            // E.g. Object.create(null) or a throwing toString().
+        }
+    }
+    return "unknown error";
+}
+
 /** @returns {HTMLVideoElement | null} The avatar's <video>, shared by both transports. */
 function getAvatarVideoElement() {
     return /** @type {HTMLVideoElement | null} */ (document.getElementById("video_player"));
@@ -937,7 +963,7 @@ class LiveVideoOutputManager {
                 this.initialized = true;
                 this.processQueue();
             } catch (e) {
-                this.markUnplayable(`Error adding source buffer: ${e}`);
+                this.markUnplayable(`Error adding source buffer: ${formatMediaError(e)}`);
             }
         });
         mediaSource.addEventListener('error', e => console.error('MediaSource error', e));
@@ -946,8 +972,8 @@ class LiveVideoOutputManager {
         video.style.display = "block";
         video.src = this.objectUrl;
         this.attachVideoListeners(video);
-        video.play().catch((err) => {
-            if (err.name === "NotAllowedError") this.onAutoplayBlocked();
+        video.play()?.catch((err) => {
+            if (err?.name === "NotAllowedError") this.onAutoplayBlocked();
         });
     }
 
@@ -1113,7 +1139,7 @@ class LiveVideoOutputManager {
             // Besides a full buffer, the SourceBuffer only throws when it can't
             // take data any more (removed from its MediaSource, or the video
             // element has an error), so later chunks would fail the same way.
-            this.failPlayback(`Error appending video: ${e}`, VIDEO_STOPPED_MESSAGE);
+            this.failPlayback(`Error appending video: ${formatMediaError(e)}`, VIDEO_STOPPED_MESSAGE);
         }
     }
 
@@ -1128,7 +1154,7 @@ class LiveVideoOutputManager {
         try {
             sourceBuffer.appendBuffer(chunk);
         } catch (e) {
-            if (e.name !== "QuotaExceededError") throw e;
+            if (e?.name !== "QuotaExceededError") throw e;
             // Make room and retry the same chunk on updateend.
             this.chunkQueue.unshift(chunk);
             this.queuedBytes += chunk.byteLength;
@@ -1480,9 +1506,9 @@ class G3RtcWebRtcManager {
             // Leave `muted` alone: Connect unmutes in its click (script.js),
             // and a resume renegotiates, so unmuting here would undo a mute
             // the user set from the player's controls.
-            videoEl.play().catch((err) => {
+            videoEl.play()?.catch((err) => {
                 console.warn("[WebRTC] Auto-play warning on video_player:", err);
-                if (err.name === "NotAllowedError") this.onAutoplayBlocked();
+                if (err?.name === "NotAllowedError") this.onAutoplayBlocked();
             });
         }
         this.startStatsPolling();
