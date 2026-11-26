@@ -340,6 +340,109 @@ class GetAccessTokenTest(unittest.TestCase):
         self.assertEqual(run_mock.call_args.kwargs.get("stdin"), subprocess.DEVNULL)
         self.assertTrue(run_mock.call_args.kwargs.get("capture_output"))
 
+    def test_as_utc_normalizes_naive_and_non_utc_datetimes(self):
+        class _NullOffsetTz(datetime.tzinfo):
+            def utcoffset(self, dt):
+                return None
+
+            def dst(self, dt):
+                return None
+
+            def tzname(self, dt):
+                return None
+
+        before = get_credentials._utcnow()
+        assumed = get_credentials._as_utc(None)
+        after = get_credentials._utcnow()
+        self.assertEqual(assumed.tzinfo, datetime.timezone.utc)
+        self.assertGreaterEqual(assumed, before + get_credentials._ASSUMED_LIFETIME)
+        self.assertLessEqual(assumed, after + get_credentials._ASSUMED_LIFETIME)
+
+        naive = datetime.datetime(2030, 1, 1, 12, 30, 0)
+        from_naive = get_credentials._as_utc(naive)
+        self.assertEqual(
+            from_naive,
+            datetime.datetime(2030, 1, 1, 12, 30, 0, tzinfo=datetime.timezone.utc),
+        )
+        self.assertEqual(from_naive.tzinfo, datetime.timezone.utc)
+
+        null_offset = datetime.datetime(2030, 1, 1, 12, 30, 0, tzinfo=_NullOffsetTz())
+        from_null_offset = get_credentials._as_utc(null_offset)
+        self.assertEqual(
+            from_null_offset,
+            datetime.datetime(2030, 1, 1, 12, 30, 0, tzinfo=datetime.timezone.utc),
+        )
+        self.assertEqual(from_null_offset.tzinfo, datetime.timezone.utc)
+
+        offset_cases = (
+            (
+                "2030-01-01T02:00:00+02:00",
+                datetime.datetime(2030, 1, 1, 0, 0, 0, tzinfo=datetime.timezone.utc),
+                "2030-01-01T00:00:00+00:00",
+            ),
+            (
+                "2030-01-01T19:30:00-04:30",
+                datetime.datetime(2030, 1, 2, 0, 0, 0, tzinfo=datetime.timezone.utc),
+                "2030-01-02T00:00:00+00:00",
+            ),
+            (
+                "2030-01-01T00:00:00+00:00",
+                datetime.datetime(2030, 1, 1, 0, 0, 0, tzinfo=datetime.timezone.utc),
+                "2030-01-01T00:00:00+00:00",
+            ),
+        )
+        for iso_value, expected, expected_iso in offset_cases:
+            with self.subTest(iso_value=iso_value):
+                got = get_credentials._as_utc(
+                    datetime.datetime.fromisoformat(iso_value)
+                )
+                self.assertEqual(got, expected)
+                self.assertEqual(got.tzinfo, datetime.timezone.utc)
+                self.assertEqual(got.isoformat(), expected_iso)
+
+    def test_gcloud_and_adc_convert_non_utc_expiry_to_utc(self):
+        payload = json.dumps(
+            {
+                "token": "gcloud-tz-tok",
+                "expiry": {"datetime": "2030-01-01T02:00:00+02:00"},
+            }
+        )
+        completed = subprocess.CompletedProcess(
+            args=["gcloud"], returncode=0, stdout=payload, stderr=""
+        )
+        with (
+            mock.patch.object(
+                get_credentials.shutil, "which", return_value="/usr/bin/gcloud"
+            ),
+            mock.patch.object(
+                get_credentials.subprocess, "run", return_value=completed
+            ),
+        ):
+            self.use_sources(get_credentials._token_from_gcloud)
+            with self.assertLogs(level="INFO") as logs:
+                token = get_credentials.get_access_token()
+        self.assertEqual(
+            token.expiry,
+            datetime.datetime(2030, 1, 1, 0, 0, tzinfo=datetime.timezone.utc),
+        )
+        self.assertEqual(token.expiry.tzinfo, datetime.timezone.utc)
+        self.assertEqual(token.expiry.isoformat(), "2030-01-01T00:00:00+00:00")
+        output = "\n".join(logs.output)
+        self.assertIn("expires 2030-01-01T00:00:00+00:00", output)
+        self.assertNotIn("+02:00", output)
+
+        adc_expiry = datetime.datetime(
+            2030, 1, 1, 19, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=-5))
+        )
+        adc = mock.Mock(token="adc-tz-tok", expiry=adc_expiry)
+        with mock.patch.object(get_credentials, "_adc_credentials", adc):
+            adc_token = get_credentials._token_from_adc()
+        self.assertEqual(
+            adc_token.expiry,
+            datetime.datetime(2030, 1, 2, 0, 0, tzinfo=datetime.timezone.utc),
+        )
+        self.assertEqual(adc_token.expiry.tzinfo, datetime.timezone.utc)
+
     def test_gcloud_stdin_closed_prevents_interactive_hang(self):
         # A real child that reads stdin gets EOF immediately instead of waiting
         # for the 30 s timeout when stdin is wired to DEVNULL.

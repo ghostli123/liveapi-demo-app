@@ -84,9 +84,9 @@ def _utcnow() -> datetime.datetime:
 def _as_utc(expiry: datetime.datetime | None) -> datetime.datetime:
     if expiry is None:
         return _utcnow() + _ASSUMED_LIFETIME
-    if expiry.tzinfo is None:
+    if expiry.tzinfo is None or expiry.utcoffset() is None:
         return expiry.replace(tzinfo=datetime.timezone.utc)
-    return expiry
+    return expiry.astimezone(datetime.timezone.utc)
 
 
 class _TimedRequest(google.auth.transport.requests.Request):
