@@ -115,7 +115,7 @@ class GeminiLiveResponseMessage {
         }
 
         const resumption = field(raw, "sessionResumptionUpdate", "session_resumption_update");
-        const newHandle = str(field(resumption, "newHandle", "new_handle"));
+        const newHandle = str(field(resumption, "newHandle", "new_handle")).trim();
         if (newHandle) {
             add("RESUMPTION", newHandle);
         }
@@ -207,6 +207,19 @@ function parseBitrateBps(value) {
     }
     const bps = Math.round(num);
     return Number.isFinite(bps) && bps > 0 && bps <= MAX_BITRATE_BPS ? bps : 0;
+}
+
+/**
+ * Normalizes a VAD sensitivity setting (`"low"` or `"high"`), trimming
+ * surrounding whitespace and folding case; returns `""` for blank, unknown,
+ * or non-string values.
+ * @param {unknown} value
+ * @returns {"low" | "high" | ""}
+ */
+function normalizeVadSensitivity(value) {
+    if (typeof value !== "string") return "";
+    const normalized = value.trim().toLowerCase();
+    return normalized === "low" || normalized === "high" ? normalized : "";
 }
 
 /**
@@ -527,8 +540,8 @@ class GeminiLiveAPI {
      * @param {string} handle - Resumption handle string from a prior session.
      */
     setResumption(enable, handle) {
-        this.enableSessionResumption = enable;
-        this.resumptionHandle = handle;
+        this.enableSessionResumption = Boolean(enable);
+        this.resumptionHandle = typeof handle === "string" ? handle.trim() : "";
     }
 
     /**
@@ -553,8 +566,8 @@ class GeminiLiveAPI {
     setVad(disableInterruption, disableDetection, startSen = "", endSen = "") {
         this.disableInterruption = disableInterruption;
         this.disableDetection = disableDetection;
-        this.startSensitivity = typeof startSen === "string" ? startSen : "";
-        this.endSensitivity = typeof endSen === "string" ? endSen : "";
+        this.startSensitivity = normalizeVadSensitivity(startSen);
+        this.endSensitivity = normalizeVadSensitivity(endSen);
     }
 
     /**
@@ -759,7 +772,11 @@ class GeminiLiveAPI {
      * @returns {boolean}
      */
     canResume() {
-        return this.enableSessionResumption && !!this.latestResumptionHandle;
+        return (
+            Boolean(this.enableSessionResumption) &&
+            typeof this.latestResumptionHandle === "string" &&
+            this.latestResumptionHandle.trim().length > 0
+        );
     }
 
     /**
@@ -1532,7 +1549,7 @@ class GeminiLiveAPI {
     }
 
     _buildSystemInstructionConfig() {
-        if (!this.systemInstructions || !this.systemInstructions.trim()) {
+        if (typeof this.systemInstructions !== "string" || !this.systemInstructions.trim()) {
             return null;
         }
         return {
@@ -1555,45 +1572,31 @@ class GeminiLiveAPI {
     }
 
     _buildRealtimeInputConfig() {
+        const startSensitivity = normalizeVadSensitivity(this.startSensitivity);
+        const endSensitivity = normalizeVadSensitivity(this.endSensitivity);
         const hasDetectionConfig =
-            this.disableDetection ||
-            Boolean(this.startSensitivity) ||
-            Boolean(this.endSensitivity);
+            Boolean(this.disableDetection) ||
+            Boolean(startSensitivity) ||
+            Boolean(endSensitivity);
 
-        const hasInterruptionConfig = this.disableInterruption;
+        const hasInterruptionConfig = Boolean(this.disableInterruption);
 
         if (!hasDetectionConfig && !hasInterruptionConfig) {
             return null;
         }
-
-        const getStartSensitivity = (sens) => {
-            switch (sens?.toLowerCase()) {
-                case "low": return "START_SENSITIVITY_LOW";
-                case "high": return "START_SENSITIVITY_HIGH";
-                default: return "START_SENSITIVITY_UNSPECIFIED";
-            }
-        };
-
-        const getEndSensitivity = (sens) => {
-            switch (sens?.toLowerCase()) {
-                case "low": return "END_SENSITIVITY_LOW";
-                case "high": return "END_SENSITIVITY_HIGH";
-                default: return "END_SENSITIVITY_UNSPECIFIED";
-            }
-        };
 
         const config = {};
 
         if (hasDetectionConfig) {
             // Only what the user chose; the rest keeps the server's defaults.
             config.automatic_activity_detection = {};
-            if (this.startSensitivity) {
+            if (startSensitivity) {
                 config.automatic_activity_detection.start_of_speech_sensitivity =
-                    getStartSensitivity(this.startSensitivity);
+                    startSensitivity === "low" ? "START_SENSITIVITY_LOW" : "START_SENSITIVITY_HIGH";
             }
-            if (this.endSensitivity) {
+            if (endSensitivity) {
                 config.automatic_activity_detection.end_of_speech_sensitivity =
-                    getEndSensitivity(this.endSensitivity);
+                    endSensitivity === "low" ? "END_SENSITIVITY_LOW" : "END_SENSITIVITY_HIGH";
             }
             if (this.disableDetection) {
                 config.automatic_activity_detection.disabled = true;

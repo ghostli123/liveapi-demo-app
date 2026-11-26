@@ -2741,3 +2741,124 @@ test("startIdleTimer() ignores direct non-finite or non-positive idleTimeoutMs",
         assert.equal(api.idleTimer, null, `idleTimeoutMs=${bad}`);
     }
 });
+
+test("setVad and _buildRealtimeInputConfig normalize padded sensitivities and omit blank, unknown, or non-string values", () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+
+    // Whitespace-only and unknown sensitivities must not emit *_UNSPECIFIED.
+    for (const [start, end] of [
+        ["   ", "\t\n"],
+        ["medium", "auto"],
+        ["START_SENSITIVITY_LOW", "END_SENSITIVITY_HIGH"],
+        [123, true],
+        [{}, []],
+    ]) {
+        api.setVad(false, false, start, end);
+        assert.equal(api.startSensitivity, "");
+        assert.equal(api.endSensitivity, "");
+        assert.equal(api._buildRealtimeInputConfig(), null);
+    }
+
+    // With disableInterruption or disableDetection set, invalid sensitivities are still omitted.
+    api.setVad(true, false, "   ", "medium");
+    assert.deepEqual(plain(api._buildRealtimeInputConfig()), {
+        activity_handling: "NO_INTERRUPTION",
+    });
+    api.setVad(false, true, "  ", "unknown");
+    assert.deepEqual(plain(api._buildRealtimeInputConfig()), {
+        automatic_activity_detection: { disabled: true },
+    });
+
+    // Padded and mixed-case valid sensitivities are trimmed and lowercased.
+    api.setVad(false, false, "  high\t", "\nLOW ");
+    assert.equal(api.startSensitivity, "high");
+    assert.equal(api.endSensitivity, "low");
+    assert.deepEqual(plain(api._buildRealtimeInputConfig()), {
+        automatic_activity_detection: {
+            start_of_speech_sensitivity: "START_SENSITIVITY_HIGH",
+            end_of_speech_sensitivity: "END_SENSITIVITY_LOW",
+        },
+    });
+
+    // Direct property mutations bypass setVad() and must still normalize safely.
+    api.startSensitivity = 123;
+    api.endSensitivity = "   ";
+    assert.equal(api._buildRealtimeInputConfig(), null);
+
+    api.startSensitivity = " LoW ";
+    api.endSensitivity = "unknown";
+    assert.deepEqual(plain(api._buildRealtimeInputConfig()), {
+        automatic_activity_detection: {
+            start_of_speech_sensitivity: "START_SENSITIVITY_LOW",
+        },
+    });
+});
+
+test("_buildSystemInstructionConfig ignores blank and non-string systemInstructions without throwing", () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    for (const bad of ["", "   ", "\t\n ", null, undefined, 123, true, {}, []]) {
+        api.systemInstructions = bad;
+        assert.equal(api._buildSystemInstructionConfig(), null);
+    }
+
+    api.systemInstructions = "  Keep indentation.  ";
+    assert.deepEqual(plain(api._buildSystemInstructionConfig()), {
+        parts: [{ text: "  Keep indentation.  " }],
+    });
+});
+
+test("parseAll, canResume, and setResumption normalize whitespace and non-string resumption handles", () => {
+    // Whitespace-only server handles emit no RESUMPTION event and do not enable resume.
+    assert.deepEqual(
+        plain(GeminiLiveResponseMessage.parseAll({ sessionResumptionUpdate: { newHandle: "   " } })),
+        []
+    );
+    assert.deepEqual(
+        plain(GeminiLiveResponseMessage.parseAll({ session_resumption_update: { new_handle: "\t\n " } })),
+        []
+    );
+
+    // Padded server handles are trimmed consistently with _buildSessionResumptionConfig().
+    const trimmedEvents = GeminiLiveResponseMessage.parseAll({
+        sessionResumptionUpdate: { newHandle: "  h-trimmed\n" },
+    });
+    assert.equal(trimmedEvents.length, 1);
+    assert.equal(trimmedEvents[0].type, "RESUMPTION");
+    assert.equal(trimmedEvents[0].data, "h-trimmed");
+
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    api.webSocket = new FakeWebSocket();
+    api.setResumption(true, "  pasted-handle \n");
+    assert.equal(api.resumptionHandle, "pasted-handle");
+    assert.deepEqual(plain(api._buildSessionResumptionConfig()), { handle: "pasted-handle" });
+
+    api.setResumption(true, "   ");
+    assert.equal(api.resumptionHandle, "");
+    assert.deepEqual(plain(api._buildSessionResumptionConfig()), {});
+
+    api.setResumption(true, 123);
+    assert.equal(api.resumptionHandle, "");
+    assert.deepEqual(plain(api._buildSessionResumptionConfig()), {});
+
+    const received = [];
+    api.onReceiveResponse = (message) => received.push(message.type);
+    api.onReceiveMessage({
+        data: JSON.stringify({ sessionResumptionUpdate: { newHandle: "   " } }),
+    });
+    assert.deepEqual(received, []);
+    assert.equal(api.latestResumptionHandle, "");
+    assert.equal(api.canResume(), false);
+
+    // Direct property mutation with blank or non-string handles must not mark canResume() true.
+    for (const bad of ["", "   ", "\t\n", 123, null, undefined, {}]) {
+        api.latestResumptionHandle = bad;
+        assert.equal(api.canResume(), false);
+    }
+
+    api.onReceiveMessage({
+        data: JSON.stringify({ sessionResumptionUpdate: { newHandle: " h-valid " } }),
+    });
+    assert.deepEqual(received, ["RESUMPTION"]);
+    assert.equal(api.latestResumptionHandle, "h-valid");
+    assert.equal(api.canResume(), true);
+});
