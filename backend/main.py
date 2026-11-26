@@ -367,12 +367,27 @@ def resolve_ws_host(endpoint: Any, location: Any) -> str:
         Without this check, anyone who can reach the server could have it send
         its access token to a host of their choosing.
     """
-    if not isinstance(endpoint, str) or not endpoint:
+    if not isinstance(endpoint, str):
         raise ValueError("Missing endpoint")
+    normalized_endpoint = endpoint.strip()
+    if not normalized_endpoint:
+        raise ValueError("Missing endpoint")
+    if not normalized_endpoint.isascii():
+        raise ValueError(
+            f"{normalized_endpoint!r} is not an allowed Live API host "
+            "(see --allowed_host_suffixes)"
+        )
+    endpoint = normalized_endpoint.lower()
     if endpoint in COMMON_BAG_ENVIRONMENTS:
         return endpoint
-    if not isinstance(location, str) or not _LOCATION_RE.fullmatch(location):
+    if not isinstance(location, str):
         raise ValueError(f"Invalid location: {location!r}")
+    normalized_location = location.strip()
+    if not normalized_location.isascii() or not _LOCATION_RE.fullmatch(
+        normalized_location.lower()
+    ):
+        raise ValueError(f"Invalid location: {location!r}")
+    location = normalized_location.lower()
 
     if ".rep." in endpoint or endpoint.startswith("global-"):
         ws_host = endpoint
@@ -690,8 +705,6 @@ async def handle_control_request(request: web.Request):
         return _json_error("Server is shutting down", 503)
 
     location = request_body.get("location")
-    if isinstance(location, str):
-        location = location.strip().lower()
     endpoint = request_body.get("endpoint")
     try:
         ws_host = resolve_ws_host(endpoint, location)

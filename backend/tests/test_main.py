@@ -63,6 +63,53 @@ class ResolveWsHostTest(unittest.TestCase):
             with self.subTest(endpoint=endpoint, location=location):
                 self.assertEqual(main.resolve_ws_host(endpoint, location), expected)
 
+    def test_normalizes_endpoint_and_location_case_and_whitespace(self):
+        cases = {
+            ("  AUTOPUSH-COMMON  ", None): "autopush-common",
+            ("\tAutopush-Vertex-Us-Bidi\n", ""): "autopush-vertex-us-bidi",
+            (
+                "AIPLATFORM.GOOGLEAPIS.COM",
+                "US",
+            ): "aiplatform.us.rep.googleapis.com",
+            (
+                " aiplatform.googleapis.com ",
+                " US-CENTRAL1 ",
+            ): "us-central1-aiplatform.googleapis.com",
+            (
+                "Staging-AiPlatform.Sandbox.Googleapis.Com",
+                "EU",
+            ): "staging-aiplatform.eu.rep.sandbox.googleapis.com",
+            (
+                "  AIPLATFORM.GOOGLEAPIS.COM  ",
+                "  GLOBAL  ",
+            ): "aiplatform.googleapis.com",
+            (
+                "  AIPLATFORM.US.REP.GOOGLEAPIS.COM  ",
+                "US-CENTRAL1",
+            ): "aiplatform.us.rep.googleapis.com",
+            (
+                "GLOBAL-AIPLATFORM.GOOGLEAPIS.COM",
+                "US-CENTRAL1",
+            ): "global-aiplatform.googleapis.com",
+        }
+        for (endpoint, location), expected in cases.items():
+            with self.subTest(endpoint=endpoint, location=location):
+                self.assertEqual(main.resolve_ws_host(endpoint, location), expected)
+
+        # Whitespace-only or non-ASCII (e.g. Unicode case-folding U+017F) are rejected.
+        rejected = [
+            ("   ", "us-central1"),
+            ("\t\n", "us"),
+            ("aiplatform.googleapi\u017f.com", "us"),
+            ("aiplatform.googleapis.com", "u\u017f"),
+            ("aiplatform.googleapis.com", "   "),
+            ("EVIL.REP.ATTACKER.COM", "US"),
+        ]
+        for endpoint, location in rejected:
+            with self.subTest(rejected=(endpoint, location)):
+                with self.assertRaises(ValueError):
+                    main.resolve_ws_host(endpoint, location)
+
     def test_rejects_hosts_outside_allowlist(self):
         cases = [
             ("evil.rep.attacker.com", "us-central1"),
@@ -422,6 +469,51 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             "/api/control", json={"command": "disconnect", "session_id": ["s3"]}
         )
         self.assertEqual(resp.status, 400)
+
+    async def test_control_normalizes_endpoint_and_location_case_and_whitespace(self):
+        cases = [
+            (
+                "s20-norm-1",
+                "  AIPLATFORM.GOOGLEAPIS.COM  ",
+                "  US  ",
+                "aiplatform.us.rep.googleapis.com",
+            ),
+            (
+                "s20-norm-2",
+                " AUTOPUSH-COMMON ",
+                "",
+                "autopush-common",
+            ),
+        ]
+        for session_id, endpoint, location, expected_host in cases:
+            with self.subTest(session_id=session_id):
+                resp = await self.client.post(
+                    "/api/control",
+                    json={
+                        "command": "connect",
+                        "session_id": session_id,
+                        "endpoint": endpoint,
+                        "location": location,
+                    },
+                )
+                self.assertEqual(resp.status, 200)
+                record = await main.SESSION_MANAGER.search_item(session_id)
+                self.assertIsNotNone(record)
+                assert record is not None
+                self.assertEqual(record.ws_host, expected_host)
+                await main.SESSION_MANAGER.remove_pending(session_id)
+
+        resp = await self.client.post(
+            "/api/control",
+            json={
+                "command": "connect",
+                "session_id": "s20-norm-blank",
+                "endpoint": "   ",
+                "location": "us",
+            },
+        )
+        self.assertEqual(resp.status, 400)
+        self.assertIsNone(await main.SESSION_MANAGER.search_item("s20-norm-blank"))
 
     async def test_control_rejects_non_string_endpoints(self):
         # A list or object used to reach the environment set and fail with 500.
