@@ -12,6 +12,7 @@ came back. Exits non-zero if the session never completes setup or a turn.
 import argparse
 import asyncio
 import json
+import math
 import sys
 import time
 import uuid
@@ -38,15 +39,40 @@ COMMON_BAG_ENVIRONMENTS = (
 
 def _ws_url(server: str, session_id: str) -> str:
     """Builds the /ws URL from an http(s) server URL."""
-    parts = urlsplit(server.strip())
+    stripped = server.strip()
+    parts = urlsplit(stripped)
     scheme = parts.scheme.lower()
-    if scheme not in ("http", "https") or not parts.netloc:
+    if scheme not in ("http", "https") or not parts.hostname:
         raise ValueError(
             f"--server must be an http:// or https:// URL (got {server!r})"
+        )
+    try:
+        port = parts.port
+    except ValueError as err:
+        raise ValueError(f"--server has an invalid port (got {server!r})") from err
+    if port == 0:
+        raise ValueError(f"--server has an invalid port (got {server!r})")
+    if parts.query or parts.fragment or "?" in stripped or "#" in stripped:
+        raise ValueError(
+            f"--server must not include a query or fragment (got {server!r})"
         )
     ws_scheme = "wss" if scheme == "https" else "ws"
     path = parts.path.rstrip("/") + "/ws"
     return urlunsplit((ws_scheme, parts.netloc, path, f"session_id={session_id}", ""))
+
+
+def _validate_timeout(timeout: object) -> float:
+    """Validates --timeout as a finite positive number of seconds."""
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise ValueError(
+            f"--timeout must be a finite positive number (got {timeout!r})"
+        )
+    value = float(timeout)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(
+            f"--timeout must be a finite positive number (got {timeout!r})"
+        )
+    return value
 
 
 def _server_content(message: dict) -> dict:
@@ -94,12 +120,13 @@ async def run(args: argparse.Namespace) -> int:
     environment = args.environment
     endpoint = ENVIRONMENT_ENDPOINTS.get(environment, environment)
     is_common_bag = environment in COMMON_BAG_ENVIRONMENTS
-    server = args.server.strip().rstrip("/")
     try:
-        ws_url = _ws_url(server, session_id)
+        ws_url = _ws_url(args.server, session_id)
+        timeout = _validate_timeout(args.timeout)
     except ValueError as err:
         print(f"FAIL: {err}")
         return 1
+    server = args.server.strip().rstrip("/")
 
     async with aiohttp.ClientSession() as http:
         async with http.post(
@@ -122,14 +149,18 @@ async def run(args: argparse.Namespace) -> int:
                 if resp.status == 200:
                     print("FAIL: /api/control did not return a JSON object")
                 return 1
-        project_id = body.get("project_id")
-
-        model = (
-            f"models/{args.model}"
-            if is_common_bag
-            else f"projects/{project_id}/locations/{args.location}"
-            f"/publishers/google/models/{args.model}"
-        )
+        raw_project_id = body.get("project_id")
+        if is_common_bag:
+            model = f"models/{args.model}"
+        else:
+            if not isinstance(raw_project_id, str) or not raw_project_id.strip():
+                print("FAIL: /api/control did not return a valid project_id")
+                return 1
+            project_id = raw_project_id.strip()
+            model = (
+                f"projects/{project_id}/locations/{args.location}"
+                f"/publishers/google/models/{args.model}"
+            )
         setup = {
             "setup": {
                 "model": model,
@@ -155,7 +186,7 @@ async def run(args: argparse.Namespace) -> int:
         async with http.ws_connect(ws_url, max_msg_size=64 * 1024 * 1024) as ws:
             await ws.send_str(json.dumps(setup))
             try:
-                async with asyncio.timeout(args.timeout):
+                async with asyncio.timeout(timeout):
                     while True:
                         msg = await ws.receive()
                         if msg.type == aiohttp.WSMsgType.BINARY:
@@ -213,7 +244,7 @@ async def run(args: argparse.Namespace) -> int:
                             turn_complete = True
                             break
             except TimeoutError:
-                print(f"timed out after {args.timeout}s")
+                print(f"timed out after {timeout}s")
             close_code = ws.close_code
 
         print(f"close code: {close_code} {close_reason}".rstrip())

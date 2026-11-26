@@ -157,6 +157,7 @@ class SmokeTestHelpersTest(unittest.TestCase):
                 "wss://example.com:8443/app/ws?session_id=s1",
             ),
             ("  HTTPS://http.example.com  ", "wss://http.example.com/ws?session_id=s1"),
+            ("http://[::1]:8080/", "ws://[::1]:8080/ws?session_id=s1"),
         ]:
             with self.subTest(server=server):
                 self.assertEqual(smoke_test._ws_url(server, "s1"), expected)
@@ -167,10 +168,42 @@ class SmokeTestHelpersTest(unittest.TestCase):
             "ftp://localhost:8080",
             "ws://localhost:8080",
             "http://",
+            "http://:8080",
+            "http://localhost:0",
+            "http://localhost:99999",
+            "http://localhost:abc",
+            "http://localhost:8080?x=1",
+            "http://localhost:8080?",
+            "http://localhost:8080#frag",
+            "http://localhost:8080#",
+            "http://localhost:8080/app?x=1",
+            "http://localhost:8080/app#frag",
         ]:
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     smoke_test._ws_url(bad, "s1")
+
+    def test_validate_timeout_accepts_positive_finite_and_rejects_invalid(self):
+        for good, expected in [(1, 1.0), (0.5, 0.5), (60.0, 60.0)]:
+            with self.subTest(good=good):
+                self.assertEqual(smoke_test._validate_timeout(good), expected)
+
+        for bad in [
+            0,
+            0.0,
+            -0.0,
+            -5,
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            True,
+            False,
+            None,
+            "5",
+        ]:
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    smoke_test._validate_timeout(bad)
 
 
 class SmokeTestRunTest(unittest.IsolatedAsyncioTestCase):
@@ -438,6 +471,161 @@ class SmokeTestRunTest(unittest.IsolatedAsyncioTestCase):
         rc, out = await self._run_captured(_make_args("ftp://localhost:8080"))
         self.assertEqual(rc, 1, out)
         self.assertIn("FAIL: --server must be an http:// or https:// URL", out)
+
+    async def test_server_with_query_or_fragment_returns_1_without_request(self):
+        called = False
+        app = web.Application()
+
+        async def control(_request: web.Request) -> web.Response:
+            nonlocal called
+            called = True
+            return web.json_response({"status": "ok", "project_id": "test-proj"})
+
+        app.router.add_post("/api/control", control)
+        server = await self._start_app(app)
+        base = str(server.make_url("")).rstrip("/")
+
+        for suffix in ("?x=1", "?", "#frag", "#", "?x=1/"):
+            with self.subTest(suffix=suffix):
+                rc, out = await self._run_captured(_make_args(f"{base}{suffix}"))
+                self.assertEqual(rc, 1, out)
+                self.assertIn(
+                    "FAIL: --server must not include a query or fragment", out
+                )
+        self.assertFalse(called)
+
+    async def test_invalid_timeout_returns_1_without_request(self):
+        called = False
+        app = web.Application()
+
+        async def control(_request: web.Request) -> web.Response:
+            nonlocal called
+            called = True
+            return web.json_response({"status": "ok", "project_id": "test-proj"})
+
+        app.router.add_post("/api/control", control)
+        server = await self._start_app(app)
+        base = str(server.make_url(""))
+
+        for bad_timeout in (
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            0,
+            -1.0,
+            True,
+            None,
+        ):
+            with self.subTest(timeout=bad_timeout):
+                rc, out = await self._run_captured(
+                    _make_args(base, timeout=bad_timeout)
+                )
+                self.assertEqual(rc, 1, out)
+                self.assertIn("FAIL: --timeout must be a finite positive number", out)
+        self.assertFalse(called)
+
+    async def test_missing_or_invalid_project_id_fails_for_vertex_environment(self):
+        for label, payload in [
+            ("missing", {"status": "ok"}),
+            ("null", {"status": "ok", "project_id": None}),
+            ("empty", {"status": "ok", "project_id": ""}),
+            ("whitespace", {"status": "ok", "project_id": "   "}),
+            ("int", {"status": "ok", "project_id": 123}),
+            ("bool", {"status": "ok", "project_id": True}),
+            ("list", {"status": "ok", "project_id": ["p"]}),
+        ]:
+            with self.subTest(case=label):
+                ws_called = False
+                app = web.Application()
+
+                async def control(
+                    _request: web.Request, body: dict = payload
+                ) -> web.Response:
+                    return web.json_response(body)
+
+                async def ws_handler(request: web.Request) -> web.WebSocketResponse:
+                    nonlocal ws_called
+                    ws_called = True
+                    ws = web.WebSocketResponse()
+                    await ws.prepare(request)
+                    return ws
+
+                app.router.add_post("/api/control", control)
+                app.router.add_get("/ws", ws_handler)
+                server = await self._start_app(app)
+
+                rc, out = await self._run_captured(
+                    _make_args(
+                        str(server.make_url("")),
+                        environment="prod",
+                        timeout=1.5,
+                    )
+                )
+                self.assertEqual(rc, 1, out)
+                self.assertIn(
+                    "FAIL: /api/control did not return a valid project_id", out
+                )
+                self.assertFalse(ws_called)
+
+    async def test_trimmed_project_id_for_vertex_and_optional_for_common_bag(self):
+        for env, control_body, expected_model in [
+            (
+                "prod",
+                {"status": "ok", "project_id": "  my-proj  "},
+                "projects/my-proj/locations/us-central1/publishers/google/models/gemini-3.8-live",
+            ),
+            (
+                "autopush-common",
+                {"status": "ok"},
+                "models/gemini-3.8-live",
+            ),
+        ]:
+            with self.subTest(environment=env):
+                seen_models: list[str] = []
+                app = web.Application()
+
+                async def control(
+                    _request: web.Request, body: dict = control_body
+                ) -> web.Response:
+                    return web.json_response(body)
+
+                async def ws_handler(
+                    request: web.Request, models: list[str] = seen_models
+                ) -> web.WebSocketResponse:
+                    ws = web.WebSocketResponse()
+                    await ws.prepare(request)
+                    setup = json.loads(await ws.receive_str())
+                    models.append(setup["setup"]["model"])
+                    await ws.send_str(json.dumps({"setupComplete": {}}))
+                    await ws.receive_str()
+                    await ws.send_str(
+                        json.dumps(
+                            {
+                                "serverContent": {
+                                    "modelTurn": {"parts": [{"text": "ok"}]},
+                                    "turnComplete": True,
+                                }
+                            }
+                        )
+                    )
+                    async for _ in ws:
+                        pass
+                    return ws
+
+                app.router.add_post("/api/control", control)
+                app.router.add_get("/ws", ws_handler)
+                server = await self._start_app(app)
+
+                rc, out = await self._run_captured(
+                    _make_args(
+                        str(server.make_url("")),
+                        environment=env,
+                        timeout=1.5,
+                    )
+                )
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(seen_models, [expected_model])
+                self.assertIn("PASS", out)
 
 
 if __name__ == "__main__":
