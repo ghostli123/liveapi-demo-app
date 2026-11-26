@@ -4338,7 +4338,24 @@ test("resumption, simulator, screen, and recording start errors handle null and 
         assert.equal(dialogText(), expected);
     }
 
-    // simulateFunctionResponse: empty-message DOMException, blank/plain objects, null/undefined, and throwing toString.
+    // simulateFunctionResponse: empty-message DOMException, blank/plain objects, null/undefined, throwing getters, and throwing toString.
+    const throwingMsgWithName = { name: "GetterName" };
+    Object.defineProperty(throwingMsgWithName, "message", {
+        get() {
+            throw new Error("message getter exploded");
+        },
+    });
+    const throwingBothGetters = Object.create(null);
+    Object.defineProperty(throwingBothGetters, "message", {
+        get() {
+            throw new Error("message getter exploded");
+        },
+    });
+    Object.defineProperty(throwingBothGetters, "name", {
+        get() {
+            throw new Error("name getter exploded");
+        },
+    });
     for (const [reason, expected] of [
         [{ name: "AbortError", message: "  " }, "AbortError"],
         [{ name: "  ", message: "  " }, "unknown error"],
@@ -4346,6 +4363,8 @@ test("resumption, simulator, screen, and recording start errors handle null and 
         [null, "unknown error"],
         [undefined, "unknown error"],
         [Object.create(null), "unknown error"],
+        [throwingMsgWithName, "GetterName"],
+        [throwingBothGetters, "unknown error"],
         [{ toString() { throw new Error("nope"); } }, "unknown error"],
         [{ toString() { return "  custom failure  "; } }, "custom failure"],
         ["", "unknown error"],

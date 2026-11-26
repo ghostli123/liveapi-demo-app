@@ -2862,3 +2862,206 @@ test("parseAll, canResume, and setResumption normalize whitespace and non-string
     assert.equal(api.latestResumptionHandle, "h-valid");
     assert.equal(api.canResume(), true);
 });
+
+test("updateBandwidthUsage() runs safely without a global document", () => {
+    const intervals = [];
+    const { GeminiLiveAPI: DomlessApi } = loadScript("gemini-live-api.js", ["GeminiLiveAPI"], {
+        document: undefined,
+        WebSocket: FakeWebSocket,
+        setTimeout: () => 1,
+        clearTimeout: () => {},
+        setInterval: (fn, ms) => {
+            intervals.push({ fn, ms, cleared: false });
+            return intervals.length;
+        },
+        clearInterval: (id) => {
+            if (intervals[id - 1]) intervals[id - 1].cleared = true;
+        },
+    });
+    const api = new DomlessApi("ws://x/ws", "/api/control", "/api/post_endpoint");
+    api.bytesIn = 2048;
+    api.bytesOut = 1024;
+    api.updateBandwidthUsage();
+    assert.equal(intervals.length, 1);
+    assert.doesNotThrow(() => intervals[0].fn());
+    assert.equal(api.history.length, 1);
+    assert.equal(api.bytesIn, 0);
+    assert.equal(api.bytesOut, 0);
+    assert.doesNotThrow(() => api.stopUpdateBandwidthUsage());
+    assert.equal(intervals[0].cleared, true);
+    assert.equal(api.history.length, 0);
+});
+
+test("direct resume(handle) on a fresh or disconnected instance starts a fresh idle deadline", async () => {
+    const clock = { now: 100000 };
+    const recorded = [];
+    const { GeminiLiveAPI: ClockedApi } = loadScript("gemini-live-api.js", ["GeminiLiveAPI"], {
+        WebSocket: FakeWebSocket,
+        setTimeout: (fn, ms) => {
+            const entry = { fn, ms, cleared: false };
+            recorded.push(entry);
+            return recorded.length;
+        },
+        clearTimeout: (id) => {
+            if (recorded[id - 1]) recorded[id - 1].cleared = true;
+        },
+        setInterval: () => 1,
+        clearInterval: () => {},
+        performance: { now: () => clock.now },
+    });
+
+    // Fresh instance: lastActivityAt is null, so resume() seeds it instead of timing out at 0.
+    const api = new ClockedApi("ws://x/ws", "/api/control", "/api/post_endpoint");
+    const idleMessages = [];
+    api.onIdleTimeout = (message) => idleMessages.push(message);
+    api.sendPostRequest = async () => ({ project_id: "p", idle_timeout_s: 30 });
+    api.setupWebSocketToService = () => {};
+    await api.resume("saved-handle");
+    assert.equal(api.lastActivityAt, 100000);
+    assert.equal(recorded[api.idleTimer - 1].ms, 30000);
+    clock.now += 1000;
+    recorded[api.idleTimer - 1].fn();
+    assert.deepEqual(idleMessages, []);
+    assert.equal(recorded[api.idleTimer - 1].ms, 29000);
+
+    // After disconnect(), a later direct resume() also gets a fresh idle deadline.
+    api.disconnect();
+    assert.equal(api.lastActivityAt, null);
+    clock.now += 60000;
+    await api.resume("saved-handle-2");
+    assert.equal(api.lastActivityAt, 161000);
+    assert.equal(recorded[api.idleTimer - 1].ms, 30000);
+    clock.now += 30000;
+    recorded[api.idleTimer - 1].fn();
+    assert.deepEqual(idleMessages, ["Disconnected after 30 seconds without activity."]);
+});
+
+test("re-entrant connect() or disconnect() before throwing in setup/reconnect callbacks does not tear down replacement session", async () => {
+    // 1. onConnectionStarted calls connect() then throws.
+    const api1 = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    const errors1 = [];
+    api1.onErrorMessage = (message) => errors1.push(message);
+    api1.sendPostRequest = async () => ({ project_id: "p", idle_timeout_s: 0 });
+    let replaced = false;
+    let nextConnect = null;
+    api1.onConnectionStarted = () => {
+        if (!replaced) {
+            replaced = true;
+            nextConnect = api1.connect();
+            throw new Error("boom after connect");
+        }
+    };
+    await api1.connect();
+    const ws1 = api1.webSocket;
+    api1.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) });
+    await nextConnect;
+    assert.deepEqual(errors1, []);
+    assert.ok(api1.webSocket && api1.webSocket !== ws1);
+    api1.disconnect();
+
+    // 2. onTransportFallback calls disconnect() then throws.
+    const api2 = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    const errors2 = [];
+    api2.onErrorMessage = (message) => errors2.push(message);
+    api2.sendPostRequest = async () => ({ project_id: "p", idle_timeout_s: 0 });
+    api2.transportMode = "webrtc";
+    api2.webRtcManager = { close() {} };
+    api2.onTransportFallback = () => {
+        api2.disconnect();
+        throw new Error("boom after disconnect");
+    };
+    await api2.connect();
+    api2.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) });
+    assert.deepEqual(errors2, []);
+
+    // 3. onReconnectNeeded (1001 onclose) calls connect() then throws.
+    const api3 = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    const errors3 = [];
+    api3.onErrorMessage = (message) => errors3.push(message);
+    api3.sendPostRequest = async () => ({ project_id: "p", idle_timeout_s: 60 });
+    api3.setResumption(true, "");
+    let reconnectPromise = null;
+    api3.onReconnectNeeded = () => {
+        reconnectPromise = api3.connect();
+        throw new Error("boom after reconnect");
+    };
+    await api3.connect();
+    const ws3 = api3.webSocket;
+    api3.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) });
+    api3.onReceiveMessage({ data: JSON.stringify({ sessionResumptionUpdate: { newHandle: "h3" } }) });
+    ws3.onclose({ code: 1001, reason: "" });
+    await reconnectPromise;
+    assert.deepEqual(errors3, []);
+    assert.ok(api3.webSocket && api3.webSocket !== ws3);
+    assert.ok(api3.idleTimer !== null);
+    api3.disconnect();
+});
+
+test("formatErrorReason() handles throwing .message and .name getters without escaping catch blocks", async () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    const errors = [];
+    api.onErrorMessage = (message) => errors.push(message);
+    api.sendPostRequest = async () => ({ project_id: "p", idle_timeout_s: 0 });
+
+    // Throwing .message falls back to readable .name.
+    const throwingMsgWithName = { name: "CustomName" };
+    Object.defineProperty(throwingMsgWithName, "message", {
+        get() {
+            throw new Error("getter exploded");
+        },
+    });
+    api.onConnectionStarted = () => {
+        throw throwingMsgWithName;
+    };
+    await api.connect();
+    assert.doesNotThrow(() => api.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) }));
+    assert.deepEqual(errors.splice(0), ["Could not start the session: CustomName"]);
+
+    // Both .message and .name throwing fall back to "unknown error" (or String(error)).
+    const bothThrow = Object.create(null);
+    Object.defineProperty(bothThrow, "message", {
+        get() {
+            throw new Error("msg exploded");
+        },
+    });
+    Object.defineProperty(bothThrow, "name", {
+        get() {
+            throw new Error("name exploded");
+        },
+    });
+    api.onConnectionStarted = () => {
+        throw bothThrow;
+    };
+    await api.connect();
+    assert.doesNotThrow(() => api.onReceiveMessage({ data: JSON.stringify({ setupComplete: {} }) }));
+    assert.deepEqual(errors.splice(0), ["Could not start the session: unknown error"]);
+});
+
+test("sendInitialSetupMessages() and _buildAvatarConfig() handle non-array responseModalities without throwing", async () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    api.model = "gemini-3.8-live";
+    api.environment = "autopush-common";
+    api.transportMode = "webrtc";
+    const offerArgs = [];
+    api.webRtcManager = {
+        async initiateSession(opts) {
+            offerArgs.push(opts);
+            return "v=0\r\n";
+        },
+        close() {},
+    };
+    const ws = new FakeWebSocket();
+    ws.readyState = FakeWebSocket.OPEN;
+    api.webSocket = ws;
+
+    for (const bad of [null, undefined, "VIDEO", 123, {}]) {
+        api.responseModalities = bad;
+        assert.equal(api._buildAvatarConfig(), null);
+        assert.deepEqual(plain(api._buildGenerationConfig().response_modalities), []);
+        await api.sendInitialSetupMessages(ws);
+        assert.deepEqual(plain(offerArgs.at(-1)), { wantsVideo: false });
+        const sent = ws.sent.at(-1);
+        assert.deepEqual(sent.setup.generation_config.response_modalities, []);
+        assert.equal("avatar_config" in sent.setup, false);
+    }
+});

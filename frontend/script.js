@@ -686,8 +686,14 @@ const BrandedVoices = new Map(); // voice-dropdown value -> base64 WAV
 /** Extracts a non-empty human-readable reason from a caught error or rejection value. */
 function errorReason(error) {
     if (error && typeof error === "object") {
-        if (typeof error.message === "string" && error.message.trim()) return error.message.trim();
-        if (typeof error.name === "string" && error.name.trim()) return error.name.trim();
+        for (const key of ["message", "name"]) {
+            try {
+                const value = error[key];
+                if (typeof value === "string" && value.trim()) return value.trim();
+            } catch {
+                // E.g. an error object with a throwing getter.
+            }
+        }
     }
     if (error !== null && error !== undefined) {
         try {

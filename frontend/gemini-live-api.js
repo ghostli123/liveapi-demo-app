@@ -271,8 +271,14 @@ function httpErrorDetail(receivedData, statusText) {
  */
 function formatErrorReason(error) {
     if (error && typeof error === "object") {
-        if (typeof error.message === "string" && error.message.trim()) return error.message.trim();
-        if (typeof error.name === "string" && error.name.trim()) return error.name.trim();
+        for (const key of ["message", "name"]) {
+            try {
+                const value = error[key];
+                if (typeof value === "string" && value.trim()) return value.trim();
+            } catch {
+                // E.g. an error object with a throwing getter.
+            }
+        }
     }
     if (error !== null && error !== undefined) {
         try {
@@ -392,7 +398,8 @@ class GeminiLiveAPI {
         this.setupTimer = null;
         // From the server's --idle_timeout_s; 0 means sessions never time out.
         this.idleTimeoutMs = 0;
-        this.lastActivityAt = 0; // performance.now() of the last noteActivity()
+        /** @type {number | null} performance.now() of the last noteActivity(), or null before any activity. */
+        this.lastActivityAt = null;
         this.idleTimer = null;
         // Called when a session times out for lack of activity; the handler
         // ends the session, as for onErrorMessage.
@@ -697,6 +704,7 @@ class GeminiLiveAPI {
         this.clearSetupTimer();
         this.stopUpdateBandwidthUsage();
         this.clearIdleTimer();
+        this.lastActivityAt = null;
         if (closeWebRtc && this.webRtcManager) {
             this.webRtcManager.close({ markClosed: this.transportMode === "webrtc" });
         }
@@ -1012,7 +1020,13 @@ class GeminiLiveAPI {
     startIdleTimer({ keepActivity = false } = {}) {
         this.clearIdleTimer();
         // Even with the timeout off, so a resume that turns it on has a start.
-        if (!keepActivity) this.noteActivity();
+        // Also seed lastActivityAt when keepActivity is requested on a fresh
+        // or ended instance with no activity timestamp yet (e.g. direct resume()).
+        const hasActivity =
+            keepActivity &&
+            typeof this.lastActivityAt === "number" &&
+            Number.isFinite(this.lastActivityAt);
+        if (!hasActivity) this.noteActivity();
         if (!(this.idleTimeoutMs > 0) || !Number.isFinite(this.idleTimeoutMs)) return;
         // Browsers run a timeout longer than 2^31-1 ms (~24.8 days) at once,
         // so a longer --idle_timeout_s would make check() spin; it re-arms.
@@ -1021,7 +1035,11 @@ class GeminiLiveAPI {
             this.idleTimer = null;
             // A resume's prepare() may have turned the timeout off.
             if (!(this.idleTimeoutMs > 0) || !Number.isFinite(this.idleTimeoutMs)) return;
-            const left = this.lastActivityAt + this.idleTimeoutMs - performance.now();
+            const last =
+                typeof this.lastActivityAt === "number" && Number.isFinite(this.lastActivityAt)
+                    ? this.lastActivityAt
+                    : performance.now();
+            const left = last + this.idleTimeoutMs - performance.now();
             if (left > 0) {
                 this.idleTimer = wait(left);
                 return;
@@ -1033,7 +1051,9 @@ class GeminiLiveAPI {
             this.disconnect();
             this.onIdleTimeout(message);
         };
-        const left = keepActivity ? this.lastActivityAt + this.idleTimeoutMs - performance.now() : this.idleTimeoutMs;
+        const left = hasActivity
+            ? /** @type {number} */ (this.lastActivityAt) + this.idleTimeoutMs - performance.now()
+            : this.idleTimeoutMs;
         this.idleTimer = wait(left);
     }
 
@@ -1086,6 +1106,7 @@ class GeminiLiveAPI {
                         this.fallBackToWebSocketMedia();
                     } catch (error) {
                         console.error("Error switching media to the WebSocket:", error);
+                        if (!isCurrent()) return;
                         // fallBackToWebSocketMedia() already closed webRtcManager.
                         this._teardownSession({ closeWebRtc: false });
                         this.onErrorMessage(
@@ -1139,6 +1160,7 @@ class GeminiLiveAPI {
                     this.onConnectionStarted();
                 } catch (error) {
                     console.error("Error starting the connection:", error);
+                    if (!isCurrent()) return;
                     this._teardownSession();
                     this.onErrorMessage(`Could not start the session: ${formatErrorReason(error)}`);
                     return; // The session has ended; drop the rest.
@@ -1188,6 +1210,7 @@ class GeminiLiveAPI {
         console.log("connecting: ", this.proxyUrl);
 
         const sessionId = this.sessionId;
+        const connectAttempt = this.connectAttempt;
         const wsUrl = new URL(this.proxyUrl);
         wsUrl.searchParams.append("session_id", sessionId);
         const webSocket = new WebSocket(wsUrl);
@@ -1225,6 +1248,7 @@ class GeminiLiveAPI {
                 event.code === 1001 && wasSetUp && this.canResume() && this.takeAutoResume();
             if (!resumable) {
                 this.clearIdleTimer();
+                this.lastActivityAt = null;
             }
             if (this.webRtcManager) {
                 this.webRtcManager.close({
@@ -1237,7 +1261,9 @@ class GeminiLiveAPI {
                     this.onReconnectNeeded();
                 } catch (error) {
                     console.error("Error resuming the session:", error);
+                    if (this.connectAttempt !== connectAttempt) return;
                     this.clearIdleTimer();
+                    this.lastActivityAt = null;
                     if (this.webRtcManager) {
                         this.webRtcManager.close({ markClosed: this.transportMode === "webrtc" });
                     }
@@ -1307,14 +1333,16 @@ class GeminiLiveAPI {
             this.history.push(stats);
             if (this.history.length > 60) this.history.shift(); // Keep last minute of history
 
-            const uploadSpeedElement = document.getElementById("upload-speed");
-            const downloadSpeedElement = document.getElementById("download-speed");
+            if (typeof document !== "undefined" && document) {
+                const uploadSpeedElement = document.getElementById("upload-speed");
+                const downloadSpeedElement = document.getElementById("download-speed");
 
-            if (uploadSpeedElement) {
-                uploadSpeedElement.textContent = uploadSpeed.toFixed(2);
-            }
-            if (downloadSpeedElement) {
-                downloadSpeedElement.textContent = downloadSpeed.toFixed(2);
+                if (uploadSpeedElement) {
+                    uploadSpeedElement.textContent = uploadSpeed.toFixed(2);
+                }
+                if (downloadSpeedElement) {
+                    downloadSpeedElement.textContent = downloadSpeed.toFixed(2);
+                }
             }
 
             // Reset counters for the next interval
@@ -1336,7 +1364,7 @@ class GeminiLiveAPI {
         this.bytesIn = 0;
         this.bytesOut = 0;
         this.history = [];
-        if (typeof document !== "undefined") {
+        if (typeof document !== "undefined" && document) {
             for (const id of ["upload-speed", "download-speed"]) {
                 const element = document.getElementById(id);
                 if (element) element.textContent = "0.00";
@@ -1394,7 +1422,7 @@ class GeminiLiveAPI {
         }
 
         if (this.transportMode === "webrtc" && this.webRtcManager) {
-            const wantsVideo = this.responseModalities.includes("VIDEO");
+            const wantsVideo = this._responseModalities().includes("VIDEO");
             console.log(
                 `[WebRTC] Generating SDP offer (wantsVideo=${wantsVideo})...`
             );
@@ -1449,6 +1477,14 @@ class GeminiLiveAPI {
         this.sendMessage(sessionSetupMessage);
     }
 
+    /**
+     * Returns `this.responseModalities` when it is an array, or `[]` otherwise.
+     * @returns {string[]}
+     */
+    _responseModalities() {
+        return Array.isArray(this.responseModalities) ? this.responseModalities : [];
+    }
+
     _buildGenerationConfig() {
         const voiceConfig = this.customVoiceSample
             ? {
@@ -1468,7 +1504,7 @@ class GeminiLiveAPI {
             : this.voiceLocale;
 
         return {
-            response_modalities: this.responseModalities,
+            response_modalities: this._responseModalities(),
             speech_config: {
                 voice_config: voiceConfig,
                 language_code: languageCode,
@@ -1477,7 +1513,7 @@ class GeminiLiveAPI {
     }
 
     _buildAvatarConfig() {
-        if (!this.responseModalities.includes("VIDEO")) {
+        if (!this._responseModalities().includes("VIDEO")) {
             return null;
         }
         const config = {};
