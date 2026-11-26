@@ -812,6 +812,22 @@ test("parseIntervalMs clamps typed intervals and falls back on unusable ones", (
     assert.equal(video("3"), 100);
     assert.equal(video("1500"), 1500);
     assert.equal(video("1e9"), 60000);
+    assert.equal(audio(500), 500);
+    assert.equal(audio("   "), 200);
+    for (const bad of [
+        true,
+        false,
+        [500],
+        { valueOf: () => 500 },
+        Symbol("ms"),
+        Object.create(null),
+        500n,
+        NaN,
+        Infinity,
+    ]) {
+        assert.equal(audio(bad), 200);
+        assert.equal(video(bad), 400);
+    }
 });
 
 test("updateAudioInterval sends audio at the clamped interval", async () => {

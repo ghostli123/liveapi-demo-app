@@ -1689,6 +1689,44 @@ test("typed bitrates are sent as positive integers or not at all", async () => {
     assert.deepEqual(await sentBitrates("-64000", "Infinity"), [undefined, undefined]);
     assert.deepEqual(await sentBitrates("0.4", "abc"), [undefined, undefined]);
     assert.deepEqual(await sentBitrates("", ""), [undefined, undefined]);
+    assert.deepEqual(await sentBitrates("   ", "\t\n"), [undefined, undefined]);
+    assert.deepEqual(await sentBitrates("2147483647", 2147483647.4), [2147483647, 2147483647]);
+    assert.deepEqual(await sentBitrates("2147483648", 2147483647.5), [undefined, undefined]);
+    assert.deepEqual(await sentBitrates("1e30", 1e30), [undefined, undefined]);
+});
+
+test("setBitrates and avatar config reject non-numeric coercion and int32 overflow", async () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    api.webSocket = new FakeWebSocket();
+    api.transportMode = "websocket";
+    api.responseModalities = ["AUDIO", "VIDEO"];
+
+    for (const bad of [
+        true,
+        false,
+        null,
+        undefined,
+        [64000],
+        { valueOf: () => 64000 },
+        Symbol("bps"),
+        Object.create(null),
+        64000n,
+        "1e30",
+        2147483648,
+        "2147483648",
+    ]) {
+        api.setBitrates(bad, bad);
+        assert.equal(api.audioBitrate, 0);
+        assert.equal(api.videoBitrate, 0);
+    }
+
+    // Even direct property mutation outside int32 range or non-numeric is omitted.
+    api.audioBitrate = 1e30;
+    api.videoBitrate = true;
+    await api.sendInitialSetupMessages();
+    const { audio_bitrate_bps, video_bitrate_bps } = api.webSocket.sent[0].setup.avatar_config;
+    assert.equal(audio_bitrate_bps, undefined);
+    assert.equal(video_bitrate_bps, undefined);
 });
 
 // A connected session whose server set --idle_timeout_s=idleS.

@@ -355,7 +355,16 @@ const MIC_SAMPLE_RATE = 16000;
  * @returns {number}
  */
 function parseIntervalMs(value, { min, max, fallback }) {
-    const ms = Number(value);
+    let ms;
+    if (typeof value === "number") {
+        ms = value;
+    } else if (typeof value === "string") {
+        const trimmed = value.trim();
+        if (!trimmed) return fallback;
+        ms = Number(trimmed);
+    } else {
+        return fallback;
+    }
     if (!Number.isFinite(ms) || ms <= 0) return fallback;
     return Math.min(max, Math.max(min, Math.round(ms)));
 }

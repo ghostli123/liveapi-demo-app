@@ -141,6 +141,8 @@ const SETUP_TIMEOUT_MS = 30000;
 const CONTROL_TIMEOUT_MS = 15000;
 // The longest delay setTimeout supports (a signed 32-bit millisecond count).
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+// Maximum proto3 int32 value for audio_bitrate_bps / video_bitrate_bps.
+const MAX_BITRATE_BPS = 2 ** 31 - 1;
 // Most automatic resumes (after close code 1001) allowed per minute.
 const AUTO_RESUME_LIMIT = 3;
 // Server events that mean a conversation is going on, for the idle timeout.
@@ -182,6 +184,29 @@ function parseIdleTimeoutMs(seconds) {
     }
     const ms = seconds * 1000;
     return Number.isFinite(ms) ? ms : 0;
+}
+
+/**
+ * Parses an audio/video bitrate in bits per second as a positive proto3
+ * `int32` (`1..2147483647`), rounding finite numeric values and returning `0`
+ * (not sent) for blank, non-numeric, non-string/non-number, non-positive,
+ * non-finite, or overflowing values.
+ * @param {unknown} value
+ * @returns {number}
+ */
+function parseBitrateBps(value) {
+    let num;
+    if (typeof value === "number") {
+        num = value;
+    } else if (typeof value === "string") {
+        const trimmed = value.trim();
+        if (!trimmed) return 0;
+        num = Number(trimmed);
+    } else {
+        return 0;
+    }
+    const bps = Math.round(num);
+    return Number.isFinite(bps) && bps > 0 && bps <= MAX_BITRATE_BPS ? bps : 0;
 }
 
 /**
@@ -508,19 +533,14 @@ class GeminiLiveAPI {
 
     /**
      * Configures audio and video bitrates for the connection. The setup
-     * fields are integers, so a typed value is rounded; anything that isn't a
-     * positive finite number becomes 0 (not sent).
+     * fields are 32-bit integers, so a typed value is rounded; anything that
+     * isn't a positive finite number within proto3 int32 range becomes 0 (not sent).
      * @param {number | string} audioBitrate - Audio bitrate in bits per second.
      * @param {number | string} videoBitrate - Video bitrate in bits per second.
      */
     setBitrates(audioBitrate, videoBitrate) {
-        /** @param {number | string} value */
-        const toBps = (value) => {
-            const bps = Math.round(Number(value));
-            return Number.isFinite(bps) && bps > 0 ? bps : 0;
-        };
-        this.audioBitrate = toBps(audioBitrate);
-        this.videoBitrate = toBps(videoBitrate);
+        this.audioBitrate = parseBitrateBps(audioBitrate);
+        this.videoBitrate = parseBitrateBps(videoBitrate);
     }
 
     /**
@@ -1452,11 +1472,13 @@ class GeminiLiveAPI {
         } else {
             config.avatar_name = "Piper";
         }
-        if (this.audioBitrate > 0) {
-            config.audio_bitrate_bps = this.audioBitrate;
+        const audioBitrate = parseBitrateBps(this.audioBitrate);
+        if (audioBitrate > 0) {
+            config.audio_bitrate_bps = audioBitrate;
         }
-        if (this.videoBitrate > 0) {
-            config.video_bitrate_bps = this.videoBitrate;
+        const videoBitrate = parseBitrateBps(this.videoBitrate);
+        if (videoBitrate > 0) {
+            config.video_bitrate_bps = videoBitrate;
         }
         return config;
     }
