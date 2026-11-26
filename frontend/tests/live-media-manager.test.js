@@ -273,6 +273,22 @@ test("a microphone that ends on its own is reported; a replaced one isn't", asyn
     assert.equal(ended, 1);
 });
 
+test("startMicrophone reports an already-ended track without sending it to audioSender", async () => {
+    const { manager, requests, sent } = webRtcManagerWithPendingMic();
+    let ended = 0;
+    manager.onMicrophoneEnded = () => {
+        ended++;
+        manager.stopMicrophone();
+    };
+    const starting = manager.startMicrophone("a");
+    requests[0].track.readyState = "ended";
+    requests[0].grant();
+    await starting;
+    assert.equal(ended, 1);
+    assert.equal(manager.micStream, null);
+    assert.ok(!sent.includes(requests[0].track));
+});
+
 /**
  * A LiveAudioInputManager (WebSocket mic) on fake audio nodes.
  * @param {{
@@ -1869,8 +1885,11 @@ function audioOutputWithFakeContexts({ holdAddModule = false } = {}) {
         pendingLoads: [],
         failNextLoad: false,
         failAllLoads: false,
+        syncThrowAddModule: false,
         refuseContexts: false,
         noWorklet: false,
+        deadPosts: 0,
+        deadNodes: 0,
         errors: [],
         warnings: [],
         now: 0,
@@ -1885,8 +1904,11 @@ function audioOutputWithFakeContexts({ holdAddModule = false } = {}) {
             this.audioWorklet = fake.noWorklet
                 ? undefined
                 : {
-                      addModule: async () => {
+                      addModule: () => {
                           fake.loads++;
+                          if (fake.syncThrowAddModule) {
+                              throw new Error("sync addModule error");
+                          }
                           if (holdAddModule) {
                               return new Promise((resolve, reject) => {
                                   fake.pendingLoads.push({ resolve, reject });
@@ -1896,7 +1918,8 @@ function audioOutputWithFakeContexts({ holdAddModule = false } = {}) {
                               fake.failNextLoad = false;
                               failed = true;
                           }
-                          if (failed) throw new Error("503");
+                          if (failed) return Promise.reject(new Error("503"));
+                          return Promise.resolve();
                       },
                   };
             fake.contexts.push(this);
@@ -1913,9 +1936,15 @@ function audioOutputWithFakeContexts({ holdAddModule = false } = {}) {
     class FakeWorkletNode {
         constructor(context) {
             this.context = context;
+            if (context.state === "closed") fake.deadNodes++;
             this.posted = [];
             this.disconnected = false;
-            this.port = { postMessage: (message) => this.posted.push(message) };
+            this.port = {
+                postMessage: (message) => {
+                    if (this.context.state === "closed") fake.deadPosts++;
+                    this.posted.push(message);
+                },
+            };
         }
         connect() {}
         disconnect() {
@@ -2458,6 +2487,96 @@ test("initializeAudioContext and playAudioChunk rebuild when audioContext was cl
     const node = await rebuilt;
     assert.equal(node.context, pendingFake.contexts[1]);
     assert.equal(pending.workletNode, node);
+});
+
+test("initializeAudioContext closes context and backs off when addModule() throws synchronously", async () => {
+    const { manager, fake } = audioOutputWithFakeContexts();
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    const reports = [];
+    manager.onPlayerError = (message) => reports.push(message);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+        fake.syncThrowAddModule = true;
+        const first = manager.initializeAudioContext();
+        assert.equal(fake.contexts.length, 1);
+        assert.equal(fake.contexts[0].state, "closed");
+        assert.equal(manager.audioContext, null);
+        assert.equal(manager.ready, null);
+        await assert.rejects(first, /sync addModule error/);
+
+        // Within backoff: playAudioChunk() reuses the rejection without building a new context.
+        assert.doesNotThrow(() => manager.playAudioChunk(AUDIO_CHUNK));
+        await settle();
+        assert.equal(fake.contexts.length, 1);
+        assert.equal(reports.length, 1);
+        assert.equal(fake.errors.filter((e) => e === "Could not load the audio player:").length, 1);
+
+        // Once the backoff elapses (or after resume()), recovery creates a working context.
+        fake.syncThrowAddModule = false;
+        fake.now = 1000;
+        manager.playAudioChunk(AUDIO_CHUNK);
+        await settle();
+        assert.equal(fake.contexts.length, 2);
+        assert.equal(manager.workletNode.context, fake.contexts[1]);
+        assert.equal(manager.workletNode.posted.length, 1);
+        assert.deepEqual(unhandled, []);
+    } finally {
+        process.off("unhandledRejection", onUnhandled);
+    }
+});
+
+test("LiveAudioOutputManager skips posting when audioContext closes externally before clear or mid-load", async () => {
+    // 1. clear() on an already externally closed context does not post to the dead port.
+    const { manager: m1, fake: f1 } = audioOutputWithFakeContexts();
+    m1.resume();
+    await settle();
+    assert.ok(m1.workletNode);
+    f1.contexts[0].state = "closed";
+    m1.clear();
+    await settle();
+    assert.equal(f1.deadPosts, 0);
+    assert.equal(m1.workletNode.posted.length, 0);
+
+    // 2. Context closed synchronously after clear() / playAudioChunk() queued microtasks.
+    const { manager: m2, fake: f2 } = audioOutputWithFakeContexts();
+    m2.resume();
+    await settle();
+    m2.playAudioChunk(AUDIO_CHUNK);
+    m2.clear();
+    f2.contexts[0].state = "closed";
+    await settle();
+    assert.equal(f2.deadPosts, 0);
+    assert.equal(m2.workletNode.posted.length, 0);
+
+    // 3. Context closed externally while addModule() is in flight: no node created,
+    //    no dead post, no spurious error or backoff, and next chunk rebuilds cleanly.
+    const { manager: m3, fake: f3 } = audioOutputWithFakeContexts({ holdAddModule: true });
+    const reports = [];
+    m3.onPlayerError = (message) => reports.push(message);
+    m3.playAudioChunk(AUDIO_CHUNK);
+    m3.clear();
+    assert.equal(f3.contexts.length, 1);
+    f3.contexts[0].state = "closed";
+    f3.pendingLoads[0].resolve();
+    await settle();
+    assert.equal(f3.deadNodes, 0);
+    assert.equal(f3.deadPosts, 0);
+    assert.equal(m3.audioContext, null);
+    assert.equal(m3.ready, null);
+    assert.equal(m3.workletNode, null);
+    assert.equal(m3.failed, null);
+    assert.deepEqual(reports, []);
+    assert.deepEqual(f3.errors, []);
+
+    m3.playAudioChunk(AUDIO_CHUNK);
+    assert.equal(f3.contexts.length, 2);
+    f3.pendingLoads[1].resolve();
+    await settle();
+    assert.equal(f3.deadNodes, 0);
+    assert.equal(f3.deadPosts, 0);
+    assert.equal(m3.workletNode.context, f3.contexts[1]);
+    assert.equal(m3.workletNode.posted.length, 1);
 });
 
 test("resumeContext() handles audioContext.resume() returning undefined or throwing synchronously", async () => {

@@ -35,7 +35,8 @@ class PCMProcessor extends AudioWorkletProcessor {
      * @param {Float32Array[][]} outputs
      */
     process(inputs, outputs) {
-        const channelData = outputs[0][0];
+        const channelData = outputs?.[0]?.[0];
+        if (!channelData || channelData.length === 0) return true;
         let written = 0;
         while (written < channelData.length && this.queue.length > 0) {
             const chunk = this.queue[0];

@@ -55,3 +55,12 @@ test("ignores messages that aren't non-empty Float32Arrays", () => {
     assert.deepEqual(render(processor), [5, 0, 0, 0]);
     assert.equal(processor.queue.length, 0);
 });
+
+test("process() ignores missing or empty output channels without dropping queued audio", () => {
+    const processor = new registered.cls();
+    processor.port.onmessage({ data: new Float32Array([1, 2, 3]) });
+    for (const outputs of [undefined, null, [], [[]], [[undefined]], [[new Float32Array(0)]]]) {
+        assert.equal(processor.process([], outputs, {}), true);
+    }
+    assert.deepEqual(render(processor), [1, 2, 3, 0]);
+});

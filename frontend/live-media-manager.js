@@ -52,10 +52,11 @@ class LiveAudioOutputManager {
         }
         const ready = this.initializeAudioContext();
         const generation = this.generation;
+        const audioContext = this.audioContext;
         ready
             .then(
                 (workletNode) => {
-                    if (this.generation !== generation) return;
+                    if (this.generation !== generation || audioContext?.state === "closed") return;
                     workletNode.port.postMessage(float32Data, [float32Data.buffer]);
                 },
                 // Logged once per attempt by initializeAudioContext(); the
@@ -75,11 +76,12 @@ class LiveAudioOutputManager {
     clear() {
         // Through the same promise as playAudioChunk(), so chunks queued
         // before this call are posted (and dropped) before the clear.
-        if (this.ready) {
+        if (this.ready && this.audioContext?.state !== "closed") {
             const generation = this.generation;
+            const audioContext = this.audioContext;
             this.ready
                 .then((workletNode) => {
-                    if (this.generation !== generation) return;
+                    if (this.generation !== generation || audioContext?.state === "closed") return;
                     workletNode.port.postMessage("clear");
                 })
                 .catch(() => {}); // The worklet failed to load; nothing to clear.
@@ -199,13 +201,29 @@ class LiveAudioOutputManager {
         }
         // Browsers leave out audioWorklet on insecure pages (plain http from
         // another machine); reject like a failed load rather than throw.
-        const loaded = audioContext.audioWorklet
-            ? audioContext.audioWorklet.addModule("/frontend/pcm-processor.js")
-            : Promise.reject(new Error("AudioWorklet is unavailable: the page needs HTTPS or localhost"));
+        let loaded;
+        try {
+            loaded = audioContext.audioWorklet
+                ? Promise.resolve(audioContext.audioWorklet.addModule("/frontend/pcm-processor.js"))
+                : Promise.reject(new Error("AudioWorklet is unavailable: the page needs HTTPS or localhost"));
+        } catch (error) {
+            console.error("Could not load the audio player:", error);
+            this._closeAudioContext(audioContext);
+            const failed = Promise.reject(error);
+            failed.catch(() => {});
+            this.backOff(failed);
+            return failed;
+        }
         const ready = loaded.then(() => {
             if (this.generation !== generation) {
                 this._closeAudioContext(audioContext);
                 throw new Error("Audio player initialization superseded");
+            }
+            if (audioContext.state === "closed") {
+                this.generation++;
+                this.audioContext = null;
+                this.ready = null;
+                throw new Error("Audio context closed during initialization");
             }
             const workletNode = new AudioWorkletNode(audioContext, "pcm-processor", {
                 outputChannelCount: [1],
@@ -1573,6 +1591,12 @@ class G3RtcWebRtcManager {
         onTrackEnded(stream.getAudioTracks(), () => {
             if (this.micStream === stream) this.onMicrophoneEnded();
         });
+        // A track that ended before the listener above existed won't fire
+        // "ended"; report it like a later unplug instead of sending it.
+        if (stream.getAudioTracks().some((track) => track.readyState === "ended")) {
+            if (this.micStream === stream) this.onMicrophoneEnded();
+            return;
+        }
         const audioTrack = this.micStream.getAudioTracks()[0] || null;
         if (this.audioSender && audioTrack) {
             try {
