@@ -185,12 +185,22 @@ class ResolveWsHostTest(unittest.TestCase):
             "..googleapis.com.",
             "..googleapis.com..",
             "https://x.com",
+            "\u212a.example.com",
+            ".\u212a.example.com",
+            "example.\u212aom",
+            "\u017f.example.com",
         ]:
             with self.assertRaises(flags.IllegalFlagValueError, msg=entry):
                 with flagsaver.flagsaver(
                     allowed_host_suffixes=[".googleapis.com", entry]
                 ):
                     pass
+        self.assertEqual(main._allowed_suffix_domain("\u212a.example.com"), "")
+        self.assertFalse(
+            main._is_in_domain(
+                "k.example.com", main._allowed_suffix_domain("\u212a.example.com")
+            )
+        )
         with flagsaver.flagsaver(
             allowed_host_suffixes=[
                 ".googleapis.com",
@@ -3290,6 +3300,9 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             ".localhost",
             "foo..localhost",
             "localhost..",
+            "\u212a.localhost",
+            "localho\u017ft",
+            "\u212a.example.com",
         ]:
             self.assertFalse(main.is_allowed_host(host), host)
         with mock.patch.dict("os.environ", {"K_SERVICE": "demo"}):
@@ -3824,10 +3837,29 @@ class MainAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(addresses, [("127.0.0.1", port)])
 
     def test_host_flag_validator(self):
-        for value in ["0.0.0.0", "::", "::1", "localhost", "my-box", "box.example.com"]:
+        for value in [
+            "0.0.0.0",
+            "::",
+            "::1",
+            "localhost",
+            "my-box",
+            "box.example.com",
+            "BOX.EXAMPLE.COM",
+        ]:
             with flagsaver.flagsaver(host=value):
                 self.assertEqual(main.HOST.value, value)
-        for value in ["0.0.0.0:8080", "http://0.0.0.0", "", " ", "[::]", "a b"]:
+        for value in [
+            "0.0.0.0:8080",
+            "http://0.0.0.0",
+            "",
+            " ",
+            "[::]",
+            "a b",
+            "\u212a.example.com",
+            "\u212a",
+            "\u017f.example.com",
+            "\u00a0localhost",
+        ]:
             with self.assertRaises(flags.IllegalFlagValueError, msg=value):
                 with flagsaver.flagsaver(host=value):
                     pass
@@ -3866,10 +3898,23 @@ class FlagValidatorTest(unittest.TestCase):
         ]:
             with flagsaver.flagsaver(fr_simulator_thinking_level=value):
                 self.assertEqual(main.FR_SIMULATOR_THINKING.value, value)
-        for value in ["bogus", "very_low", "none", "off", "0", "low high"]:
+        for value in [
+            "bogus",
+            "very_low",
+            "none",
+            "off",
+            "0",
+            "low high",
+            "h\u0131gh",
+            "m\u0131n\u0131mal",
+            "H\u0130GH",
+            "l\u00f6w",
+        ]:
             with self.assertRaises(flags.IllegalFlagValueError, msg=value):
                 with flagsaver.flagsaver(fr_simulator_thinking_level=value):
                     pass
+        with self.assertRaises(ValueError):
+            main._parse_thinking_level("h\u0131gh")
 
     def test_project_id_resolution_and_validation(self):
         with mock.patch.dict("os.environ", {}, clear=False):

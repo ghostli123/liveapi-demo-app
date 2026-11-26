@@ -220,8 +220,11 @@ def project_id() -> str:
 
 
 def _allowed_suffix_domain(entry: str) -> str:
-    """One --allowed_host_suffixes entry as a bare domain; "" for a blank."""
-    return entry.strip().lower().removeprefix(".").removesuffix(".")
+    """One --allowed_host_suffixes entry as a bare ASCII domain; "" for blank or non-ASCII."""
+    stripped = entry.strip()
+    if not stripped or not stripped.isascii():
+        return ""
+    return stripped.lower().removeprefix(".").removesuffix(".")
 
 
 def _is_in_domain(host: str, domain: str) -> bool:
@@ -250,16 +253,17 @@ flags.register_validator(ALLOWED_HOST_SUFFIXES, _validate_allowed_host_suffixes)
 def _validate_host(value: str | None) -> bool:
     if value is None:
         return True
-    try:
-        ipaddress.ip_address(value)
-        return True
-    except ValueError:
-        pass
-    # A single label ("localhost", this machine's name) is fine here.
-    if re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?", value) or (
-        _HOSTNAME_RE.fullmatch(value.lower())
-    ):
-        return True
+    if value.isascii():
+        try:
+            ipaddress.ip_address(value)
+            return True
+        except ValueError:
+            pass
+        # A single label ("localhost", this machine's name) is fine here.
+        if re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?", value) or (
+            _HOSTNAME_RE.fullmatch(value.lower())
+        ):
+            return True
     raise flags.ValidationError(
         f"invalid address {value!r}; expected an IP address or host name "
         "without a port, e.g. 0.0.0.0 (set the port with $PORT)"
@@ -314,7 +318,7 @@ def _parse_thinking_level(value: str) -> genai.types.ThinkingLevel | None:
     normalized = value.strip()
     if not normalized:
         return None
-    level = _THINKING_LEVELS.get(normalized.upper())
+    level = _THINKING_LEVELS.get(normalized.upper()) if normalized.isascii() else None
     if level is None:
         valid = ", ".join(m.value.lower() for m in genai.types.ThinkingLevel)
         raise ValueError(
@@ -1054,7 +1058,10 @@ async def _get_machine_hostnames() -> frozenset[str]:
 
 
 def _normalize_hostname(hostname: str | None) -> str:
-    return (hostname or "").strip().lower().removesuffix(".")
+    stripped = (hostname or "").strip()
+    if not stripped or not stripped.isascii():
+        return ""
+    return stripped.lower().removesuffix(".")
 
 
 def _has_valid_host_labels(hostname: str) -> bool:
