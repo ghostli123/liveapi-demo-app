@@ -96,13 +96,23 @@ class ResolveWsHostTest(unittest.TestCase):
             with self.subTest(endpoint=endpoint, location=location):
                 self.assertEqual(main.resolve_ws_host(endpoint, location), expected)
 
-        # Whitespace-only or non-ASCII (e.g. Unicode case-folding U+017F) are rejected.
+        # Whitespace-only, ASCII control whitespace, or non-ASCII (e.g. NBSP or
+        # Unicode case-folding U+017F) are rejected.
         rejected = [
             ("   ", "us-central1"),
             ("\t\n", "us"),
+            ("\x1f", "us-central1"),
+            ("\u00a0", "us-central1"),
+            ("autopush-common\x1f", "us-central1"),
+            ("\x0bautopush-common", "us-central1"),
+            ("autopush-common\u00a0", "us-central1"),
+            ("aiplatform.googleapis.com\x1f", "us"),
             ("aiplatform.googleapi\u017f.com", "us"),
             ("aiplatform.googleapis.com", "u\u017f"),
             ("aiplatform.googleapis.com", "   "),
+            ("aiplatform.googleapis.com", "us-central1\u00a0"),
+            ("aiplatform.googleapis.com", "us-central1\x1f"),
+            ("aiplatform.googleapis.com", "\x0cus"),
             ("EVIL.REP.ATTACKER.COM", "US"),
         ]
         for endpoint, location in rejected:
@@ -189,6 +199,14 @@ class ResolveWsHostTest(unittest.TestCase):
             ".\u212a.example.com",
             "example.\u212aom",
             "\u017f.example.com",
+            "\x0b",
+            "\x0c",
+            "\x1c",
+            "\x1f",
+            "\u00a0",
+            ".googleapis.com\x1f",
+            "\x0b.googleapis.com",
+            ".googleapis.com\u00a0",
         ]:
             with self.assertRaises(flags.IllegalFlagValueError, msg=entry):
                 with flagsaver.flagsaver(
@@ -196,6 +214,8 @@ class ResolveWsHostTest(unittest.TestCase):
                 ):
                     pass
         self.assertEqual(main._allowed_suffix_domain("\u212a.example.com"), "")
+        self.assertEqual(main._allowed_suffix_domain(".googleapis.com\x1f"), "")
+        self.assertEqual(main._allowed_suffix_domain(".googleapis.com\u00a0"), "")
         self.assertFalse(
             main._is_in_domain(
                 "k.example.com", main._allowed_suffix_domain("\u212a.example.com")
@@ -3221,6 +3241,16 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             "ev\u00e9.example:8443",
             "demo.example\x00",
             "demo.example\x7f",
+            "\x0b",
+            "\x0c",
+            "\x1c",
+            "\x1f",
+            "\u00a0",
+            "demo.example\x1f",
+            "\x0bdemo.example",
+            "demo.example\u00a0",
+            "*\x1f",
+            "*\u00a0",
         ]:
             with self.assertRaises(flags.IllegalFlagValueError, msg=entry):
                 with flagsaver.flagsaver(allowed_hosts=["demo.example.com", entry]):
@@ -3303,6 +3333,10 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             "\u212a.localhost",
             "localho\u017ft",
             "\u212a.example.com",
+            "LOCALHOST\u00a0",
+            "localhost\x1f",
+            "\x0blocalhost",
+            "\u00a0",
         ]:
             self.assertFalse(main.is_allowed_host(host), host)
         with mock.patch.dict("os.environ", {"K_SERVICE": "demo"}):
@@ -3311,7 +3345,16 @@ class ServerTest(unittest.IsolatedAsyncioTestCase):
             for host in [".run.app", "demo..run.app", "demo-abc123-uc.a.run.app.."]:
                 self.assertFalse(main.is_allowed_host(host), host)
         with flagsaver.flagsaver(allowed_hosts=["*"]):
-            for host in [".", "..", ".localhost", "foo..bar", "localhost.."]:
+            for host in [
+                ".",
+                "..",
+                ".localhost",
+                "foo..bar",
+                "localhost..",
+                "foo\x00bar",
+                "localhost\x1f",
+                "LOCALHOST\u00a0",
+            ]:
                 self.assertFalse(main.is_allowed_host(host), host)
 
     async def test_gethostname_oserror_does_not_500_in_reject_cross_origin(self):
@@ -3909,6 +3952,13 @@ class FlagValidatorTest(unittest.TestCase):
             "m\u0131n\u0131mal",
             "H\u0130GH",
             "l\u00f6w",
+            "\x0b",
+            "\x0c",
+            "\x1f",
+            "\u00a0",
+            "low\x1f",
+            "\x0blow",
+            "low\u00a0",
         ]:
             with self.assertRaises(flags.IllegalFlagValueError, msg=value):
                 with flagsaver.flagsaver(fr_simulator_thinking_level=value):
@@ -3960,6 +4010,13 @@ class FlagValidatorTest(unittest.TestCase):
             "-proj",
             "proj-",
             "ev\u00e9-proj",
+            "\x0b",
+            "\x0c",
+            "\x1f",
+            "\u00a0",
+            "my-proj\x1f",
+            "\x0bmy-proj",
+            "my-proj\u00a0",
         ]
         for value in bad_values:
             with self.subTest(bad_flag=value):
@@ -4003,6 +4060,12 @@ class FlagValidatorTest(unittest.TestCase):
             "gemini-3&a=1",
             "gemini-3#frag",
             "gemini-\u00e9",
+            "\x0b",
+            "\x1f",
+            "\u00a0",
+            "gemini-3-flash-preview\x1f",
+            "\x0bgemini-3-flash-preview",
+            "gemini-3-flash-preview\u00a0",
         ]:
             with self.assertRaises(flags.IllegalFlagValueError, msg=value):
                 with flagsaver.flagsaver(fr_simulator_model=value):
@@ -4066,6 +4129,13 @@ class FlagValidatorTest(unittest.TestCase):
             "8080.0",
             "80 80",
             "\u0668\u0660\u0668\u0660",
+            "\x0b",
+            "\x1f",
+            "\u00a0",
+            "\x1f8080\x1f",
+            "\x0b8080",
+            "8080\u00a0",
+            "\u00a08080",
         ]:
             with self.subTest(port=raw):
                 with mock.patch.dict("os.environ", {"PORT": raw}):

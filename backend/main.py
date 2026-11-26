@@ -90,6 +90,10 @@ _HOSTNAME_RE = re.compile(
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.:-]{0,126}[A-Za-z0-9])?$")
 _MODEL_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$")
+# Ordinary ASCII whitespace trimmed by config/CLI parsers. Plain str.strip()
+# also strips ASCII control separators (\x0b, \x0c, \x1c-\x1f) and non-ASCII
+# whitespace (\u00a0, etc.), which would otherwise bypass validation.
+_ASCII_WHITESPACE = " \t\r\n"
 
 SESSION_MANAGER = session_management.SessionManager()
 
@@ -186,7 +190,7 @@ def _parse_project_id(value: str | None, source: str = "--project_id") -> str | 
     """Strips and validates a project ID, returning None if unset or blank."""
     if value is None:
         return None
-    stripped = value.strip()
+    stripped = value.strip(_ASCII_WHITESPACE)
     if not stripped:
         return None
     if not _PROJECT_ID_RE.fullmatch(stripped) or ".." in stripped:
@@ -220,9 +224,9 @@ def project_id() -> str:
 
 
 def _allowed_suffix_domain(entry: str) -> str:
-    """One --allowed_host_suffixes entry as a bare ASCII domain; "" for blank or non-ASCII."""
-    stripped = entry.strip()
-    if not stripped or not stripped.isascii():
+    """One --allowed_host_suffixes entry as a bare ASCII domain; "" for blank or invalid."""
+    stripped = entry.strip(_ASCII_WHITESPACE)
+    if not stripped or not stripped.isascii() or _has_control_or_space(stripped):
         return ""
     return stripped.lower().removeprefix(".").removesuffix(".")
 
@@ -235,7 +239,7 @@ def _is_in_domain(host: str, domain: str) -> bool:
 
 def _validate_allowed_host_suffixes(entries: list[str]) -> bool:
     for entry in entries:
-        if not entry.strip():
+        if not entry.strip(_ASCII_WHITESPACE):
             continue
         domain = _allowed_suffix_domain(entry)
         if not _HOSTNAME_RE.fullmatch(domain):
@@ -286,7 +290,7 @@ flags.register_validator(WS_HEARTBEAT_S, _validate_ws_heartbeat_s)
 
 def _parse_fr_simulator_model(value: str) -> str:
     """Strips and validates the function-response simulator model name."""
-    model = value.strip()
+    model = value.strip(_ASCII_WHITESPACE)
     if (
         not model
         or ".." in model
@@ -315,7 +319,7 @@ _THINKING_LEVELS = {level.value.upper(): level for level in genai.types.Thinking
 
 def _parse_thinking_level(value: str) -> genai.types.ThinkingLevel | None:
     """Returns the ThinkingLevel enum member for a flag value, or None if empty."""
-    normalized = value.strip()
+    normalized = value.strip(_ASCII_WHITESPACE)
     if not normalized:
         return None
     level = _THINKING_LEVELS.get(normalized.upper()) if normalized.isascii() else None
@@ -350,7 +354,7 @@ def listen_port() -> int:
     raw = os.environ.get("PORT")
     if raw is None:
         return DEFAULT_PORT
-    stripped = raw.strip()
+    stripped = raw.strip(_ASCII_WHITESPACE)
     if not stripped.isascii() or not stripped.isdigit():
         raise ValueError(
             f"invalid PORT {raw!r}; expected an integer between 0 and 65535"
@@ -373,7 +377,7 @@ def resolve_ws_host(endpoint: Any, location: Any) -> str:
     """
     if not isinstance(endpoint, str):
         raise ValueError("Missing endpoint")
-    normalized_endpoint = endpoint.strip()
+    normalized_endpoint = endpoint.strip(_ASCII_WHITESPACE)
     if not normalized_endpoint:
         raise ValueError("Missing endpoint")
     if not normalized_endpoint.isascii():
@@ -386,7 +390,7 @@ def resolve_ws_host(endpoint: Any, location: Any) -> str:
         return endpoint
     if not isinstance(location, str):
         raise ValueError(f"Invalid location: {location!r}")
-    normalized_location = location.strip()
+    normalized_location = location.strip(_ASCII_WHITESPACE)
     if not normalized_location.isascii() or not _LOCATION_RE.fullmatch(
         normalized_location.lower()
     ):
@@ -1058,8 +1062,8 @@ async def _get_machine_hostnames() -> frozenset[str]:
 
 
 def _normalize_hostname(hostname: str | None) -> str:
-    stripped = (hostname or "").strip()
-    if not stripped or not stripped.isascii():
+    stripped = (hostname or "").strip(_ASCII_WHITESPACE)
+    if not stripped or not stripped.isascii() or _has_control_or_space(stripped):
         return ""
     return stripped.lower().removesuffix(".")
 
@@ -1097,7 +1101,7 @@ def _allowed_host_entry(entry: str) -> tuple[str, int | None]:
     Raises:
       ValueError: the entry isn't an ASCII host name with an optional port.
     """
-    entry = entry.strip()
+    entry = entry.strip(_ASCII_WHITESPACE)
     if entry in ("", "*"):
         return entry, None
     if not entry.isascii():
