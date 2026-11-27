@@ -520,17 +520,41 @@ class GeminiLiveAPI {
 
     /**
      * Normalizes an uploaded tools file to a list of Gemini function
-     * declarations. Accepts that list itself, a single declaration, or an
-     * OpenAI-style tool list ({type: "function", function: {...}}, optionally
-     * under "tools").
+     * declarations. Accepts that list itself, a single declaration, Gemini
+     * tool wrappers ({functionDeclarations: [...]} or
+     * {function_declarations: [...]}, optionally under "tools" or in a list),
+     * or an OpenAI-style tool list ({type: "function", function: {...}},
+     * optionally under "tools").
      * @param {*} json - The parsed file.
      * @returns {Object[]}
      */
     static toFunctionDeclarations(json) {
         const list = Array.isArray(json) ? json : Array.isArray(json?.tools) ? json.tools : [json];
-        return list.map((entry) =>
-            entry && entry.type === "function" && entry.function ? entry.function : entry
-        );
+        const unwrap = (entry) =>
+            entry &&
+            typeof entry === "object" &&
+            !Array.isArray(entry) &&
+            entry.type === "function" &&
+            entry.function &&
+            typeof entry.function === "object" &&
+            !Array.isArray(entry.function)
+                ? entry.function
+                : entry;
+        return list.flatMap((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+                return [entry];
+            }
+            const camel = Array.isArray(entry.functionDeclarations)
+                ? entry.functionDeclarations
+                : null;
+            const snake = Array.isArray(entry.function_declarations)
+                ? entry.function_declarations
+                : null;
+            if (camel || snake) {
+                return [...(camel || []), ...(snake || [])].map(unwrap);
+            }
+            return [unwrap(entry)];
+        });
     }
 
     /**

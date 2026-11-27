@@ -1588,11 +1588,26 @@ test("Disconnect during WebRTC ICE gathering neither sends setup nor reports an 
 
 test("toFunctionDeclarations accepts Gemini and OpenAI-style tool files", () => {
     const decl = { name: "f", description: "d", parameters: { type: "object" } };
+    const decl2 = { name: "g", description: "d2", parameters: { type: "object" } };
     const cases = [
         [[decl], [decl]],
         [decl, [decl]],
+        [{ type: "function", function: decl }, [decl]],
         [[{ type: "function", function: decl }], [decl]],
         [{ tools: [{ type: "function", function: decl }] }, [decl]],
+        [{ functionDeclarations: [decl, decl2] }, [decl, decl2]],
+        [{ function_declarations: [decl, decl2] }, [decl, decl2]],
+        [[{ functionDeclarations: [decl] }, { function_declarations: [decl2] }], [decl, decl2]],
+        [{ tools: [{ functionDeclarations: [decl] }, { function_declarations: [decl2] }] }, [decl, decl2]],
+        [{ tools: [{ functionDeclarations: [decl] }, decl2] }, [decl, decl2]],
+        [{ functionDeclarations: [decl], function_declarations: [decl2] }, [decl, decl2]],
+        [{ functionDeclarations: [{ type: "function", function: decl }] }, [decl]],
+        [{ functionDeclarations: [] }, []],
+        [{ function_declarations: [] }, []],
+        [{ tools: [{ functionDeclarations: [] }] }, []],
+        [{ functionDeclarations: "not-an-array" }, [{ functionDeclarations: "not-an-array" }]],
+        [{ function_declarations: null }, [{ function_declarations: null }]],
+        [null, [null]],
     ];
     for (const [input, expected] of cases) {
         assert.deepEqual(plain(GeminiLiveAPI.toFunctionDeclarations(input)), expected);

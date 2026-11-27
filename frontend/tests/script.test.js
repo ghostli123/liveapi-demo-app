@@ -3568,6 +3568,74 @@ test("function declarations with empty or whitespace-only names are refused and 
     }
 });
 
+test("handleFcFileInputChange loads Gemini functionDeclarations tool wrappers and rejects empty or unnamed wrappers", async () => {
+    const { GeminiLiveAPI: RealGeminiLiveAPI } = loadScript("gemini-live-api.js", ["GeminiLiveAPI"], {
+        window: {},
+        document: {},
+        performance: { now: () => 0 },
+    });
+    const { context, element } = loadApp({
+        GeminiLiveAPI: class extends FakeGeminiLiveAPI {
+            static toFunctionDeclarations = (json) => RealGeminiLiveAPI.toFunctionDeclarations(json);
+        },
+    });
+    const pick = async (name, body) => {
+        const input = { value: name, files: [{ name, size: body.length, text: async () => body }] };
+        await context.handleFcFileInputChange({ target: input });
+        return element("dialogMessage").textContent;
+    };
+
+    for (const [filename, body, expectedNames] of [
+        [
+            "camel.json",
+            '{"functionDeclarations": [{"name": "get_weather"}, {"name": "set_alarm"}]}',
+            ["get_weather", "set_alarm"],
+        ],
+        [
+            "snake.json",
+            '{"function_declarations": [{"name": "lookup_order"}]}',
+            ["lookup_order"],
+        ],
+        [
+            "tools_wrapper.json",
+            '{"tools": [{"functionDeclarations": [{"name": "book_table"}]}, {"function_declarations": [{"name": "cancel_table"}]}]}',
+            ["book_table", "cancel_table"],
+        ],
+        [
+            "tool_list.json",
+            '[{"function_declarations": [{"name": "check_stock"}]}]',
+            ["check_stock"],
+        ],
+    ]) {
+        const dialog = await pick(filename, body);
+        assert.match(dialog, new RegExp(`^Loaded ${expectedNames.length} function declaration\\(s\\) from "${filename}"`));
+        assert.equal(element("fcFileName").textContent, `File: ${filename} (${expectedNames.join(", ")})`);
+        assert.equal(element("fcRemove").hidden, false);
+        assert.deepEqual(
+            plainJson(context.AppState.functionCallDefinition).map((d) => d.name),
+            expectedNames
+        );
+    }
+
+    for (const [filename, body] of [
+        ["empty_camel.json", '{"functionDeclarations": []}'],
+        ["empty_tools.json", '{"tools": [{"function_declarations": []}]}'],
+        ["non_array.json", '{"functionDeclarations": "bad"}'],
+        ["unnamed_inside.json", '{"functionDeclarations": [{"name": "ok"}, {"description": "missing name"}]}'],
+    ]) {
+        const dialog = await pick(filename, body);
+        assert.equal(
+            dialog,
+            `Could not use "${filename}": expected a list of function declarations, each with a non-empty name`
+        );
+        assert.deepEqual(
+            plainJson(context.AppState.functionCallDefinition).map((d) => d.name),
+            ["check_stock"]
+        );
+        assert.equal(element("fcFileName").textContent, "File: tool_list.json (check_stock)");
+    }
+});
+
 test("a recording stops itself at the sample limit and is kept, cut to the limit", async () => {
     const devices = fakeRecordingDevices();
     const { timers } = devices;
