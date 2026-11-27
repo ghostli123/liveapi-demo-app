@@ -1000,6 +1000,7 @@ class LiveVideoOutputManager {
         video.src = this.objectUrl;
         this.attachVideoListeners(video);
         video.play()?.catch((err) => {
+            if (this.mediaSource !== mediaSource || this.playbackFailed) return;
             if (err?.name === "NotAllowedError") this.onAutoplayBlocked();
         });
     }
@@ -1545,6 +1546,7 @@ class G3RtcWebRtcManager {
             // and a resume renegotiates, so unmuting here would undo a mute
             // the user set from the player's controls.
             videoEl.play()?.catch((err) => {
+                if (this.pc !== pc) return;
                 console.warn("[WebRTC] Auto-play warning on video_player:", err);
                 if (err?.name === "NotAllowedError") this.onAutoplayBlocked();
             });

@@ -3599,3 +3599,128 @@ test("initiateSession does not overwrite 'failed' or double-close if onConnectio
     assert.equal(manager.pc, null);
     assert.equal(stateEl.textContent, "failed");
 });
+
+test("LiveVideoOutputManager.initMediaSource ignores stale video.play() NotAllowedError after resetPlayer, replacement, or playback failure", async () => {
+    const { manager, video } = videoOutputWithFakeMediaSource();
+    const pendingPlays = [];
+    video.play = () => {
+        const d = Promise.withResolvers();
+        pendingPlays.push(d);
+        return d.promise;
+    };
+    let blocked = 0;
+    manager.onAutoplayBlocked = () => blocked++;
+    const notAllowed = () => Object.assign(new Error("autoplay blocked"), { name: "NotAllowedError" });
+
+    // 1. After resetPlayer(), a late NotAllowedError must not trigger onAutoplayBlocked.
+    manager.initMediaSource();
+    const first = pendingPlays.shift();
+    manager.resetPlayer();
+    first.reject(notAllowed());
+    await settle();
+    assert.equal(blocked, 0);
+
+    // 2. After a replacement initMediaSource(), the older play() rejection is ignored,
+    // while the replacement stream's own NotAllowedError still triggers onAutoplayBlocked.
+    manager.initMediaSource();
+    const superseded = pendingPlays.shift();
+    manager.initMediaSource();
+    const current = pendingPlays.shift();
+    superseded.reject(notAllowed());
+    await settle();
+    assert.equal(blocked, 0);
+    current.reject(notAllowed());
+    await settle();
+    assert.equal(blocked, 1);
+
+    // 3. After failPlayback(), a late NotAllowedError for the failed stream is ignored.
+    manager.initMediaSource();
+    const failedStreamPlay = pendingPlays.shift();
+    manager.failPlayback("decode failed", "Video stopped");
+    failedStreamPlay.reject(notAllowed());
+    await settle();
+    assert.equal(blocked, 1);
+});
+
+test("G3RtcWebRtcManager.completeSession ignores stale video.play() rejections after close or replacement initiateSession", async () => {
+    const warnings = [];
+    const pendingPlays = [];
+    const rtcVideo = {
+        srcObject: null,
+        removeAttribute() {},
+        play() {
+            const d = Promise.withResolvers();
+            pendingPlays.push(d);
+            return d.promise;
+        },
+    };
+    class FakePeerConnection {
+        constructor() {
+            this.connectionState = "connected";
+            this.iceGatheringState = "complete";
+            this.localDescription = { sdp: "v=0\r\n" };
+        }
+        createDataChannel() {
+            return { close() {} };
+        }
+        addTransceiver(kind, { direction }) {
+            return { kind, direction, sender: { replaceTrack: async () => {} }, receiver: { track: {} }, mid: "0" };
+        }
+        async setLocalDescription() {}
+        async setRemoteDescription() {}
+        async getStats() {
+            return new Map();
+        }
+        close() {}
+    }
+    const context = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
+        document: { getElementById: () => null },
+        RTCPeerConnection: FakePeerConnection,
+        MediaStream: class {
+            addTrack() {}
+        },
+        randomId: () => "id",
+        console: { log() {}, warn: (...args) => warnings.push(args), error() {} },
+        setInterval: () => ({}),
+        clearInterval() {},
+        setTimeout: () => ({}),
+        clearTimeout() {},
+        performance: { now: () => 0 },
+    });
+    const rtc = new context.G3RtcWebRtcManager(rtcVideo);
+    let blocked = 0;
+    rtc.onAutoplayBlocked = () => blocked++;
+    const notAllowed = () => Object.assign(new Error("autoplay blocked"), { name: "NotAllowedError" });
+
+    // 1. After close(), a late NotAllowedError neither warns nor triggers onAutoplayBlocked.
+    await rtc.initiateSession();
+    rtc.remoteStream = {};
+    await rtc.completeSession("v=0\r\n");
+    const first = pendingPlays.shift();
+    rtc.close();
+    first.reject(notAllowed());
+    await settle();
+    assert.equal(blocked, 0);
+    assert.equal(warnings.length, 0);
+
+    // 2. After a replacement initiateSession(), the older play() rejection is ignored,
+    // while the replacement session's own NotAllowedError still warns and triggers onAutoplayBlocked.
+    await rtc.initiateSession();
+    rtc.remoteStream = {};
+    await rtc.completeSession("v=0\r\n");
+    const superseded = pendingPlays.shift();
+    await rtc.initiateSession();
+    rtc.remoteStream = {};
+    await rtc.completeSession("v=0\r\n");
+    const current = pendingPlays.shift();
+    superseded.reject(notAllowed());
+    await settle();
+    assert.equal(blocked, 0);
+    assert.equal(warnings.length, 0);
+
+    current.reject(notAllowed());
+    await settle();
+    assert.equal(blocked, 1);
+    assert.equal(warnings.length, 1);
+    rtc.close();
+});
