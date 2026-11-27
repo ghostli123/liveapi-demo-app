@@ -1822,7 +1822,11 @@ function sendFramesIfWebSocket(source) {
 function stopSendingVideoTrack(track) {
     AppState.videoAttempt++;
     const webRtcManager = AppState.geminiLiveApi.webRtcManager;
-    if (webRtcManager && webRtcManager.videoTrack === track) {
+    if (
+        webRtcManager &&
+        webRtcManager.videoTrack &&
+        (webRtcManager.videoTrack === track || webRtcManager.videoTrack.readyState === "ended")
+    ) {
         webRtcManager.detachVideoStream();
     }
 }

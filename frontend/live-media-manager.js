@@ -687,18 +687,30 @@ class LiveFrameSource {
         this.onEnded = () => {};
     }
 
-    /** Shows `stream` in the preview and, if asked, starts sending frames. */
+    /**
+     * Shows `stream` in the preview and, if asked, starts sending frames.
+     * @returns {boolean} False if a video track was already ended and detached.
+     */
     _attach(stream, sendFrames) {
+        const videoTracks = stream.getVideoTracks();
+        const endedTrack = videoTracks.find((track) => track.readyState === "ended");
+        if (endedTrack) {
+            this._detach();
+            stream.getTracks().forEach((track) => track.stop());
+            this.onEnded(endedTrack);
+            return false;
+        }
         this.stream = stream;
         this.previewVideoElement.srcObject = stream;
         if (sendFrames) {
             this.startSendingFrames();
         }
-        onTrackEnded(stream.getVideoTracks(), (track) => {
+        onTrackEnded(videoTracks, (track) => {
             if (this.stream !== stream) return; // Already replaced or stopped.
             this._detach();
             this.onEnded(track);
         });
+        return true;
     }
 
     /**
@@ -807,8 +819,8 @@ class LiveScreenManager extends LiveFrameSource {
      * Asks the user for a screen to share. Throws if they cancel.
      * @param {{sendFrames?: boolean}} [options] - See LiveVideoManager.startWebcam.
      * @returns {Promise<boolean>} False if stopCapture() or a newer
-     *     startCapture() ran while the picker was open; the pick, or the
-     *     picker's failure, is dropped.
+     *     startCapture() ran while the picker was open, or the picked video
+     *     track had already ended; the pick, or the picker's failure, is dropped.
      */
     async startCapture({ sendFrames = true } = {}) {
         const generation = ++this.generation;
@@ -825,8 +837,7 @@ class LiveScreenManager extends LiveFrameSource {
             return false;
         }
         this._detach(); // A share already running is replaced.
-        this._attach(stream, sendFrames);
-        return true;
+        return this._attach(stream, sendFrames);
     }
 
     stopCapture() {

@@ -3766,3 +3766,100 @@ test("G3RtcWebRtcManager.completeSession ignores stale video.play() rejections a
     assert.equal(warnings.length, 1);
     rtc.close();
 });
+
+test("already-ended video tracks in LiveFrameSource._attach() are detached without arming an interval and reported once", async () => {
+    const intervals = new Set();
+    let setIntervalCalls = 0;
+    const camEndedVideo = fakeTrack();
+    camEndedVideo.readyState = "ended";
+    const camLiveSibling = fakeTrack();
+    const camStream = {
+        getTracks: () => [camEndedVideo, camLiveSibling],
+        getVideoTracks: () => [camEndedVideo],
+    };
+
+    const screenLiveTrack = fakeTrack();
+    const screenLiveStream = {
+        getTracks: () => [screenLiveTrack],
+        getVideoTracks: () => [screenLiveTrack],
+    };
+    const screenEndedVideo = fakeTrack();
+    screenEndedVideo.readyState = "ended";
+    const screenLiveSibling = fakeTrack();
+    const screenEndedStream = {
+        getTracks: () => [screenEndedVideo, screenLiveSibling],
+        getVideoTracks: () => [screenEndedVideo],
+    };
+    const screenStreams = [screenLiveStream, screenEndedStream];
+
+    const context = loadScript("live-media-manager.js", ["LiveVideoManager", "LiveScreenManager"], {
+        navigator: {
+            mediaDevices: {
+                getUserMedia: async () => camStream,
+                getDisplayMedia: async () => screenStreams.shift(),
+            },
+        },
+        setInterval: () => {
+            setIntervalCalls++;
+            const id = {};
+            intervals.add(id);
+            return id;
+        },
+        clearInterval: (id) => intervals.delete(id),
+    });
+
+    // 1. LiveVideoManager: already-ended camera track never attaches or arms an interval.
+    const camVideo = { srcObject: null };
+    const camera = new context.LiveVideoManager(camVideo, { getContext: () => ({}) });
+    const camEnded = [];
+    camera.onEnded = (track) => camEnded.push(track);
+    await camera.startWebcam({ sendFrames: true });
+    assert.equal(camera.stream, null);
+    assert.equal(camVideo.srcObject, null);
+    assert.equal(intervals.size, 0);
+    assert.equal(setIntervalCalls, 0);
+    assert.equal(camLiveSibling.readyState, "ended");
+    assert.deepEqual(camEnded, [camEndedVideo]);
+    camEndedVideo.end(); // No listener registered; must not double-report.
+    assert.deepEqual(camEnded, [camEndedVideo]);
+
+    // 2. LiveScreenManager: replacing a live share with an already-ended pick detaches both and returns false.
+    const screenVideo = { srcObject: null };
+    const screen = new context.LiveScreenManager(screenVideo, { getContext: () => ({}) });
+    const screenEnded = [];
+    screen.onEnded = (track) => screenEnded.push(track);
+    assert.equal(await screen.startCapture({ sendFrames: true }), true);
+    assert.equal(intervals.size, 1);
+    assert.equal(setIntervalCalls, 1);
+
+    assert.equal(await screen.startCapture({ sendFrames: true }), false);
+    assert.equal(screen.stream, null);
+    assert.equal(screenVideo.srcObject, null);
+    assert.equal(intervals.size, 0);
+    assert.equal(setIntervalCalls, 1); // No new interval armed for the already-ended pick.
+    assert.equal(screenLiveTrack.readyState, "ended");
+    assert.equal(screenLiveSibling.readyState, "ended");
+    assert.deepEqual(screenEnded, [screenEndedVideo]);
+    screenEndedVideo.end();
+    assert.deepEqual(screenEnded, [screenEndedVideo]);
+
+    // 3. Direct _attach() with an already-ended track cleans up any previously attached live stream.
+    const priorTrack = fakeTrack();
+    const priorStream = { getTracks: () => [priorTrack], getVideoTracks: () => [priorTrack] };
+    assert.equal(camera._attach(priorStream, true), true);
+    assert.equal(intervals.size, 1);
+    const directEnded = fakeTrack();
+    directEnded.readyState = "ended";
+    const directSibling = fakeTrack();
+    const directStream = {
+        getTracks: () => [directSibling, directEnded],
+        getVideoTracks: () => [directSibling, directEnded],
+    };
+    assert.equal(camera._attach(directStream, true), false);
+    assert.equal(camera.stream, null);
+    assert.equal(camVideo.srcObject, null);
+    assert.equal(intervals.size, 0);
+    assert.equal(priorTrack.readyState, "ended");
+    assert.equal(directSibling.readyState, "ended");
+    assert.deepEqual(camEnded, [camEndedVideo, directEnded]);
+});

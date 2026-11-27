@@ -4497,3 +4497,84 @@ test("resumption, simulator, screen, and recording start errors handle null and 
     await context.handleRecordClick();
     assert.deepEqual(dialogs.splice(0), ["Could not start recording: unknown error"]);
 });
+
+test("already-ended camera or screen picks detach replaced WebRTC tracks without stopping an unrelated live camera", async () => {
+    const tracks = {
+        screen: { kind: "video", readyState: "live" },
+        camera: { kind: "video", readyState: "live" },
+        endedCam: { kind: "video", readyState: "ended" },
+        endedScreen: { kind: "video", readyState: "ended" },
+    };
+    let screenMode = "ended";
+    let attachCalls = 0;
+    const { context, element, webRtc, dialogText } = loadWithWebRtcManager({
+        navigator: {},
+        requestAnimationFrame: () => 0,
+        LiveVideoManager: class extends FakeFrameSource {
+            stopWebcam() {
+                if (this.stream) tracks.camera.readyState = "ended";
+                this.stream = null;
+            }
+            async startWebcam() {
+                this.onEnded(tracks.endedCam);
+            }
+        },
+        LiveScreenManager: class extends FakeFrameSource {
+            stopCapture() {
+                if (this.stream) tracks.screen.readyState = "ended";
+                this.stream = null;
+            }
+            async startCapture() {
+                if (screenMode === "replace-ended") {
+                    this.stopCapture();
+                }
+                this.onEnded(tracks.endedScreen);
+                return false;
+            }
+        },
+    });
+    context.AppState.geminiLiveApi.transportMode = "webrtc";
+    webRtc.attachVideoStream = async () => {
+        attachCalls++;
+    };
+
+    // 1. Replacing a running WebRTC screen share with a camera whose track arrives already ended
+    // detaches the stopped screen share, turns the camera button off, and does not attach null.
+    context.AppState.liveScreenManager.stream = { getVideoTracks: () => [tracks.screen] };
+    webRtc.videoTrack = tracks.screen;
+    element("cameraBtn").hidden = false;
+    element("cameraOffBtn").hidden = true;
+    await context.startCameraCapture();
+    assert.equal(attachCalls, 0);
+    assert.equal(tracks.screen.readyState, "ended");
+    assert.deepEqual(webRtc.detached, [tracks.screen]);
+    assert.equal(webRtc.videoTrack, null);
+    assert.equal(element("cameraBtn").hidden, true);
+    assert.equal(element("cameraOffBtn").hidden, false);
+    assert.match(dialogText(), /^The camera stopped/);
+
+    // 2. Starting a screen share that resolves with an already-ended track while a live camera is running
+    // leaves the live camera running and attached on WebRTC.
+    context.AppState.liveVideoManager.stream = { getVideoTracks: () => [tracks.camera] };
+    webRtc.videoTrack = tracks.camera;
+    element("cameraBtn").hidden = false;
+    element("cameraOffBtn").hidden = true;
+    screenMode = "ended";
+    await context.startScreenCapture();
+    assert.equal(attachCalls, 0);
+    assert.equal(tracks.camera.readyState, "live");
+    assert.ok(context.AppState.liveVideoManager.stream);
+    assert.equal(webRtc.videoTrack, tracks.camera);
+    assert.equal(element("cameraBtn").hidden, false);
+
+    // 3. Replacing a running WebRTC screen share with an already-ended screen pick detaches the old share.
+    tracks.screen.readyState = "live";
+    context.AppState.liveScreenManager.stream = { getVideoTracks: () => [tracks.screen] };
+    webRtc.videoTrack = tracks.screen;
+    screenMode = "replace-ended";
+    await context.startScreenCapture();
+    assert.equal(attachCalls, 0);
+    assert.equal(tracks.screen.readyState, "ended");
+    assert.deepEqual(webRtc.detached, [tracks.screen, tracks.screen]);
+    assert.equal(webRtc.videoTrack, null);
+});
