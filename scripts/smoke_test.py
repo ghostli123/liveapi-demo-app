@@ -46,6 +46,8 @@ def _ws_url(server: str, session_id: str) -> str:
         raise ValueError(
             f"--server must be an http:// or https:// URL (got {server!r})"
         )
+    if parts.netloc.endswith(":"):
+        raise ValueError(f"--server has an invalid port (got {server!r})")
     try:
         port = parts.port
     except ValueError as err:

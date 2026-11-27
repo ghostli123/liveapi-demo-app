@@ -160,6 +160,8 @@ class SmokeTestHelpersTest(unittest.TestCase):
             ),
             ("  HTTPS://http.example.com  ", "wss://http.example.com/ws?session_id=s1"),
             ("http://[::1]:8080/", "ws://[::1]:8080/ws?session_id=s1"),
+            ("http://[::1]", "ws://[::1]/ws?session_id=s1"),
+            ("http://[2001:db8::]", "ws://[2001:db8::]/ws?session_id=s1"),
         ]:
             with self.subTest(server=server):
                 self.assertEqual(smoke_test._ws_url(server, "s1"), expected)
@@ -171,6 +173,13 @@ class SmokeTestHelpersTest(unittest.TestCase):
             "ws://localhost:8080",
             "http://",
             "http://:8080",
+            "http://localhost:",
+            "http://localhost:/",
+            "http://localhost:/app",
+            "https://example.com:",
+            "http://[::1]:",
+            "http://[2001:db8::]:",
+            "http://user:pass@localhost:",
             "http://localhost:0",
             "http://localhost:99999",
             "http://localhost:abc",
@@ -473,6 +482,15 @@ class SmokeTestRunTest(unittest.IsolatedAsyncioTestCase):
         rc, out = await self._run_captured(_make_args("ftp://localhost:8080"))
         self.assertEqual(rc, 1, out)
         self.assertIn("FAIL: --server must be an http:// or https:// URL", out)
+
+    async def test_server_with_trailing_empty_port_returns_1_without_request(self):
+        with mock.patch.object(smoke_test.aiohttp, "ClientSession") as session_cls:
+            for bad in ("http://localhost:", "http://localhost:/app", "http://[::1]:"):
+                with self.subTest(bad=bad):
+                    rc, out = await self._run_captured(_make_args(bad))
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn("FAIL: --server has an invalid port", out)
+            session_cls.assert_not_called()
 
     async def test_server_with_query_or_fragment_returns_1_without_request(self):
         called = False
