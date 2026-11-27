@@ -115,6 +115,38 @@ def summarize(message: dict, stats: dict) -> None:
                 stats["transcript"].append(text)
 
 
+_DISCONNECT_TIMEOUT_S = 2.0
+
+
+async def _close_ws(ws: aiohttp.ClientWebSocketResponse, timeout: float) -> None:
+    """Closes the WebSocket without waiting past the configured timeout."""
+    if ws.closed:
+        return
+    try:
+        async with asyncio.timeout(min(timeout, _DISCONNECT_TIMEOUT_S)):
+            await ws.close()
+    except (aiohttp.ClientError, TimeoutError, OSError):
+        pass
+
+
+async def _release_pending_session(
+    http: aiohttp.ClientSession,
+    server: str,
+    session_id: str,
+    timeout: float,
+) -> None:
+    """Best-effort disconnect to free a pending backend session before /ws opens."""
+    try:
+        async with asyncio.timeout(min(timeout, _DISCONNECT_TIMEOUT_S)):
+            async with http.post(
+                f"{server}/api/control",
+                json={"command": "disconnect", "session_id": session_id},
+            ) as resp:
+                await resp.read()
+    except (aiohttp.ClientError, TimeoutError, OSError):
+        pass
+
+
 async def run(args: argparse.Namespace) -> int:
     session_id = str(uuid.uuid4())
     environment = args.environment
@@ -128,124 +160,149 @@ async def run(args: argparse.Namespace) -> int:
         return 1
     server = args.server.strip().rstrip("/")
 
-    async with aiohttp.ClientSession() as http:
-        async with http.post(
-            f"{server}/api/control",
-            json={
-                "command": "connect",
-                "session_id": session_id,
-                "endpoint": endpoint,
-                "location": args.location,
-            },
-        ) as resp:
-            raw = await resp.text(errors="replace")
-            try:
-                body = json.loads(raw)
-            except json.JSONDecodeError:
-                body = None
-            display = body if body is not None else raw.strip()[:300]
-            print(f"control: HTTP {resp.status} {display}".rstrip())
-            if resp.status != 200 or not isinstance(body, dict):
-                if resp.status == 200:
-                    print("FAIL: /api/control did not return a JSON object")
-                return 1
-        raw_project_id = body.get("project_id")
-        if is_common_bag:
-            model = f"models/{args.model}"
-        else:
-            if not isinstance(raw_project_id, str) or not raw_project_id.strip():
-                print("FAIL: /api/control did not return a valid project_id")
-                return 1
-            project_id = raw_project_id.strip()
-            model = (
-                f"projects/{project_id}/locations/{args.location}"
-                f"/publishers/google/models/{args.model}"
-            )
-        setup = {
-            "setup": {
-                "model": model,
-                "generation_config": {"response_modalities": [args.modality]},
-                "output_audio_transcription": {},
-            }
-        }
-        if args.modality == "VIDEO":
-            setup["setup"]["avatar_config"] = {"avatar_name": "Piper"}
+    stats = {
+        "text": [],
+        "transcript": [],
+        "audio_chunks": 0,
+        "audio_bytes": 0,
+        "video_chunks": 0,
+        "video_bytes": 0,
+    }
+    setup_complete = turn_complete = False
+    close_code = None
+    close_reason = ""
+    first_media_s = None
+    pending_session = False
+    ws_opened = False
+    phase = "/api/control"
 
-        stats = {
-            "text": [],
-            "transcript": [],
-            "audio_chunks": 0,
-            "audio_bytes": 0,
-            "video_chunks": 0,
-            "video_bytes": 0,
-        }
-        setup_complete = turn_complete = False
-        close_reason = ""
-        start = time.monotonic()
-        first_media_s = None
-        async with http.ws_connect(ws_url, max_msg_size=64 * 1024 * 1024) as ws:
-            await ws.send_str(json.dumps(setup))
-            try:
-                async with asyncio.timeout(timeout):
-                    while True:
-                        msg = await ws.receive()
-                        if msg.type == aiohttp.WSMsgType.BINARY:
-                            print(
-                                "FAIL: received a binary frame; the browser ignores those"
-                            )
-                            return 1
-                        if msg.type == aiohttp.WSMsgType.CLOSE:
-                            close_reason = msg.extra or ""
-                            break
-                        if msg.type != aiohttp.WSMsgType.TEXT:
-                            break
-                        try:
-                            data = json.loads(msg.data)
-                        except json.JSONDecodeError:
-                            print(
-                                f"FAIL: received non-JSON text frame: "
-                                f"{msg.data.strip()[:300]}"
-                            )
-                            return 1
-                        if not isinstance(data, dict):
-                            print(
-                                f"FAIL: received non-object JSON frame: "
-                                f"{type(data).__name__}"
-                            )
-                            return 1
-                        if "setupComplete" in data or "setup_complete" in data:
-                            setup_complete = True
-                            print(
-                                f"setupComplete after {time.monotonic() - start:.2f}s"
-                            )
-                            await ws.send_str(
-                                json.dumps(
-                                    {
-                                        "client_content": {
-                                            "turns": [
-                                                {
-                                                    "role": "user",
-                                                    "parts": [{"text": args.prompt}],
-                                                }
-                                            ],
-                                            "turn_complete": True,
-                                        }
-                                    }
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as http:
+        try:
+            async with asyncio.timeout(timeout) as deadline:
+                async with http.post(
+                    f"{server}/api/control",
+                    json={
+                        "command": "connect",
+                        "session_id": session_id,
+                        "endpoint": endpoint,
+                        "location": args.location,
+                    },
+                ) as resp:
+                    raw = await resp.text(errors="replace")
+                    try:
+                        body = json.loads(raw)
+                    except json.JSONDecodeError:
+                        body = None
+                    display = body if body is not None else raw.strip()[:300]
+                    print(f"control: HTTP {resp.status} {display}".rstrip())
+                    if resp.status != 200 or not isinstance(body, dict):
+                        if resp.status == 200:
+                            print("FAIL: /api/control did not return a JSON object")
+                        return 1
+                    pending_session = True
+                raw_project_id = body.get("project_id")
+                if is_common_bag:
+                    model = f"models/{args.model}"
+                else:
+                    if (
+                        not isinstance(raw_project_id, str)
+                        or not raw_project_id.strip()
+                    ):
+                        print("FAIL: /api/control did not return a valid project_id")
+                        return 1
+                    project_id = raw_project_id.strip()
+                    model = (
+                        f"projects/{project_id}/locations/{args.location}"
+                        f"/publishers/google/models/{args.model}"
+                    )
+                setup = {
+                    "setup": {
+                        "model": model,
+                        "generation_config": {"response_modalities": [args.modality]},
+                        "output_audio_transcription": {},
+                    }
+                }
+                if args.modality == "VIDEO":
+                    setup["setup"]["avatar_config"] = {"avatar_name": "Piper"}
+
+                start = time.monotonic()
+                phase = "/ws connect"
+                async with http.ws_connect(ws_url, max_msg_size=64 * 1024 * 1024) as ws:
+                    pending_session = False
+                    ws_opened = True
+                    try:
+                        await ws.send_str(json.dumps(setup))
+                        while True:
+                            msg = await ws.receive()
+                            if msg.type == aiohttp.WSMsgType.BINARY:
+                                print(
+                                    "FAIL: received a binary frame; the browser ignores those"
                                 )
-                            )
-                            continue
-                        before = stats["audio_chunks"] + stats["video_chunks"]
-                        summarize(data, stats)
-                        if first_media_s is None and before < (
-                            stats["audio_chunks"] + stats["video_chunks"]
-                        ):
-                            first_media_s = time.monotonic() - start
-                        if is_turn_complete(data):
-                            turn_complete = True
-                            break
-            except TimeoutError:
-                print(f"timed out after {timeout}s")
-            close_code = ws.close_code
+                                return 1
+                            if msg.type == aiohttp.WSMsgType.CLOSE:
+                                close_reason = msg.extra or ""
+                                break
+                            if msg.type != aiohttp.WSMsgType.TEXT:
+                                break
+                            try:
+                                data = json.loads(msg.data)
+                            except json.JSONDecodeError:
+                                print(
+                                    f"FAIL: received non-JSON text frame: "
+                                    f"{msg.data.strip()[:300]}"
+                                )
+                                return 1
+                            if not isinstance(data, dict):
+                                print(
+                                    f"FAIL: received non-object JSON frame: "
+                                    f"{type(data).__name__}"
+                                )
+                                return 1
+                            if "setupComplete" in data or "setup_complete" in data:
+                                setup_complete = True
+                                print(
+                                    f"setupComplete after {time.monotonic() - start:.2f}s"
+                                )
+                                await ws.send_str(
+                                    json.dumps(
+                                        {
+                                            "client_content": {
+                                                "turns": [
+                                                    {
+                                                        "role": "user",
+                                                        "parts": [
+                                                            {"text": args.prompt}
+                                                        ],
+                                                    }
+                                                ],
+                                                "turn_complete": True,
+                                            }
+                                        }
+                                    )
+                                )
+                                continue
+                            before = stats["audio_chunks"] + stats["video_chunks"]
+                            summarize(data, stats)
+                            if first_media_s is None and before < (
+                                stats["audio_chunks"] + stats["video_chunks"]
+                            ):
+                                first_media_s = time.monotonic() - start
+                            if is_turn_complete(data):
+                                turn_complete = True
+                                break
+                    finally:
+                        close_code = ws.close_code
+                        if not deadline.expired():
+                            deadline.reschedule(None)
+                        await _close_ws(ws, timeout)
+        except TimeoutError:
+            if not ws_opened:
+                print(f"FAIL: {phase} timed out after {timeout}s")
+                return 1
+            print(f"timed out after {timeout}s")
+        finally:
+            if pending_session:
+                await _release_pending_session(http, server, session_id, timeout)
 
         print(f"close code: {close_code} {close_reason}".rstrip())
         print(

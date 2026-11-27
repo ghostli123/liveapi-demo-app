@@ -10,6 +10,8 @@ import sys
 import unittest
 from unittest import mock
 
+from absl.testing import flagsaver
+import aiohttp
 from aiohttp import test_utils, web
 
 import main
@@ -536,11 +538,18 @@ class SmokeTestRunTest(unittest.IsolatedAsyncioTestCase):
         ]:
             with self.subTest(case=label):
                 ws_called = False
+                control_calls: list[dict] = []
                 app = web.Application()
 
                 async def control(
-                    _request: web.Request, body: dict = payload
+                    request: web.Request,
+                    body: dict = payload,
+                    calls: list[dict] = control_calls,
                 ) -> web.Response:
+                    req_body = await request.json()
+                    calls.append(req_body)
+                    if req_body.get("command") == "disconnect":
+                        return web.json_response({"removed": True})
                     return web.json_response(body)
 
                 async def ws_handler(request: web.Request) -> web.WebSocketResponse:
@@ -566,6 +575,224 @@ class SmokeTestRunTest(unittest.IsolatedAsyncioTestCase):
                     "FAIL: /api/control did not return a valid project_id", out
                 )
                 self.assertFalse(ws_called)
+                self.assertEqual(
+                    [c.get("command") for c in control_calls],
+                    ["connect", "disconnect"],
+                )
+                self.assertEqual(
+                    control_calls[0].get("session_id"),
+                    control_calls[1].get("session_id"),
+                )
+
+    async def test_invalid_project_id_releases_real_backend_session_slot(self):
+        main.SESSION_MANAGER = session_management.SessionManager()
+        with (
+            flagsaver.flagsaver(max_sessions=1),
+            mock.patch.object(
+                main, "initialize_gemini_chat_session", return_value=None
+            ),
+            mock.patch.object(
+                main,
+                "_session_initialized_response",
+                side_effect=lambda: web.json_response(
+                    {"status": "ok", "project_id": ""}
+                ),
+            ),
+        ):
+            server = ProductionTestServer(await main.create_app())
+            await server.start_server()
+            self.addAsyncCleanup(server.close)
+
+            rc, out = await self._run_captured(
+                _make_args(
+                    str(server.make_url("")),
+                    environment="prod",
+                    timeout=1.5,
+                )
+            )
+            self.assertEqual(rc, 1, out)
+            self.assertIn("FAIL: /api/control did not return a valid project_id", out)
+
+            # With max_sessions=1, a fresh connect succeeds only if smoke_test
+            # released its pending session before exiting.
+            async with aiohttp.ClientSession() as http:
+                async with http.post(
+                    str(server.make_url("/api/control")),
+                    json={
+                        "command": "connect",
+                        "session_id": "follow-up-session",
+                        "endpoint": "aiplatform.googleapis.com",
+                        "location": "us-central1",
+                    },
+                ) as resp:
+                    self.assertEqual(resp.status, 200, await resp.text())
+
+    async def test_timeout_bounds_blackhole_control_request(self):
+        release = asyncio.Event()
+
+        async def blackhole(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            try:
+                await reader.read(4096)
+                await release.wait()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        tcp_server = await asyncio.start_server(blackhole, "127.0.0.1", 0)
+        port = tcp_server.sockets[0].getsockname()[1]
+
+        async def cleanup() -> None:
+            release.set()
+            tcp_server.close()
+            await tcp_server.wait_closed()
+
+        self.addAsyncCleanup(cleanup)
+
+        rc, out = await asyncio.wait_for(
+            self._run_captured(_make_args(f"http://127.0.0.1:{port}", timeout=0.3)),
+            timeout=5.0,
+        )
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL: /api/control timed out after 0.3s", out)
+
+    async def test_timeout_bounds_ws_connect_and_releases_pending_session(self):
+        release = asyncio.Event()
+        self.addCleanup(release.set)
+        control_calls: list[dict] = []
+        app = web.Application()
+
+        async def control(request: web.Request) -> web.Response:
+            body = await request.json()
+            control_calls.append(body)
+            if body.get("command") == "disconnect":
+                return web.json_response({"removed": True})
+            return web.json_response({"status": "ok", "project_id": "test-proj"})
+
+        async def hang_ws(_request: web.Request) -> web.Response:
+            await release.wait()
+            return web.Response(status=500)
+
+        app.router.add_post("/api/control", control)
+        app.router.add_get("/ws", hang_ws)
+        server = await self._start_app(app)
+
+        rc, out = await asyncio.wait_for(
+            self._run_captured(_make_args(str(server.make_url("")), timeout=0.6)),
+            timeout=5.0,
+        )
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL: /ws connect timed out after 0.6s", out)
+        self.assertEqual(
+            [c.get("command") for c in control_calls], ["connect", "disconnect"]
+        )
+        self.assertEqual(
+            control_calls[0].get("session_id"), control_calls[1].get("session_id")
+        )
+
+    async def test_ws_connect_error_releases_pending_session(self):
+        control_calls: list[dict] = []
+        app = web.Application()
+
+        async def control(request: web.Request) -> web.Response:
+            body = await request.json()
+            control_calls.append(body)
+            if body.get("command") == "disconnect":
+                return web.json_response({"removed": True})
+            return web.json_response({"status": "ok", "project_id": "test-proj"})
+
+        async def failing_ws(_request: web.Request) -> web.Response:
+            return web.Response(status=500, text="upgrade failed")
+
+        app.router.add_post("/api/control", control)
+        app.router.add_get("/ws", failing_ws)
+        server = await self._start_app(app)
+
+        with self.assertRaises(aiohttp.WSServerHandshakeError):
+            await self._run_captured(_make_args(str(server.make_url("")), timeout=1.5))
+
+        self.assertEqual(
+            [c.get("command") for c in control_calls], ["connect", "disconnect"]
+        )
+        self.assertEqual(
+            control_calls[0].get("session_id"), control_calls[1].get("session_id")
+        )
+
+    async def test_timeout_bounds_unresponsive_ws_close_after_turn_complete(self):
+        release = asyncio.Event()
+        self.addCleanup(release.set)
+        app = web.Application()
+
+        async def control(_request: web.Request) -> web.Response:
+            return web.json_response({"status": "ok", "project_id": "test-proj"})
+
+        async def silent_close_ws(request: web.Request) -> web.WebSocketResponse:
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            await ws.receive_str()
+            await ws.send_str(json.dumps({"setupComplete": {}}))
+            await ws.receive_str()
+            await ws.send_str(
+                json.dumps(
+                    {
+                        "serverContent": {
+                            "modelTurn": {"parts": [{"text": "done"}]},
+                            "turnComplete": True,
+                        }
+                    }
+                )
+            )
+            # Stay idle without reading the client's close frame.
+            await release.wait()
+            return ws
+
+        app.router.add_post("/api/control", control)
+        app.router.add_get("/ws", silent_close_ws)
+        server = await self._start_app(app)
+
+        rc, out = await asyncio.wait_for(
+            self._run_captured(_make_args(str(server.make_url("")), timeout=1.0)),
+            timeout=5.0,
+        )
+        self.assertEqual(rc, 0, out)
+        self.assertIn("text: done", out)
+        self.assertIn("PASS", out)
+        self.assertNotIn("timed out", out)
+
+    async def test_timeout_during_ws_receive_prints_stats_without_disconnect(self):
+        release = asyncio.Event()
+        self.addCleanup(release.set)
+        control_calls: list[dict] = []
+        app = web.Application()
+
+        async def control(request: web.Request) -> web.Response:
+            body = await request.json()
+            control_calls.append(body)
+            return web.json_response({"status": "ok", "project_id": "test-proj"})
+
+        async def stalled_ws(request: web.Request) -> web.WebSocketResponse:
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            await ws.receive_str()
+            await ws.send_str(json.dumps({"setupComplete": {}}))
+            await ws.receive_str()
+            await release.wait()
+            return ws
+
+        app.router.add_post("/api/control", control)
+        app.router.add_get("/ws", stalled_ws)
+        server = await self._start_app(app)
+
+        rc, out = await asyncio.wait_for(
+            self._run_captured(_make_args(str(server.make_url("")), timeout=1.0)),
+            timeout=5.0,
+        )
+        self.assertEqual(rc, 1, out)
+        self.assertIn("timed out after 1.0s", out)
+        self.assertIn("audio: 0 chunks / 0 B", out)
+        self.assertIn("FAIL: no turnComplete", out)
+        self.assertEqual([c.get("command") for c in control_calls], ["connect"])
 
     async def test_trimmed_project_id_for_vertex_and_optional_for_common_bag(self):
         for env, control_body, expected_model in [
