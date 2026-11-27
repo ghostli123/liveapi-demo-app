@@ -998,6 +998,94 @@ test("late ACTIVITY_START after Mic off or Done speaking doesn't clear turnEnded
     assert.equal(latency(), "400 ms after last transcript");
 });
 
+test("empty OUTPUT_TRANSCRIPTION frames don't mark model speaking or responding, but still close finished output lines", () => {
+    const { element, at, latency } = loadLatencySession();
+    const lines = [];
+    element("text-chat").appendChild = (line) => {
+        line.isConnected = true;
+        lines.push(line);
+    };
+    element("connected").hidden = false;
+    element("speaking").hidden = true;
+
+    // Empty output transcription while the user is speaking doesn't close the
+    // open input line, show "model speaking", or consume the pending turn end.
+    at(0, "VOICE_ACTIVITY", "ACTIVITY_START");
+    at(500, "INPUT_TRANSCRIPTION", "hello");
+    at(600, "OUTPUT_TRANSCRIPTION", "", { finished: false });
+    assert.equal(element("speaking").hidden, true);
+    assert.equal(element("connected").hidden, false);
+    at(700, "INPUT_TRANSCRIPTION", " world");
+    at(800, "VOICE_ACTIVITY", "ACTIVITY_END");
+    at(850, "OUTPUT_TRANSCRIPTION", "", { finished: true });
+    assert.equal(element("speaking").hidden, true);
+    assert.deepEqual(lines.map((l) => l.textContent), ["You: hello world"]);
+
+    // First real output transcript measures latency, closes input, and marks speaking.
+    at(1100, "OUTPUT_TRANSCRIPTION", "Hi there.", { finished: false });
+    assert.equal(latency(), "300 ms after end of speech");
+    assert.equal(element("speaking").hidden, false);
+    assert.equal(element("connected").hidden, true);
+
+    // An empty finish-only frame mid-turn still closes the output transcript line.
+    at(1200, "OUTPUT_TRANSCRIPTION", "", { finished: true });
+    assert.equal(element("speaking").hidden, false);
+    at(1300, "OUTPUT_TRANSCRIPTION", "More.", { finished: false });
+    assert.deepEqual(lines.map((l) => l.textContent), [
+        "You: hello world",
+        "Gemini: Hi there.",
+        "Gemini: More.",
+    ]);
+
+    // After END_OF_TURN, a trailing empty finish-only frame must not re-enable
+    // "model speaking" or set responding=true (which would drop the next turn's latency).
+    at(1400, "END_OF_TURN");
+    assert.equal(element("speaking").hidden, true);
+    assert.equal(element("connected").hidden, false);
+    at(1500, "OUTPUT_TRANSCRIPTION", "", { finished: true });
+    assert.equal(element("speaking").hidden, true);
+    assert.equal(element("connected").hidden, false);
+
+    // Next user turn still records its latency cleanly.
+    at(2000, "VOICE_ACTIVITY", "ACTIVITY_START");
+    at(2500, "VOICE_ACTIVITY", "ACTIVITY_END");
+    at(2750, "OUTPUT_TRANSCRIPTION", "Next.", { finished: true });
+    assert.equal(latency(), "250 ms after end of speech");
+    assert.equal(element("speaking").hidden, false);
+    assert.deepEqual(lines.map((l) => l.textContent), [
+        "You: hello world",
+        "Gemini: Hi there.",
+        "Gemini: More.",
+        "Gemini: Next.",
+    ]);
+});
+
+test("empty OUTPUT_TRANSCRIPTION finish frame after INTERRUPT leaves speaking badge off and next turn timed", () => {
+    const { context, element, at, latency } = loadLatencySession();
+    context.AppState.liveAudioOutputManager.clear = () => {};
+    element("connected").hidden = false;
+    element("speaking").hidden = true;
+
+    at(0, "VOICE_ACTIVITY", "ACTIVITY_START");
+    at(500, "VOICE_ACTIVITY", "ACTIVITY_END");
+    at(800, "OUTPUT_TRANSCRIPTION", "First answer", { finished: false });
+    assert.equal(element("speaking").hidden, false);
+    assert.equal(latency(), "300 ms after end of speech");
+
+    at(1000, "INTERRUPT");
+    assert.equal(element("speaking").hidden, true);
+    assert.equal(element("connected").hidden, false);
+    at(1050, "OUTPUT_TRANSCRIPTION", "", { finished: true });
+    assert.equal(element("speaking").hidden, true);
+    assert.equal(element("connected").hidden, false);
+
+    at(1500, "VOICE_ACTIVITY", "ACTIVITY_START");
+    at(2000, "VOICE_ACTIVITY", "ACTIVITY_END");
+    at(2200, "OUTPUT_TRANSCRIPTION", "Second answer", { finished: true });
+    assert.equal(latency(), "200 ms after end of speech");
+    assert.equal(element("speaking").hidden, false);
+});
+
 test("connection age stops when a GoAway resume drops the connection and restarts with the new one", () => {
     const clock = { now: 0 };
     const intervals = new Map();

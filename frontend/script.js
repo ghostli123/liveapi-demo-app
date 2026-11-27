@@ -1023,10 +1023,12 @@ function handleReceiveResponse(messageResponse) {
             if (messageResponse.finished) closeTranscriptLine("input");
             break;
         case "OUTPUT_TRANSCRIPTION":
-            markModelResponse();
-            closeTranscriptLine("input");
-            setModelSpeaking(true);
-            appendTranscript("output", messageResponse.data);
+            if (messageResponse.data) {
+                markModelResponse();
+                closeTranscriptLine("input");
+                setModelSpeaking(true);
+                appendTranscript("output", messageResponse.data);
+            }
             if (messageResponse.finished) closeTranscriptLine("output");
             break;
         case "END_OF_TURN":
