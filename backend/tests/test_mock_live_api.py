@@ -243,14 +243,16 @@ async def _wait_for_no_close_after_tasks(timeout: float = TIMEOUT_S) -> None:
 class MockLiveApiDirectTest(unittest.IsolatedAsyncioTestCase):
     async def test_first_message_must_be_setup(self):
         async with mock_live_api.MockLiveApi() as api:
-            for payload in (
-                text_turn("hi"),
-                {"setup": None},
-                {"setup": ["not-an-object"]},
+            for label, raw in (
+                ("non-setup object", json.dumps(text_turn("hi"))),
+                ("null setup", json.dumps({"setup": None})),
+                ("list setup", json.dumps({"setup": ["not-an-object"]})),
+                ("deeply nested json", "[" * 20000 + "]" * 20000),
+                ("overlong integer", "1" * 5000),
             ):
-                with self.subTest(payload=payload):
+                with self.subTest(case=label):
                     async with websockets.connect(f"ws://127.0.0.1:{api.port}/x") as ws:
-                        await ws.send(json.dumps(payload))
+                        await ws.send(raw)
                         with self.assertRaises(websockets.exceptions.ConnectionClosed):
                             await asyncio.wait_for(ws.recv(), TIMEOUT_S)
                         self.assertEqual(ws.close_code, 1007)
@@ -379,8 +381,14 @@ class MockLiveApiDirectTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_malformed_post_setup_frame_closes_1007_and_cancels_expiry(self):
         async with mock_live_api.MockLiveApi() as api:
-            for raw in ("not-json", "[]", "null"):
-                with self.subTest(raw=raw):
+            for label, raw in (
+                ("not-json", "not-json"),
+                ("json list", "[]"),
+                ("json null", "null"),
+                ("deeply nested json", "[" * 20000 + "]" * 20000),
+                ("overlong integer", "1" * 5000),
+            ):
+                with self.subTest(case=label):
                     async with websockets.connect(f"ws://127.0.0.1:{api.port}/x") as ws:
                         await ws.send(json.dumps(setup_message(["TEXT"])))
                         await asyncio.wait_for(ws.recv(), TIMEOUT_S)

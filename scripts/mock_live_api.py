@@ -159,7 +159,7 @@ class MockLiveApi:
             setup = first["setup"]
             if not isinstance(setup, dict):
                 raise TypeError("setup must be a JSON object")
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError, RecursionError):
             await connection.close(1007, "The first message must be a setup message")
             return
         except websockets.exceptions.ConnectionClosed:
@@ -225,7 +225,7 @@ class MockSession:
             async for raw in self.connection:
                 try:
                     message = json.loads(raw)
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, RecursionError):
                     await self.connection.close(1007, "Messages must be JSON objects")
                     return
                 if not isinstance(message, dict):

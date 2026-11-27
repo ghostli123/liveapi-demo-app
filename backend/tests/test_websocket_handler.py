@@ -258,6 +258,27 @@ class DescribeConnectErrorTest(unittest.TestCase):
             "OSError",
         )
 
+    def test_deeply_nested_and_overlong_int_http_error_bodies(self):
+        cases = [
+            ("deeply nested json", b"[" * 20000 + b"]" * 20000, "[[["),
+            ("overlong integer", b"1" * 5000, "111"),
+        ]
+        for label, body, prefix in cases:
+            with self.subTest(case=label):
+                error = RejectedHandshake(502, body)
+                for fn in (
+                    websocket_handler.connect_error_detail,
+                    websocket_handler.describe_connect_error,
+                ):
+                    reason = fn(error)
+                    self.assertTrue(reason.startswith(f"Upstream HTTP 502: {prefix}"))
+                    self.assertTrue(reason.endswith("..."))
+                    self.assertLessEqual(
+                        len(reason),
+                        len("Upstream HTTP 502: ")
+                        + websocket_handler._MAX_CONNECT_ERROR_CHARS,
+                    )
+
 
 class UpstreamRejectionLogTest(unittest.IsolatedAsyncioTestCase):
     async def test_html_error_page_is_logged_as_one_short_line(self):
@@ -294,6 +315,39 @@ class UpstreamRejectionLogTest(unittest.IsolatedAsyncioTestCase):
         [line] = [o for o in logs.output if "Upstream connection failed" in o]
         self.assertNotIn("\n", line)
         self.assertLess(len(line), 500)
+
+    async def test_deeply_nested_json_error_body_does_not_crash_open_upstream(self):
+        nested = "[" * 20000 + "]" * 20000
+
+        def reject(connection, request):
+            response = connection.respond(502, nested)
+            response.headers["Content-Type"] = "application/json"
+            return response
+
+        quiet = logging.getLogger("test.quiet_server")
+        quiet.setLevel(logging.INFO)
+
+        async def unused(connection):
+            pass
+
+        async with websockets.serve(
+            unused,
+            "127.0.0.1",
+            0,
+            logger=quiet,
+            process_request=reject,
+        ) as server:
+            port = next(iter(server.sockets)).getsockname()[1]
+            handler = websocket_handler.WebsocketHandler(
+                f"ws://127.0.0.1:{port}/ws", "s", None
+            )
+            with self.assertLogs(level=logging.WARNING) as logs:
+                self.assertIsNone(await handler._open_upstream())
+        self.assertEqual(handler.close_code, 1011)
+        self.assertTrue(handler.close_reason.startswith("Upstream HTTP 502: [[["))
+        self.assertTrue(handler.close_reason.endswith("..."))
+        [line] = [o for o in logs.output if "Upstream connection failed" in o]
+        self.assertIn("Upstream HTTP 502: [[[", line)
 
 
 class UpstreamLoggingTest(unittest.IsolatedAsyncioTestCase):

@@ -122,7 +122,7 @@ def _extract_http_error_detail(body: bytes) -> str:
     raw = body.decode("utf-8", errors="replace")
     try:
         payload = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         return _one_line(raw)
     if isinstance(payload, dict) and "error" in payload:
         err = payload["error"]

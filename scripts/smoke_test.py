@@ -193,7 +193,7 @@ async def run(args: argparse.Namespace) -> int:
                     raw = await resp.text(errors="replace")
                     try:
                         body = json.loads(raw)
-                    except json.JSONDecodeError:
+                    except (ValueError, RecursionError):
                         body = None
                     display = body if body is not None else raw.strip()[:300]
                     print(f"control: HTTP {resp.status} {display}".rstrip())
@@ -248,7 +248,7 @@ async def run(args: argparse.Namespace) -> int:
                                 break
                             try:
                                 data = json.loads(msg.data)
-                            except json.JSONDecodeError:
+                            except (ValueError, RecursionError):
                                 print(
                                     f"FAIL: received non-JSON text frame: "
                                     f"{msg.data.strip()[:300]}"

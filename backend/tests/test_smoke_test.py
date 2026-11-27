@@ -285,6 +285,50 @@ class SmokeTestRunTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rc, 1)
         self.assertIn("FAIL: /api/control did not return a JSON object", out)
 
+    async def test_deeply_nested_and_overlong_int_control_responses_return_1(self):
+        for label, status, payload, expected in [
+            (
+                "200 deeply nested json",
+                200,
+                "[" * 20000 + "]" * 20000,
+                "FAIL: /api/control did not return a JSON object",
+            ),
+            (
+                "200 overlong integer",
+                200,
+                "1" * 5000,
+                "FAIL: /api/control did not return a JSON object",
+            ),
+            (
+                "500 deeply nested json",
+                500,
+                "[" * 20000 + "]" * 20000,
+                "control: HTTP 500 [[[",
+            ),
+            (
+                "500 overlong integer",
+                500,
+                "1" * 5000,
+                "control: HTTP 500 111",
+            ),
+        ]:
+            with self.subTest(case=label):
+                app = web.Application()
+
+                async def control(
+                    _request: web.Request, code: int = status, body: str = payload
+                ) -> web.Response:
+                    return web.Response(
+                        status=code, text=body, content_type="application/json"
+                    )
+
+                app.router.add_post("/api/control", control)
+                server = await self._start_app(app)
+
+                rc, out = await self._run_captured(_make_args(str(server.make_url(""))))
+                self.assertEqual(rc, 1, out)
+                self.assertIn(expected, out)
+
     async def test_snake_case_turn_complete_passes_without_waiting_for_timeout(self):
         app = web.Application()
         ws_closed = asyncio.Event()
@@ -381,6 +425,16 @@ class SmokeTestRunTest(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_and_non_object_ws_frames_return_1_without_crashing(self):
         for label, frame, expected in [
             ("invalid json", "not-json{", "FAIL: received non-JSON text frame"),
+            (
+                "deeply nested json",
+                "[" * 20000 + "]" * 20000,
+                "FAIL: received non-JSON text frame",
+            ),
+            (
+                "overlong integer",
+                "1" * 5000,
+                "FAIL: received non-JSON text frame",
+            ),
             (
                 "json list",
                 '["unexpected"]',
