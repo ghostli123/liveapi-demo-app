@@ -2662,6 +2662,48 @@ test("playAudioChunk drops non-string chunks without coercing numbers or null to
     assert.throws(() => LiveAudioOutputManager.base64ToArrayBuffer(null), /Base64 data must be a string/);
 });
 
+test("playAudioChunk ignores empty, whitespace-only, and 0-byte chunks without starting audio", async () => {
+    const { manager, fake } = audioOutputWithFakeContexts();
+    for (const empty of ["", "   ", "\t\r\n ", "\u00a0"]) {
+        assert.doesNotThrow(() => manager.playAudioChunk(empty));
+    }
+    await settle();
+    assert.equal(fake.contexts.length, 0);
+    assert.equal(fake.loads, 0);
+    assert.deepEqual(fake.errors, []);
+    assert.deepEqual(fake.warnings, []);
+
+    // Padded valid base64 trims and plays, and subsequent empty chunks do not post to the worklet.
+    manager.playAudioChunk(`  ${AUDIO_CHUNK}\n`);
+    await settle();
+    assert.equal(fake.contexts.length, 1);
+    assert.equal(manager.workletNode.posted.length, 1);
+    assert.equal(manager.workletNode.posted[0].length, 4);
+
+    manager.playAudioChunk("");
+    manager.playAudioChunk("   \t\n");
+    await settle();
+    assert.equal(manager.workletNode.posted.length, 1);
+    assert.deepEqual(fake.errors, []);
+
+    // A non-empty string that decodes to 0 bytes (e.g. via a lenient atob) is also dropped before context init.
+    const contexts = [];
+    const { LiveAudioOutputManager } = loadScript("live-media-manager.js", ["LiveAudioOutputManager"], {
+        window: {
+            AudioContext: class {
+                constructor() {
+                    contexts.push(this);
+                }
+            },
+            atob: () => "",
+        },
+    });
+    const zeroByteManager = new LiveAudioOutputManager();
+    zeroByteManager.playAudioChunk("====");
+    await settle();
+    assert.equal(contexts.length, 0);
+});
+
 test("a mic level meter the browser refuses throws and leaves nothing running", () => {
     const contexts = [];
     let refuseContext = false;

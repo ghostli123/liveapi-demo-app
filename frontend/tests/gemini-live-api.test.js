@@ -113,6 +113,30 @@ test("parseAll classifies inline media MIME types case-insensitively with parame
     assert.equal(events[3].mimeType, "AUDIO/PCM; rate=24000");
 });
 
+test("parseAll ignores empty or whitespace-only inline media data and trims padded base64", () => {
+    const events = GeminiLiveResponseMessage.parseAll({
+        serverContent: {
+            modelTurn: {
+                parts: [
+                    { inlineData: { mimeType: "audio/pcm;rate=24000", data: "" } },
+                    { inlineData: { mimeType: "audio/pcm;rate=24000", data: "   \t\r\n" } },
+                    { inline_data: { mime_type: "video/mp4", data: "   " } },
+                    { video: { mimeType: "image/jpeg", data: "\u00a0" } },
+                    { inlineData: { mimeType: "audio/pcm;rate=24000", data: "  AAA=\n" } },
+                    { inline_data: { mime_type: "image/png", data: "\tBBB= " } },
+                    { text: "  keep spaces  " },
+                ],
+            },
+        },
+    });
+    assert.deepEqual(types(events), ["AUDIO", "VIDEO", "TEXT"]);
+    assert.equal(events[0].data, "AAA=");
+    assert.equal(events[0].mimeType, "audio/pcm;rate=24000");
+    assert.equal(events[1].data, "BBB=");
+    assert.equal(events[1].mimeType, "image/png");
+    assert.equal(events[2].data, "  keep spaces  ");
+});
+
 test("parseAll accepts snake_case and reads the WebRTC answer", () => {
     const events = GeminiLiveResponseMessage.parseAll({
         setup_complete: { session_id: "s-1", rtc_setup_complete: { answer_sdp: "v=0" } },

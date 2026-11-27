@@ -41,15 +41,19 @@ class LiveAudioOutputManager {
      */
     playAudioChunk(base64AudioChunk) {
         if (typeof base64AudioChunk !== "string") return;
+        const trimmedChunk = base64AudioChunk.trim();
+        if (!trimmedChunk) return;
         let float32Data;
         try {
             const arrayBuffer =
-                LiveAudioOutputManager.base64ToArrayBuffer(base64AudioChunk);
+                LiveAudioOutputManager.base64ToArrayBuffer(trimmedChunk);
+            if (arrayBuffer.byteLength === 0) return;
             float32Data = LiveAudioOutputManager.convertPCM16LEToFloat32(arrayBuffer);
         } catch (error) {
             console.error("Error decoding audio chunk:", error);
             return;
         }
+        if (float32Data.length === 0) return;
         const ready = this.initializeAudioContext();
         const generation = this.generation;
         const audioContext = this.audioContext;

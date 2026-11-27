@@ -92,7 +92,7 @@ class GeminiLiveResponseMessage {
                     add("TEXT", text);
                 }
                 const inline = part?.inlineData || part?.inline_data || part?.video;
-                const data = str(inline?.data);
+                const data = str(inline?.data).trim();
                 if (data) {
                     const mimeType = str(inline.mimeType) || str(inline.mime_type);
                     const baseMime = mimeType.split(";", 1)[0].trim().toLowerCase();
