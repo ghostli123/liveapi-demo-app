@@ -1047,6 +1047,8 @@ class LiveVideoOutputManager {
 
     playVideoChunk(base64Chunk, mimeType = "") {
         if (typeof base64Chunk !== "string") return;
+        const trimmedChunk = base64Chunk.trim();
+        if (!trimmedChunk) return;
         const mime =
             typeof mimeType === "string"
                 ? mimeType.split(";", 1)[0].trim().toLowerCase()
@@ -1070,18 +1072,20 @@ class LiveVideoOutputManager {
                 video.style.display = "none";
             }
             if (imgEl) {
+                const frameMime = /^image\/[a-z0-9.+-]+$/.test(mime) ? mime : "image/jpeg";
                 imgEl.style.display = "block";
-                imgEl.src = `data:image/jpeg;base64,${base64Chunk}`;
+                imgEl.src = `data:${frameMime};base64,${trimmedChunk}`;
             }
             return;
         }
         let arrayBuffer;
         try {
-            arrayBuffer = LiveVideoOutputManager.base64ToArrayBuffer(base64Chunk);
+            arrayBuffer = LiveVideoOutputManager.base64ToArrayBuffer(trimmedChunk);
         } catch (error) {
             console.error("Error decoding video chunk:", error);
             return;
         }
+        if (arrayBuffer.byteLength === 0) return;
         // Recording is the user's choice and doesn't need the player.
         if (this.recordingEnabled && !this.recordingLimitReached) this.recordChunk(arrayBuffer);
         if (this.playbackFailed) return;
