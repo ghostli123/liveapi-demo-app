@@ -4223,3 +4223,150 @@ test("G3RtcWebRtcManager.initiateSession() handles null options and preserves 'f
     assert.equal(rtc.pc, null);
     assert.equal(stateEl.textContent, "failed");
 });
+
+test("mediaErrorName() safely reads string error.name values and returns '' on throwing getters or non-objects", () => {
+    const context = loadScript("live-media-manager.js", ["mediaErrorName"], {});
+    assert.equal(context.mediaErrorName(new Error("boom")), "Error");
+    assert.equal(context.mediaErrorName({ name: "NotAllowedError" }), "NotAllowedError");
+    assert.equal(
+        context.mediaErrorName(Object.assign(Object.create(null), { name: "QuotaExceededError" })),
+        "QuotaExceededError"
+    );
+    assert.equal(context.mediaErrorName({ name: 123 }), "");
+    assert.equal(context.mediaErrorName(null), "");
+    assert.equal(context.mediaErrorName(undefined), "");
+    assert.equal(context.mediaErrorName("NotAllowedError"), "");
+    assert.equal(context.mediaErrorName(Symbol("err")), "");
+    assert.equal(
+        context.mediaErrorName({
+            get name() {
+                throw new Error("name getter boom");
+            },
+        }),
+        ""
+    );
+});
+
+test("initMediaSource, appendNextChunk, and completeSession handle throwing error.name getters", async () => {
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+        const throwingName = (message) => ({
+            message,
+            get name() {
+                throw new Error("name getter boom");
+            },
+        });
+
+        // 1. LiveVideoOutputManager.initMediaSource() play() rejection with throwing .name getter.
+        const consoleErrors = [];
+        let appendError = null;
+        let mediaSourceInstance = null;
+        let urls = 0;
+        const video = {
+            style: {},
+            currentTime: 0,
+            src: null,
+            paused: true,
+            addEventListener() {},
+            pause() {
+                this.paused = true;
+            },
+            load() {},
+            getAttribute(name) {
+                return name === "src" ? this.src : null;
+            },
+            removeAttribute(name) {
+                if (name === "src") this.src = null;
+            },
+            play: () => Promise.reject(throwingName("play failed")),
+        };
+        class FakeMediaSource {
+            static isTypeSupported() {
+                return true;
+            }
+            constructor() {
+                this.readyState = "closed";
+                this.listeners = {};
+                mediaSourceInstance = this;
+            }
+            addEventListener(type, listener) {
+                (this.listeners[type] ||= []).push(listener);
+            }
+            open() {
+                this.readyState = "open";
+                (this.listeners.sourceopen || []).forEach((l) => l());
+            }
+            addSourceBuffer() {
+                return {
+                    updating: false,
+                    buffered: { length: 0 },
+                    addEventListener() {},
+                    appendBuffer() {
+                        if (appendError) throw appendError;
+                    },
+                    remove() {},
+                };
+            }
+            endOfStream() {
+                this.readyState = "ended";
+            }
+        }
+        const videoCtx = loadScript("live-media-manager.js", ["LiveVideoOutputManager"], {
+            window: { MediaSource: FakeMediaSource, atob },
+            document: { getElementById: (id) => (id === "video_player" ? video : null) },
+            URL: { createObjectURL: () => `blob:${++urls}`, revokeObjectURL() {} },
+            console: {
+                error: (...args) => consoleErrors.push(args.join(" ")),
+                warn() {},
+                log() {},
+            },
+        });
+        const videoOut = new videoCtx.LiveVideoOutputManager();
+        let mseBlocked = 0;
+        videoOut.onAutoplayBlocked = () => mseBlocked++;
+        const playbackErrors = [];
+        videoOut.onPlaybackError = (msg) => playbackErrors.push(msg);
+
+        videoOut.initMediaSource();
+        await settle();
+        assert.equal(mseBlocked, 0);
+
+        // 2. LiveVideoOutputManager.appendNextChunk() preserves the original append error when .name getter throws.
+        mediaSourceInstance.open();
+        appendError = throwingName("bad video frame");
+        videoOut.playVideoChunk(VIDEO_CHUNK, "video/mp4");
+        assert.equal(videoOut.playbackFailed, true);
+        assert.equal(playbackErrors.length, 1);
+        assert.deepEqual(consoleErrors, ["Error appending video: bad video frame"]);
+
+        // 3. G3RtcWebRtcManager.completeSession() play() rejection with throwing .name getter.
+        const rtcCtx = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
+            document: { getElementById: () => null },
+            setInterval: () => ({}),
+            clearInterval() {},
+            setTimeout: () => ({}),
+            clearTimeout() {},
+            performance: { now: () => 0 },
+        });
+        const rtcVideo = {
+            srcObject: null,
+            removeAttribute() {},
+            play: () => Promise.reject(throwingName("rtc play failed")),
+        };
+        const rtc = new rtcCtx.G3RtcWebRtcManager(rtcVideo);
+        let rtcBlocked = 0;
+        rtc.onAutoplayBlocked = () => rtcBlocked++;
+        rtc.pc = { connectionState: "connected", setRemoteDescription: async () => {}, close() {} };
+        rtc.remoteStream = {};
+        await rtc.completeSession("v=0\r\n");
+        await settle();
+        assert.equal(rtcBlocked, 0);
+        rtc.close();
+
+        assert.deepEqual(unhandled, []);
+    } finally {
+        process.off("unhandledRejection", onUnhandled);
+    }
+});

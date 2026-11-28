@@ -905,6 +905,21 @@ function formatMediaError(error) {
     return "unknown error";
 }
 
+/**
+ * Safely reads `error.name` as a string, returning `""` on null, primitives, or throwing getters.
+ * @param {unknown} error
+ * @returns {string}
+ */
+function mediaErrorName(error) {
+    if (!error || typeof error !== "object") return "";
+    try {
+        const name = /** @type {{ name?: unknown }} */ (error).name;
+        return typeof name === "string" ? name : "";
+    } catch {
+        return "";
+    }
+}
+
 /** @returns {HTMLVideoElement | null} The avatar's <video>, shared by both transports. */
 function getAvatarVideoElement() {
     return /** @type {HTMLVideoElement | null} */ (document.getElementById("video_player"));
@@ -1031,7 +1046,7 @@ class LiveVideoOutputManager {
         this.attachVideoListeners(video);
         video.play()?.catch((err) => {
             if (this.mediaSource !== mediaSource || this.playbackFailed) return;
-            if (err?.name === "NotAllowedError") this.onAutoplayBlocked();
+            if (mediaErrorName(err) === "NotAllowedError") this.onAutoplayBlocked();
         });
     }
 
@@ -1216,7 +1231,7 @@ class LiveVideoOutputManager {
         try {
             sourceBuffer.appendBuffer(chunk);
         } catch (e) {
-            if (e?.name !== "QuotaExceededError") throw e;
+            if (mediaErrorName(e) !== "QuotaExceededError") throw e;
             // Make room and retry the same chunk on updateend.
             this.chunkQueue.unshift(chunk);
             this.queuedBytes += chunk.byteLength;
@@ -1582,7 +1597,7 @@ class G3RtcWebRtcManager {
             videoEl.play()?.catch((err) => {
                 if (this.pc !== pc) return;
                 console.warn("[WebRTC] Auto-play warning on video_player:", err);
-                if (err?.name === "NotAllowedError") this.onAutoplayBlocked();
+                if (mediaErrorName(err) === "NotAllowedError") this.onAutoplayBlocked();
             });
         }
         this.startStatsPolling();
