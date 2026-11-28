@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import socket
 import sys
 import unittest
 from unittest import mock
@@ -215,6 +216,69 @@ class SmokeTestHelpersTest(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     smoke_test._validate_timeout(bad)
+
+    def test_validate_location_normalizes_and_rejects_invalid(self):
+        for good, expected in [
+            ("us-central1", "us-central1"),
+            ("  US-CENTRAL1  ", "us-central1"),
+            ("\tGlobal\r\n", "global"),
+            ("US", "us"),
+            ("eu", "eu"),
+            ("europe-west4", "europe-west4"),
+        ]:
+            with self.subTest(good=good):
+                self.assertEqual(smoke_test._validate_location(good), expected)
+
+        for bad in [
+            "",
+            "   ",
+            "\x0bus-central1",
+            "\x0cus-central1",
+            "\u00a0us-central1",
+            "us central1",
+            "us/central1",
+            "../us-central1",
+            "123",
+            "us_central1",
+            "\u212a",  # Kelvin sign lowercases to ASCII 'k'
+            None,
+            123,
+        ]:
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    smoke_test._validate_location(bad)
+
+    def test_validate_model_strips_and_rejects_invalid(self):
+        for good, expected in [
+            ("gemini-3.8-live", "gemini-3.8-live"),
+            (
+                "  gemini-live-2.5-flash-native-audio\t\n",
+                "gemini-live-2.5-flash-native-audio",
+            ),
+            ("gemini-2.0-flash-live-001@default", "gemini-2.0-flash-live-001@default"),
+            ("Gemini_Test:v1.0", "Gemini_Test:v1.0"),
+        ]:
+            with self.subTest(good=good):
+                self.assertEqual(smoke_test._validate_model(good), expected)
+
+        for bad in [
+            "",
+            "   ",
+            "\x0bgemini-3.8-live",
+            "\x0cgemini-3.8-live",
+            "\u00a0gemini-3.8-live",
+            "gemini 3.8",
+            "models/gemini-3.8-live",
+            "../other",
+            "gemini..live",
+            "-leading-dash",
+            "gemini-\u00e9",
+            None,
+            123,
+        ]:
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    smoke_test._validate_model(bad)
 
 
 class SmokeTestRunTest(unittest.IsolatedAsyncioTestCase):
@@ -781,15 +845,211 @@ class SmokeTestRunTest(unittest.IsolatedAsyncioTestCase):
         app.router.add_get("/ws", failing_ws)
         server = await self._start_app(app)
 
-        with self.assertRaises(aiohttp.WSServerHandshakeError):
-            await self._run_captured(_make_args(str(server.make_url("")), timeout=1.5))
-
+        rc, out = await self._run_captured(
+            _make_args(str(server.make_url("")), timeout=1.5)
+        )
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL: /ws connect failed:", out)
+        self.assertIn("500", out)
         self.assertEqual(
             [c.get("command") for c in control_calls], ["connect", "disconnect"]
         )
         self.assertEqual(
             control_calls[0].get("session_id"), control_calls[1].get("session_id")
         )
+
+    async def test_unreachable_server_and_os_error_return_1_without_crashing(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            unused_port = sock.getsockname()[1]
+
+        rc, out = await self._run_captured(
+            _make_args(f"http://127.0.0.1:{unused_port}", timeout=1.5)
+        )
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL: /api/control failed:", out)
+
+        with mock.patch.object(
+            smoke_test.aiohttp.ClientSession, "post", side_effect=OSError()
+        ):
+            rc, out = await self._run_captured(
+                _make_args("http://127.0.0.1:8080", timeout=1.5)
+            )
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL: /api/control failed: OSError", out)
+
+    async def test_ws_send_error_after_open_returns_1_with_stats(self):
+        control_calls: list[dict] = []
+        app = web.Application()
+
+        async def control(request: web.Request) -> web.Response:
+            body = await request.json()
+            control_calls.append(body)
+            return web.json_response({"status": "ok", "project_id": "test-proj"})
+
+        async def ws_handler(request: web.Request) -> web.WebSocketResponse:
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            await ws.receive_str()
+            await ws.send_str(json.dumps({"setupComplete": {}}))
+            async for _ in ws:
+                pass
+            return ws
+
+        app.router.add_post("/api/control", control)
+        app.router.add_get("/ws", ws_handler)
+        server = await self._start_app(app)
+
+        orig_send_str = smoke_test.aiohttp.ClientWebSocketResponse.send_str
+        send_count = 0
+
+        async def fail_second_send(ws, data, *args, **kwargs):
+            nonlocal send_count
+            send_count += 1
+            if send_count == 2:
+                raise aiohttp.ClientConnectionResetError(
+                    "Cannot write to closing transport"
+                )
+            return await orig_send_str(ws, data, *args, **kwargs)
+
+        with mock.patch.object(
+            smoke_test.aiohttp.ClientWebSocketResponse,
+            "send_str",
+            new=fail_second_send,
+        ):
+            rc, out = await self._run_captured(
+                _make_args(str(server.make_url("")), timeout=1.5)
+            )
+        self.assertEqual(rc, 1, out)
+        self.assertIn("audio: 0 chunks / 0 B", out)
+        self.assertIn("FAIL: /ws failed: Cannot write to closing transport", out)
+        self.assertEqual([c.get("command") for c in control_calls], ["connect"])
+
+    async def test_ws_protocol_error_frame_reports_error_detail(self):
+        app = web.Application()
+
+        async def control(_request: web.Request) -> web.Response:
+            return web.json_response({"status": "ok", "project_id": "test-proj"})
+
+        async def ws_handler(request: web.Request) -> web.WebSocketResponse:
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            await ws.receive_str()
+            await ws.send_str(json.dumps({"setupComplete": {}}))
+            await ws.receive_str()
+            await ws.send_str("x" * 200)
+            async for _ in ws:
+                pass
+            return ws
+
+        app.router.add_post("/api/control", control)
+        app.router.add_get("/ws", ws_handler)
+        server = await self._start_app(app)
+
+        orig_ws_connect = smoke_test.aiohttp.ClientSession.ws_connect
+
+        def small_limit_ws_connect(session, url, *args, **kwargs):
+            kwargs["max_msg_size"] = 64
+            return orig_ws_connect(session, url, *args, **kwargs)
+
+        with mock.patch.object(
+            smoke_test.aiohttp.ClientSession, "ws_connect", new=small_limit_ws_connect
+        ):
+            rc, out = await self._run_captured(
+                _make_args(str(server.make_url("")), timeout=1.5)
+            )
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL: /ws failed:", out)
+        self.assertIn("exceeds limit 64", out)
+
+    async def test_invalid_location_or_model_returns_1_without_request(self):
+        with mock.patch.object(smoke_test.aiohttp, "ClientSession") as session_cls:
+            for bad_loc in ("", "   ", "../bad", "us/central1", "\u00a0us-central1"):
+                with self.subTest(location=bad_loc):
+                    rc, out = await self._run_captured(
+                        _make_args("http://127.0.0.1:8080", location=bad_loc)
+                    )
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn("FAIL: --location must be a valid region", out)
+            for bad_model in (
+                "",
+                "   ",
+                "models/gemini-3.8-live",
+                "../other",
+                "\x0bgemini-3.8-live",
+            ):
+                with self.subTest(model=bad_model):
+                    rc, out = await self._run_captured(
+                        _make_args("http://127.0.0.1:8080", model=bad_model)
+                    )
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn("FAIL: --model must be a valid model name", out)
+            session_cls.assert_not_called()
+
+    async def test_location_and_model_are_normalized_in_control_and_setup(self):
+        for env, expected_model in [
+            (
+                "prod",
+                "projects/test-proj/locations/us-central1/publishers/google/models/gemini-3.8-live",
+            ),
+            (
+                "autopush-common",
+                "models/gemini-3.8-live",
+            ),
+        ]:
+            with self.subTest(environment=env):
+                seen_control: list[dict] = []
+                seen_models: list[str] = []
+                app = web.Application()
+
+                async def control(
+                    request: web.Request, controls: list[dict] = seen_control
+                ) -> web.Response:
+                    controls.append(await request.json())
+                    return web.json_response(
+                        {"status": "ok", "project_id": "test-proj"}
+                    )
+
+                async def ws_handler(
+                    request: web.Request, models: list[str] = seen_models
+                ) -> web.WebSocketResponse:
+                    ws = web.WebSocketResponse()
+                    await ws.prepare(request)
+                    setup = json.loads(await ws.receive_str())
+                    models.append(setup["setup"]["model"])
+                    await ws.send_str(json.dumps({"setupComplete": {}}))
+                    await ws.receive_str()
+                    await ws.send_str(
+                        json.dumps(
+                            {
+                                "serverContent": {
+                                    "modelTurn": {"parts": [{"text": "ok"}]},
+                                    "turnComplete": True,
+                                }
+                            }
+                        )
+                    )
+                    async for _ in ws:
+                        pass
+                    return ws
+
+                app.router.add_post("/api/control", control)
+                app.router.add_get("/ws", ws_handler)
+                server = await self._start_app(app)
+
+                rc, out = await self._run_captured(
+                    _make_args(
+                        str(server.make_url("")),
+                        environment=env,
+                        location="  US-CENTRAL1  ",
+                        model="  gemini-3.8-live\t",
+                        timeout=1.5,
+                    )
+                )
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(seen_control[0]["location"], "us-central1")
+                self.assertEqual(seen_models, [expected_model])
+                self.assertIn("PASS", out)
 
     async def test_timeout_bounds_unresponsive_ws_close_after_turn_complete(self):
         release = asyncio.Event()

@@ -13,12 +13,17 @@ import argparse
 import asyncio
 import json
 import math
+import re
 import sys
 import time
 import uuid
 from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
+
+_ASCII_WHITESPACE = " \t\r\n"
+_LOCATION_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
+_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$")
 
 # Mirrors GeminiLiveAPI.setApiHost() in frontend/gemini-live-api.js.
 ENVIRONMENT_ENDPOINTS = {
@@ -75,6 +80,32 @@ def _validate_timeout(timeout: object) -> float:
             f"--timeout must be a finite positive number (got {timeout!r})"
         )
     return value
+
+
+def _validate_location(location: object) -> str:
+    """Normalizes and validates --location as an ASCII GCP region name."""
+    if not isinstance(location, str):
+        raise ValueError(f"--location must be a valid region (got {location!r})")
+    stripped = location.strip(_ASCII_WHITESPACE)
+    if not stripped.isascii() or not _LOCATION_RE.fullmatch(stripped.lower()):
+        raise ValueError(f"--location must be a valid region (got {location!r})")
+    return stripped.lower()
+
+
+def _validate_model(model: object) -> str:
+    """Strips and validates --model as a single non-empty ASCII model name."""
+    if not isinstance(model, str):
+        raise ValueError(f"--model must be a valid model name (got {model!r})")
+    stripped = model.strip(_ASCII_WHITESPACE)
+    if not stripped.isascii() or ".." in stripped or not _MODEL_RE.fullmatch(stripped):
+        raise ValueError(f"--model must be a valid model name (got {model!r})")
+    return stripped
+
+
+def _format_error(err: BaseException) -> str:
+    """Formats an exception as a single non-empty line for FAIL output."""
+    detail = " ".join(str(err).split())
+    return detail or type(err).__name__
 
 
 def _server_content(message: dict) -> dict:
@@ -157,6 +188,8 @@ async def run(args: argparse.Namespace) -> int:
     try:
         ws_url = _ws_url(args.server, session_id)
         timeout = _validate_timeout(args.timeout)
+        location = _validate_location(args.location)
+        model_name = _validate_model(args.model)
     except ValueError as err:
         print(f"FAIL: {err}")
         return 1
@@ -176,6 +209,7 @@ async def run(args: argparse.Namespace) -> int:
     first_media_s = None
     pending_session = False
     ws_opened = False
+    ws_error: str | None = None
     phase = "/api/control"
 
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as http:
@@ -187,7 +221,7 @@ async def run(args: argparse.Namespace) -> int:
                         "command": "connect",
                         "session_id": session_id,
                         "endpoint": endpoint,
-                        "location": args.location,
+                        "location": location,
                     },
                 ) as resp:
                     raw = await resp.text(errors="replace")
@@ -204,7 +238,7 @@ async def run(args: argparse.Namespace) -> int:
                     pending_session = True
                 raw_project_id = body.get("project_id")
                 if is_common_bag:
-                    model = f"models/{args.model}"
+                    model = f"models/{model_name}"
                 else:
                     if (
                         not isinstance(raw_project_id, str)
@@ -214,8 +248,8 @@ async def run(args: argparse.Namespace) -> int:
                         return 1
                     project_id = raw_project_id.strip()
                     model = (
-                        f"projects/{project_id}/locations/{args.location}"
-                        f"/publishers/google/models/{args.model}"
+                        f"projects/{project_id}/locations/{location}"
+                        f"/publishers/google/models/{model_name}"
                     )
                 setup = {
                     "setup": {
@@ -232,6 +266,7 @@ async def run(args: argparse.Namespace) -> int:
                 async with http.ws_connect(ws_url, max_msg_size=64 * 1024 * 1024) as ws:
                     pending_session = False
                     ws_opened = True
+                    phase = "/ws"
                     try:
                         await ws.send_str(json.dumps(setup))
                         while True:
@@ -243,6 +278,15 @@ async def run(args: argparse.Namespace) -> int:
                                 return 1
                             if msg.type == aiohttp.WSMsgType.CLOSE:
                                 close_reason = msg.extra or ""
+                                break
+                            if msg.type == aiohttp.WSMsgType.ERROR:
+                                err = (
+                                    msg.data
+                                    if isinstance(msg.data, BaseException)
+                                    else ws.exception()
+                                )
+                                if err is not None:
+                                    ws_error = f"{phase} failed: {_format_error(err)}"
                                 break
                             if msg.type != aiohttp.WSMsgType.TEXT:
                                 break
@@ -302,6 +346,12 @@ async def run(args: argparse.Namespace) -> int:
                 print(f"FAIL: {phase} timed out after {timeout}s")
                 return 1
             print(f"timed out after {timeout}s")
+        except (aiohttp.ClientError, OSError) as err:
+            detail = _format_error(err)
+            if not ws_opened:
+                print(f"FAIL: {phase} failed: {detail}")
+                return 1
+            ws_error = f"{phase} failed: {detail}"
         finally:
             if pending_session:
                 await _release_pending_session(http, server, session_id, timeout)
@@ -318,6 +368,9 @@ async def run(args: argparse.Namespace) -> int:
         if stats["transcript"]:
             print("transcript:", "".join(stats["transcript"])[:300])
 
+    if ws_error is not None:
+        print(f"FAIL: {ws_error}")
+        return 1
     if not setup_complete:
         print("FAIL: no setupComplete")
         return 1
