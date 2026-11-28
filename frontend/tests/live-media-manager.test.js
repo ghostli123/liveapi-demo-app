@@ -3863,3 +3863,363 @@ test("already-ended video tracks in LiveFrameSource._attach() are detached witho
     assert.equal(directSibling.readyState, "ended");
     assert.deepEqual(camEnded, [camEndedVideo, directEnded]);
 });
+
+test("LiveFrameSource.captureFrameB64() returns empty string when 2D canvas context is unavailable", () => {
+    const track = fakeTrack();
+    const stream = { getTracks: () => [track], getVideoTracks: () => [track] };
+    const videoEl = { srcObject: null, videoWidth: 640, videoHeight: 480 };
+    const nullCtxCanvas = { getContext: () => null, width: 0, height: 0, toDataURL: () => "" };
+
+    const context = loadScript("live-media-manager.js", ["LiveVideoManager"], {});
+    const camera = new context.LiveVideoManager(videoEl, nullCtxCanvas);
+    let sentFrames = 0;
+    camera.onNewFrame = () => sentFrames++;
+    assert.equal(camera._attach(stream, false), true);
+
+    assert.equal(camera.captureFrameB64(), "");
+    camera.newFrame();
+    assert.equal(sentFrames, 0);
+    camera.stopWebcam();
+
+    const emptyDataUrlCanvas = {
+        getContext: () => ({ drawImage() {} }),
+        width: 0,
+        height: 0,
+        toDataURL: () => "data:,",
+    };
+    const track2 = fakeTrack();
+    const stream2 = { getTracks: () => [track2], getVideoTracks: () => [track2] };
+    const camera2 = new context.LiveVideoManager(videoEl, emptyDataUrlCanvas);
+    assert.equal(camera2._attach(stream2, false), true);
+    assert.equal(camera2.captureFrameB64(), "");
+    camera2.stopWebcam();
+});
+
+test("formatMediaError() falls back to error.name when error.message getter throws", () => {
+    const context = loadScript("live-media-manager.js", ["formatMediaError"], {});
+
+    const throwingMessage = {
+        get message() {
+            throw new Error("message getter boom");
+        },
+        name: "QuotaExceededError",
+    };
+    assert.equal(context.formatMediaError(throwingMessage), "QuotaExceededError");
+
+    const throwingName = {
+        message: "append failed",
+        get name() {
+            throw new Error("name getter boom");
+        },
+    };
+    assert.equal(context.formatMediaError(throwingName), "append failed");
+
+    const bothThrowing = {
+        get message() {
+            throw new Error("message boom");
+        },
+        get name() {
+            throw new Error("name boom");
+        },
+        toString() {
+            return "custom fallback";
+        },
+    };
+    assert.equal(context.formatMediaError(bothThrowing), "custom fallback");
+});
+
+test("LiveAudioInputManager.connectMicrophone() and G3RtcWebRtcManager.startMicrophone() tear down already-ended tracks even if onMicrophoneEnded is a no-op", async () => {
+    // 1. LiveAudioInputManager: track already ended on getUserMedia() resolve.
+    const intervals = new Set();
+    let setIntervalCalls = 0;
+    let addModuleCalls = 0;
+    let workletCreated = 0;
+    const contexts = [];
+    let pendingAddModule = null;
+
+    class FakeAudioContext {
+        constructor() {
+            this.state = "running";
+            this.closed = 0;
+            this.audioWorklet = {
+                addModule: () => {
+                    addModuleCalls++;
+                    if (pendingAddModule) return pendingAddModule;
+                    return Promise.resolve();
+                },
+            };
+            contexts.push(this);
+        }
+        createMediaStreamSource() {
+            return { connect() {} };
+        }
+        close() {
+            this.closed++;
+            this.state = "closed";
+            return Promise.resolve();
+        }
+    }
+    class FakeWorkletNode {
+        constructor() {
+            workletCreated++;
+            this.port = { onmessage: null };
+        }
+        disconnect() {}
+    }
+
+    const ended1 = fakeTrack();
+    ended1.readyState = "ended";
+    const sibling1 = fakeTrack();
+    const stream1 = {
+        getTracks: () => [ended1, sibling1],
+        getAudioTracks: () => [ended1, sibling1],
+    };
+
+    const track2 = fakeTrack();
+    const sibling2 = fakeTrack();
+    const stream2 = {
+        getTracks: () => [track2, sibling2],
+        getAudioTracks: () => [track2, sibling2],
+    };
+
+    const wsStreams = [stream1, stream2];
+    const wsCtx = loadScript("live-media-manager.js", ["LiveAudioInputManager"], {
+        AudioContext: FakeAudioContext,
+        AudioWorkletNode: FakeWorkletNode,
+        navigator: { mediaDevices: { getUserMedia: async () => wsStreams.shift() } },
+        setInterval: () => {
+            setIntervalCalls++;
+            const id = {};
+            intervals.add(id);
+            return id;
+        },
+        clearInterval: (id) => intervals.delete(id),
+    });
+
+    const input = new wsCtx.LiveAudioInputManager();
+    let wsEnded = 0;
+    input.onMicrophoneEnded = () => wsEnded++; // Deliberately does NOT call disconnectMicrophone().
+
+    await input.connectMicrophone();
+    assert.equal(wsEnded, 1);
+    assert.equal(addModuleCalls, 0);
+    assert.equal(workletCreated, 0);
+    assert.equal(setIntervalCalls, 0);
+    assert.equal(intervals.size, 0);
+    assert.equal(contexts[0].closed, 1);
+    assert.equal(sibling1.readyState, "ended");
+    assert.equal(input.stream, null);
+    assert.equal(input.audioContext, null);
+    assert.equal(input.processor, null);
+
+    // 2. LiveAudioInputManager: track ends while addModule() is pending.
+    let finishLoad;
+    pendingAddModule = new Promise((resolve) => (finishLoad = resolve));
+    const connecting2 = input.connectMicrophone();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(addModuleCalls, 1);
+    track2.end();
+    finishLoad();
+    await connecting2;
+    assert.equal(wsEnded, 2);
+    assert.equal(workletCreated, 0);
+    assert.equal(setIntervalCalls, 0);
+    assert.equal(intervals.size, 0);
+    assert.equal(contexts[1].closed, 1);
+    assert.equal(sibling2.readyState, "ended");
+    assert.equal(input.stream, null);
+    assert.equal(input.audioContext, null);
+    assert.equal(input.processor, null);
+
+    // 3. G3RtcWebRtcManager: already-ended track on getUserMedia() resolve.
+    const rtcEndedTrack = fakeTrack();
+    rtcEndedTrack.readyState = "ended";
+    const rtcSibling = fakeTrack();
+    const rtcStream = {
+        getTracks: () => [rtcEndedTrack, rtcSibling],
+        getAudioTracks: () => [rtcEndedTrack, rtcSibling],
+    };
+    const sentTracks = [];
+    const rtcCtx = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
+        navigator: { mediaDevices: { getUserMedia: async () => rtcStream } },
+        document: { getElementById: () => null },
+    });
+    const rtc = new rtcCtx.G3RtcWebRtcManager(null);
+    rtc.audioSender = {
+        replaceTrack: async (track) => {
+            sentTracks.push(track);
+        },
+    };
+    let rtcEnded = 0;
+    rtc.onMicrophoneEnded = () => rtcEnded++; // Deliberately does NOT call stopMicrophone().
+    await rtc.startMicrophone();
+    assert.equal(rtcEnded, 1);
+    assert.equal(rtc.micStream, null);
+    assert.equal(rtcSibling.readyState, "ended");
+    assert.deepEqual(sentTracks, [null]); // Only the initial stopMicrophone() reset, never the ended track.
+});
+
+test("LiveVideoOutputManager.initMediaSource() revokes and clears prior objectUrl on early returns and constructor/URL throws", () => {
+    const revoked = [];
+    let nextUrl = 0;
+    let videoExists = true;
+    let mseSupported = true;
+    let throwInCtor = false;
+    let throwInCreateObjectUrl = false;
+    const videoEl = {
+        style: {},
+        src: "",
+        removeAttribute() {},
+        addEventListener() {},
+        play: () => Promise.resolve(),
+    };
+    class FakeMediaSource {
+        constructor() {
+            if (throwInCtor) throw new Error("ctor failed");
+            this.readyState = "open";
+        }
+        static isTypeSupported() {
+            return mseSupported;
+        }
+        addEventListener() {}
+    }
+
+    const context = loadScript("live-media-manager.js", ["LiveVideoOutputManager"], {
+        window: { MediaSource: FakeMediaSource, atob },
+        document: { getElementById: (id) => (id === "video_player" && videoExists ? videoEl : null) },
+        URL: {
+            createObjectURL: () => {
+                if (throwInCreateObjectUrl) throw new Error("createObjectURL failed");
+                return `blob:u${++nextUrl}`;
+            },
+            revokeObjectURL: (url) => revoked.push(url),
+        },
+    });
+
+    const mgr = new context.LiveVideoOutputManager();
+
+    // Missing video element revokes and nulls prior objectUrl.
+    mgr.initMediaSource();
+    assert.equal(mgr.objectUrl, "blob:u1");
+    videoExists = false;
+    mgr.initMediaSource();
+    assert.equal(mgr.objectUrl, null);
+    assert.deepEqual(revoked, ["blob:u1"]);
+
+    // Unsupported MSE revokes and nulls prior objectUrl.
+    videoExists = true;
+    mgr.initMediaSource();
+    assert.equal(mgr.objectUrl, "blob:u2");
+    mseSupported = false;
+    mgr.initMediaSource();
+    assert.equal(mgr.objectUrl, null);
+    assert.deepEqual(revoked, ["blob:u1", "blob:u2"]);
+
+    // Throwing MediaSource constructor still revokes and nulls prior objectUrl.
+    mseSupported = true;
+    mgr.initMediaSource();
+    assert.equal(mgr.objectUrl, "blob:u3");
+    throwInCtor = true;
+    assert.throws(() => mgr.initMediaSource(), /ctor failed/);
+    assert.equal(mgr.objectUrl, null);
+    assert.equal(mgr.mediaSource, null);
+    assert.deepEqual(revoked, ["blob:u1", "blob:u2", "blob:u3"]);
+
+    // Throwing URL.createObjectURL revokes and nulls prior objectUrl and leaves mediaSource null.
+    throwInCtor = false;
+    mgr.initMediaSource();
+    assert.equal(mgr.objectUrl, "blob:u4");
+    throwInCreateObjectUrl = true;
+    assert.throws(() => mgr.initMediaSource(), /createObjectURL failed/);
+    assert.equal(mgr.objectUrl, null);
+    assert.equal(mgr.mediaSource, null);
+    assert.deepEqual(revoked, ["blob:u1", "blob:u2", "blob:u3", "blob:u4"]);
+});
+
+test("G3RtcWebRtcManager.initiateSession() handles null options and preserves 'failed' state if onConnectionFailed leaves pc open", async () => {
+    const stateEl = { textContent: "" };
+    const createdPcs = [];
+    let failOnSetLocalDescription = false;
+
+    class FakePC {
+        constructor() {
+            this.connectionState = "new";
+            this.iceGatheringState = "complete";
+            this.localDescription = { sdp: "v=0\r\n" };
+            this.transceivers = [];
+            this.closed = false;
+            this.onconnectionstatechange = null;
+            createdPcs.push(this);
+        }
+        createDataChannel() {
+            return { close() {} };
+        }
+        addTransceiver(kind, { direction }) {
+            const t = {
+                kind,
+                direction,
+                mid: String(this.transceivers.length),
+                receiver: { track: fakeTrack() },
+                sender: { replaceTrack: async () => {} },
+            };
+            this.transceivers.push(t);
+            return t;
+        }
+        async setLocalDescription() {
+            if (failOnSetLocalDescription) {
+                this.connectionState = "failed";
+                this.onconnectionstatechange?.();
+                throw new Error("setLocalDescription failed after connection failed");
+            }
+        }
+        close() {
+            this.closed = true;
+        }
+    }
+
+    const context = loadScript("live-media-manager.js", ["G3RtcWebRtcManager"], {
+        RTCPeerConnection: FakePC,
+        MediaStream: class {
+            constructor() {
+                this.id = "ms";
+            }
+            addTrack() {}
+        },
+        randomId: () => "id",
+        document: { getElementById: (id) => (id === "webrtc-state" ? stateEl : null) },
+    });
+
+    const rtc = new context.G3RtcWebRtcManager(null);
+    const micTrack = fakeTrack();
+    rtc.micStream = { getAudioTracks: () => [micTrack], getTracks: () => [micTrack] };
+
+    // 1. initiateSession(null) closes prior pc, defaults wantsVideo=true, and preserves local media.
+    await rtc.initiateSession();
+    assert.equal(createdPcs.length, 1);
+    await rtc.initiateSession(null);
+    assert.equal(createdPcs.length, 2);
+    assert.equal(createdPcs[0].closed, true);
+    assert.equal(micTrack.readyState, "live");
+    assert.equal(
+        createdPcs[1].transceivers.filter((t) => t.direction === "recvonly" && t.kind === "video").length,
+        1
+    );
+
+    // 2. close(null) handles null options cleanly.
+    rtc.close(null);
+    assert.equal(createdPcs[1].closed, true);
+    assert.equal(stateEl.textContent, "closed");
+
+    // 3. Direct-API onConnectionFailed that leaves this.pc === pc must not have 'failed' overwritten with 'closed'.
+    let failedCallbacks = 0;
+    rtc.onConnectionFailed = () => {
+        failedCallbacks++;
+        // Deliberately do NOT call rtc.close().
+    };
+    failOnSetLocalDescription = true;
+    await assert.rejects(() => rtc.initiateSession(), /setLocalDescription failed after connection failed/);
+    assert.equal(failedCallbacks, 1);
+    assert.equal(createdPcs[2].closed, true);
+    assert.equal(rtc.pc, null);
+    assert.equal(stateEl.textContent, "failed");
+});

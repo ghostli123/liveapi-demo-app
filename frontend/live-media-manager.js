@@ -446,6 +446,14 @@ class LiveAudioInputManager {
         // Held before the worklet module loads, so a disconnectMicrophone()
         // during the load releases the mic at once, not when the load ends.
         this.stream = stream;
+        // A track that ended before we attach won't fire "ended"; tear down
+        // before loading the worklet or starting the interval and report it
+        // like a later unplug.
+        if (stream.getAudioTracks().some((track) => track.readyState === "ended")) {
+            this.disconnectMicrophone();
+            this.onMicrophoneEnded();
+            return;
+        }
         try {
             await audioContext.audioWorklet.addModule("/frontend/input-processor.js");
         } catch (error) {
@@ -456,6 +464,14 @@ class LiveAudioInputManager {
             throw error;
         }
         if (generation !== this.generation) return;
+        // A track that ended while the worklet module loaded fired "ended"
+        // before the listener below existed; tear down before wiring the
+        // processor/interval and report it like a later unplug.
+        if (stream.getAudioTracks().some((track) => track.readyState === "ended")) {
+            this.disconnectMicrophone();
+            this.onMicrophoneEnded();
+            return;
+        }
         try {
             const source = this.audioContext.createMediaStreamSource(this.stream);
 
@@ -499,12 +515,6 @@ class LiveAudioInputManager {
             this.recordChunk.bind(this),
             this.intervalMs
         );
-
-        // A track that ended while the worklet module loaded fired "ended"
-        // before the listener above existed; report it like a later unplug.
-        if (stream.getAudioTracks().some((track) => track.readyState === "ended")) {
-            this.onMicrophoneEnded();
-        }
     }
 
     newAudioRecording(b64AudioData) {
@@ -739,14 +749,14 @@ class LiveFrameSource {
     /** @returns {string} A base64 JPEG of the current frame, or "" if none. */
     captureFrameB64() {
         const video = this.previewVideoElement;
-        if (!this.stream || !video.videoWidth || !video.videoHeight) return "";
+        if (!this.stream || !this.ctx || !video.videoWidth || !video.videoHeight) return "";
 
         const scale = Math.min(
             1,
             MAX_FRAME_DIMENSION / Math.max(video.videoWidth, video.videoHeight)
         );
-        this.previewCanvasElement.width = Math.round(video.videoWidth * scale);
-        this.previewCanvasElement.height = Math.round(video.videoHeight * scale);
+        this.previewCanvasElement.width = Math.max(1, Math.round(video.videoWidth * scale));
+        this.previewCanvasElement.height = Math.max(1, Math.round(video.videoHeight * scale));
         this.ctx.drawImage(
             video,
             0,
@@ -754,9 +764,11 @@ class LiveFrameSource {
             this.previewCanvasElement.width,
             this.previewCanvasElement.height
         );
-        return this.previewCanvasElement
-            .toDataURL("image/jpeg", FRAME_JPEG_QUALITY)
-            .split(",")[1];
+        return (
+            this.previewCanvasElement
+                .toDataURL("image/jpeg", FRAME_JPEG_QUALITY)
+                .split(",")[1] || ""
+        );
     }
 
     newFrame() {
@@ -873,11 +885,13 @@ const MAX_QUEUED_VIDEO_BYTES = 16 * 1024 * 1024;
  */
 function formatMediaError(error) {
     if (error && typeof error === "object") {
-        try {
-            if (typeof error.message === "string" && error.message.trim()) return error.message.trim();
-            if (typeof error.name === "string" && error.name.trim()) return error.name.trim();
-        } catch {
-            // E.g. an error object with a throwing getter.
+        for (const key of ["message", "name"]) {
+            try {
+                const value = error[key];
+                if (typeof value === "string" && value.trim()) return value.trim();
+            } catch {
+                // E.g. an error object with a throwing getter.
+            }
         }
     }
     if (error !== null && error !== undefined) {
@@ -967,6 +981,10 @@ class LiveVideoOutputManager {
         this.initialized = false;
         this.playbackFailed = false;
         this.unplayableDetail = null;
+        if (this.objectUrl) {
+            URL.revokeObjectURL(this.objectUrl);
+            this.objectUrl = null;
+        }
         this.hideAvatarFrame();
 
         const video = getAvatarVideoElement();
@@ -981,12 +999,10 @@ class LiveVideoOutputManager {
             return;
         }
 
-        if (this.objectUrl) {
-            URL.revokeObjectURL(this.objectUrl);
-        }
-
         const mediaSource = new MediaSourceClass();
+        const objectUrl = URL.createObjectURL(mediaSource);
         this.mediaSource = mediaSource;
+        this.objectUrl = objectUrl;
         mediaSource.addEventListener('sourceopen', () => {
             if (
                 this.mediaSource !== mediaSource ||
@@ -1010,7 +1026,6 @@ class LiveVideoOutputManager {
         });
         mediaSource.addEventListener('error', e => console.error('MediaSource error', e));
 
-        this.objectUrl = URL.createObjectURL(mediaSource);
         video.style.display = "block";
         video.src = this.objectUrl;
         this.attachVideoListeners(video);
@@ -1410,7 +1425,9 @@ class G3RtcWebRtcManager {
         return sdp.replace(/^a=candidate: /gm, "a=candidate:0 ");
     }
 
-    async initiateSession({ wantsVideo = true } = {}) {
+    /** @param {{wantsVideo?: boolean} | null} [options] */
+    async initiateSession(options = {}) {
+        const { wantsVideo = true } = options || {};
         // Session resumption renegotiates; keep sending the same mic and camera.
         this.close({ keepLocalMedia: true });
 
@@ -1418,6 +1435,7 @@ class G3RtcWebRtcManager {
             iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
         });
         this.pc = pc;
+        let failed = false;
         // close() (e.g. Disconnect) or a newer initiateSession() may run while
         // this awaits; stop then instead of touching the newer connection.
         const ensureOpen = () => {
@@ -1432,6 +1450,7 @@ class G3RtcWebRtcManager {
                 console.log("[WebRTC] connectionState:", state);
                 if (this.pc !== pc) return; // A newer session replaced this one.
                 if (state === "failed") {
+                    failed = true;
                     this.clearConnectTimer();
                     this._failConnection();
                     return;
@@ -1509,7 +1528,7 @@ class G3RtcWebRtcManager {
             return G3RtcWebRtcManager.applyG3rtcAttributesToSdp(rawSdp, midToGroupId);
         } catch (error) {
             if (this.pc === pc) {
-                this.close({ keepLocalMedia: true });
+                this.close({ keepLocalMedia: true, markClosed: !failed });
             }
             throw error;
         }
@@ -1617,16 +1636,18 @@ class G3RtcWebRtcManager {
             stream.getTracks().forEach((t) => t.stop());
             return;
         }
+        // A track that ended before we attach won't fire "ended"; stop all
+        // tracks on the stream and report it like a later unplug instead of
+        // keeping or sending it.
+        if (stream.getAudioTracks().some((track) => track.readyState === "ended")) {
+            stream.getTracks().forEach((t) => t.stop());
+            this.onMicrophoneEnded();
+            return;
+        }
         this.micStream = stream;
         onTrackEnded(stream.getAudioTracks(), () => {
             if (this.micStream === stream) this.onMicrophoneEnded();
         });
-        // A track that ended before the listener above existed won't fire
-        // "ended"; report it like a later unplug instead of sending it.
-        if (stream.getAudioTracks().some((track) => track.readyState === "ended")) {
-            if (this.micStream === stream) this.onMicrophoneEnded();
-            return;
-        }
         const audioTrack = this.micStream.getAudioTracks()[0] || null;
         if (this.audioSender && audioTrack) {
             try {
@@ -1795,13 +1816,14 @@ class G3RtcWebRtcManager {
 
     /**
      * Closes the peer connection.
-     * @param {{keepLocalMedia?: boolean, markClosed?: boolean}} [options] -
+     * @param {{keepLocalMedia?: boolean, markClosed?: boolean} | null} [options] -
      *     keepLocalMedia: keep the microphone and camera tracks for the next
      *     initiateSession(). markClosed: show "closed" in the metrics panel;
      *     false for a session whose media went over the WebSocket, which
      *     shows "n/a" there.
      */
-    close({ keepLocalMedia = false, markClosed = true } = {}) {
+    close(options = {}) {
+        const { keepLocalMedia = false, markClosed = true } = options || {};
         this.stopStatsPolling();
         this.clearConnectTimer();
         this.hasConnected = false;
