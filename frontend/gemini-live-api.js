@@ -237,6 +237,16 @@ function normalizeLocation(value) {
 }
 
 /**
+ * Normalizes an API environment or host alias, trimming surrounding whitespace
+ * and folding case; returns `""` for non-string values.
+ * @param {unknown} value
+ * @returns {string}
+ */
+function normalizeEnvironment(value) {
+    return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+/**
  * A random v4 UUID. `crypto.randomUUID` exists only in secure contexts (HTTPS
  * or localhost); over plain http from another machine the page builds one from
  * `crypto.getRandomValues`, which every context has.
@@ -463,7 +473,7 @@ class GeminiLiveAPI {
      * @param {string} environment - Target environment ('prod', 'staging', 'autopush', 'autopush-common', 'staging-common').
      */
     setApiHost(environment) {
-        this.environment = environment;
+        this.environment = normalizeEnvironment(environment);
         switch (this.environment) {
             case "autopush-common":
             case "staging-common":
@@ -950,19 +960,25 @@ class GeminiLiveAPI {
     async initBackendService(sessionId = this.sessionId, isCurrent = () => true, signal = undefined) {
         if (this.model === "gemini-3.5-live-early-exp") {
             this.location = "us-central1";
+            const env = normalizeEnvironment(this.environment);
             if (
-                this.environment === "staging-us-rep" ||
-                this.environment === "staging-common"
+                env === "staging-us-rep" ||
+                this.endPoint === "staging-aiplatform.us.rep.sandbox.googleapis.com" ||
+                env === "staging-common"
             ) {
                 this.setApiHost("staging");
             } else if (
-                this.environment === "autopush-us-rep" ||
-                this.environment === "autopush-common" ||
-                this.environment === "autopush-vertex-bidi" ||
-                this.environment === "autopush-vertex-us-bidi"
+                env === "autopush-us-rep" ||
+                this.endPoint === "autopush-aiplatform.us.rep.sandbox.googleapis.com" ||
+                env === "autopush-common" ||
+                env === "autopush-vertex-bidi" ||
+                env === "autopush-vertex-us-bidi"
             ) {
                 this.setApiHost("autopush");
-            } else if (this.environment === "prod-us-rep") {
+            } else if (
+                env === "prod-us-rep" ||
+                this.endPoint === "aiplatform.us.rep.googleapis.com"
+            ) {
                 this.setApiHost("prod");
             }
         }
@@ -1417,11 +1433,12 @@ class GeminiLiveAPI {
     async sendInitialSetupMessages(webSocket = this.webSocket) {
         console.log("start setting up");
 
+        const env = normalizeEnvironment(this.environment);
         const isCommonBag =
-            this.environment === "autopush-common" ||
-            this.environment === "staging-common" ||
-            this.environment === "autopush-vertex-bidi" ||
-            this.environment === "autopush-vertex-us-bidi";
+            env === "autopush-common" ||
+            env === "staging-common" ||
+            env === "autopush-vertex-bidi" ||
+            env === "autopush-vertex-us-bidi";
         let resolvedModel = this.model;
         if (
             !isCommonBag &&
@@ -1433,7 +1450,7 @@ class GeminiLiveAPI {
             // On prod mREP, gemini-3.8-live is served by the GRoot "bidi" pool,
             // which supports WebRTC; gemini-3.1 models go to "genai-rapid".
             resolvedModel =
-                this.environment === "prod-us-rep"
+                this.endPoint === "aiplatform.us.rep.googleapis.com"
                     ? "gemini-3.8-live"
                     : "gemini-3.1-flash-live-preview-04-2026";
         }

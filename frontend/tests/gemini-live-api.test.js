@@ -3280,3 +3280,139 @@ test("sendPostRequest() ignores non-finite/non-numeric timeoutMs and caps values
         message: "the server didn't answer within 5 s",
     });
 });
+
+test("setApiHost() normalizes whitespace, case, and non-string environments without throwing", () => {
+    const errors = [];
+    const { GeminiLiveAPI: TrackedAPI } = loadScript("gemini-live-api.js", ["GeminiLiveAPI"], {
+        console: { log() {}, warn() {}, error: (...args) => errors.push(args.join(" ")) },
+    });
+    const api = new TrackedAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+
+    const validCases = [
+        ["  PROD  ", "prod", "aiplatform.googleapis.com"],
+        ["\tStaging\n", "staging", "staging-aiplatform.sandbox.googleapis.com"],
+        ["  AUTOPUSH ", "autopush", "autopush-aiplatform.sandbox.googleapis.com"],
+        ["  prod-us-rep  ", "prod-us-rep", "aiplatform.us.rep.googleapis.com"],
+        ["PROD-US-REP", "prod-us-rep", "aiplatform.us.rep.googleapis.com"],
+        [
+            "  AIPLATFORM.US.REP.GOOGLEAPIS.COM\t",
+            "aiplatform.us.rep.googleapis.com",
+            "aiplatform.us.rep.googleapis.com",
+        ],
+        ["  AUTOPUSH-US-REP  ", "autopush-us-rep", "autopush-aiplatform.us.rep.sandbox.googleapis.com"],
+        [
+            "  AUTOPUSH-AIPLATFORM.US.REP.SANDBOX.GOOGLEAPIS.COM ",
+            "autopush-aiplatform.us.rep.sandbox.googleapis.com",
+            "autopush-aiplatform.us.rep.sandbox.googleapis.com",
+        ],
+        ["  STAGING-US-REP  ", "staging-us-rep", "staging-aiplatform.us.rep.sandbox.googleapis.com"],
+        [
+            "\nSTAGING-AIPLATFORM.US.REP.SANDBOX.GOOGLEAPIS.COM\t",
+            "staging-aiplatform.us.rep.sandbox.googleapis.com",
+            "staging-aiplatform.us.rep.sandbox.googleapis.com",
+        ],
+        ["  autopush-common  ", "autopush-common", "autopush-common"],
+        ["STAGING-COMMON", "staging-common", "staging-common"],
+        ["  Autopush-Vertex-Bidi ", "autopush-vertex-bidi", "autopush-vertex-bidi"],
+        ["AUTOPUSH-VERTEX-US-BIDI", "autopush-vertex-us-bidi", "autopush-vertex-us-bidi"],
+    ];
+    for (const [input, expectedEnv, expectedHost] of validCases) {
+        api.setApiHost(input);
+        assert.equal(api.environment, expectedEnv, `env for ${JSON.stringify(input)}`);
+        assert.equal(api.endPoint, expectedHost, `host for ${JSON.stringify(input)}`);
+    }
+    assert.deepEqual(errors, []);
+
+    const invalidCases = [
+        [null, ""],
+        [undefined, ""],
+        [123, ""],
+        [{}, ""],
+        [Symbol("env"), ""],
+        [{ toString: null }, ""],
+        ["", ""],
+        ["   \t\n ", ""],
+        ["  UNKNOWN-ENV  ", "unknown-env"],
+    ];
+    for (const [input, expectedEnv] of invalidCases) {
+        const before = errors.length;
+        assert.doesNotThrow(() => api.setApiHost(input));
+        assert.equal(api.environment, expectedEnv);
+        assert.equal(api.endPoint, "aiplatform.googleapis.com");
+        assert.equal(errors.length, before + 1);
+        assert.match(errors.at(-1), /^Unknown environment: /);
+    }
+});
+
+test("sendInitialSetupMessages() and initBackendService() resolve prod-us-rep aliases and normalized environments", async () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    api.webSocket = new FakeWebSocket();
+    api.transportMode = "websocket";
+    api.projectId = "p";
+    api.location = "us-central1";
+    api.responseModalities = ["AUDIO"];
+
+    // Prod mREP host alias and normalized prod-us-rep map common-only models to gemini-3.8-live.
+    for (const env of [
+        "aiplatform.us.rep.googleapis.com",
+        "  AIPLATFORM.US.REP.GOOGLEAPIS.COM  ",
+        "  PROD-US-REP  ",
+    ]) {
+        api.setApiHost(env);
+        for (const model of [
+            "live_avatar_rev23_rc4",
+            "live_avatar_v2_rev25_rc2",
+            "gemini_api_beyond_live_rev23_rc3",
+            "gemini_live_rev25",
+        ]) {
+            api.setModel(model);
+            await api.sendInitialSetupMessages();
+            assert.equal(api.resolvedModel, "gemini-3.8-live", `${env} / ${model}`);
+            assert.equal(
+                api.webSocket.sent.at(-1).setup.model,
+                "projects/p/locations/us-central1/publishers/google/models/gemini-3.8-live",
+                `${env} / ${model}`
+            );
+        }
+    }
+
+    // Other Vertex hosts still map common-only models to gemini-3.1-flash-live-preview-04-2026.
+    for (const env of ["prod", "staging", "autopush-us-rep", "staging-aiplatform.us.rep.sandbox.googleapis.com"]) {
+        api.setApiHost(env);
+        api.setModel("live_avatar_v2_rev25_rc2");
+        await api.sendInitialSetupMessages();
+        assert.equal(api.resolvedModel, "gemini-3.1-flash-live-preview-04-2026", env);
+        assert.equal(
+            api.webSocket.sent.at(-1).setup.model,
+            "projects/p/locations/us-central1/publishers/google/models/gemini-3.1-flash-live-preview-04-2026",
+            env
+        );
+    }
+
+    // Normalized common-bag environments emit models/... without remapping.
+    for (const env of ["  autopush-common  ", "STAGING-COMMON"]) {
+        api.setApiHost(env);
+        api.setModel("live_avatar_v2_rev25_rc2");
+        await api.sendInitialSetupMessages();
+        assert.equal(api.resolvedModel, "live_avatar_v2_rev25_rc2", env);
+        assert.equal(api.webSocket.sent.at(-1).setup.model, "models/live_avatar_v2_rev25_rc2", env);
+    }
+
+    // gemini-3.5-live-early-exp downgrades mREP host aliases and normalized common envs in initBackendService().
+    const posted = [];
+    api.postWithRetry = async (_url, body) => {
+        posted.push(plain(body));
+        return { project_id: "p", idle_timeout_s: 0 };
+    };
+    api.setModel("gemini-3.5-live-early-exp");
+    for (const [input, expectedEndpoint] of [
+        ["aiplatform.us.rep.googleapis.com", "aiplatform.googleapis.com"],
+        ["  staging-aiplatform.us.rep.sandbox.googleapis.com ", "staging-aiplatform.sandbox.googleapis.com"],
+        ["AUTOPUSH-AIPLATFORM.US.REP.SANDBOX.GOOGLEAPIS.COM", "autopush-aiplatform.sandbox.googleapis.com"],
+        ["  AUTOPUSH-COMMON  ", "autopush-aiplatform.sandbox.googleapis.com"],
+    ]) {
+        api.setApiHost(input);
+        await api.initBackendService("s");
+        assert.equal(posted.at(-1).endpoint, expectedEndpoint, input);
+    }
+});
