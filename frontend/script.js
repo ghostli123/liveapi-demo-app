@@ -709,8 +709,13 @@ function errorReason(error) {
 function blobToBase64(blob) {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
-        reader.onloadend = () => resolve(String(reader.result).split(",")[1] || "");
+        reader.onload = () => {
+            const result = typeof reader.result === "string" ? reader.result : "";
+            const comma = result.indexOf(",");
+            resolve(comma === -1 ? "" : result.slice(comma + 1));
+        };
         reader.onerror = () => reject(reader.error || new Error("could not read the file."));
+        reader.onabort = () => reject(reader.error || new Error("the file read was aborted."));
         reader.readAsDataURL(blob);
     });
 }
@@ -748,7 +753,11 @@ async function toVoiceSample(audioData, { clip = false } = {}) {
     source.connect(offline.destination);
     source.start();
     const rendered = await offline.startRendering();
-    return { base64: await blobToBase64(bufferToWave(rendered)), durationS };
+    const base64 = await blobToBase64(bufferToWave(rendered));
+    if (!base64) {
+        throw new Error("it contains no audio.");
+    }
+    return { base64, durationS };
 }
 
 /** Rounds up, so a duration over a limit never reads as equal to it. */
@@ -850,6 +859,9 @@ async function handleAudioFileInputChange(event) {
     const attempt = ++AppState.voiceAttempt;
 
     try {
+        if (file.size === 0) {
+            throw new Error("the file is empty.");
+        }
         if (file.size > MAX_VOICE_FILE_BYTES) {
             throw new Error(
                 `it is ${formatMegabytes(file.size)}; files are limited to ${formatMegabytes(MAX_VOICE_FILE_BYTES)}.`

@@ -3134,7 +3134,8 @@ class FakeFileReader {
     async readAsDataURL(blob) {
         const bytes = blob instanceof Blob ? Buffer.from(await blob.arrayBuffer()) : Buffer.from(blob.bytes);
         this.result = `data:${blob.type};base64,${bytes.toString("base64")}`;
-        this.onloadend();
+        this.onload?.();
+        this.onloadend?.();
     }
 }
 
@@ -4645,4 +4646,158 @@ test("already-ended camera or screen picks detach replaced WebRTC tracks without
     assert.equal(tracks.screen.readyState, "ended");
     assert.deepEqual(webRtc.detached, [tracks.screen, tracks.screen]);
     assert.equal(webRtc.videoTrack, null);
+});
+
+test("empty voice files, aborted FileReader reads, and empty voice base64 payloads are rejected", async () => {
+    let readerMode = "normal"; // "normal" | "abort-null" | "abort-err" | "empty-data" | "null-result"
+    class ScriptedFileReader extends FakeFileReader {
+        async readAsDataURL(blob) {
+            if (readerMode === "normal") return super.readAsDataURL(blob);
+            if (readerMode === "abort-null" || readerMode === "abort-err") {
+                this.result = null;
+                this.error =
+                    readerMode === "abort-err"
+                        ? Object.assign(new Error("The operation was aborted."), { name: "AbortError" })
+                        : null;
+                this.onabort?.();
+                this.onloadend?.();
+                return;
+            }
+            this.result = readerMode === "empty-data" ? "data:audio/wav;base64," : null;
+            this.onload?.();
+            this.onloadend?.();
+        }
+    }
+
+    let decodeCalls = 0;
+    const BaseOffline = fakeOfflineAudioContext(0.1);
+    class CountingOfflineAudioContext extends BaseOffline {
+        async decodeAudioData(...args) {
+            decodeCalls++;
+            return super.decodeAudioData(...args);
+        }
+    }
+
+    const devices = fakeRecordingDevices();
+    const { context, element } = loadApp({
+        ...devices.globals,
+        OfflineAudioContext: CountingOfflineAudioContext,
+        FileReader: ScriptedFileReader,
+        Blob,
+        fetch: async () => ({ ok: true, blob: async () => ({ type: "image/png", size: 3, bytes: "png" }) }),
+    });
+    const dialogs = recordDialogs(context);
+    const addedVoices = [];
+    const dropdown = element("voice-dropdown");
+    dropdown.appendChild = (option) => addedVoices.push(option.textContent);
+
+    // Seed a working voice and avatar first so we can verify rejected reads keep them intact.
+    await context.handleAudioFileInputChange({
+        target: { value: "good.wav", files: [{ name: "good.wav", size: 8, arrayBuffer: async () => new ArrayBuffer(8) }] },
+    });
+    const goodVoice = context.AppState.customVoiceBase64;
+    assert.ok(goodVoice.length > 0);
+    assert.deepEqual(addedVoices, ["good.wav"]);
+    assert.match(dialogs.splice(0)[0], /"good\.wav" is 0\.1 s long\. It is selected/);
+
+    await context.handleAvatarFileInputChange({
+        target: { value: "good.png", files: [{ name: "good.png", type: "image/png", size: 3, bytes: "abc" }] },
+    });
+    assert.deepEqual(plainJson(context.AppState.customAvatar), { image: "YWJj", mimeType: "image/png" });
+    assert.deepEqual(dialogs.splice(0), []);
+
+    // 1. A 0-byte voice file is refused before reading or constructing an OfflineAudioContext.
+    let readEmpty = false;
+    decodeCalls = 0;
+    const emptyInput = {
+        value: "empty.wav",
+        files: [
+            {
+                name: "empty.wav",
+                size: 0,
+                arrayBuffer: async () => {
+                    readEmpty = true;
+                    return new ArrayBuffer(0);
+                },
+            },
+        ],
+    };
+    await context.handleAudioFileInputChange({ target: emptyInput });
+    assert.equal(emptyInput.value, "");
+    assert.equal(readEmpty, false);
+    assert.equal(decodeCalls, 0);
+    assert.deepEqual(dialogs.splice(0), ['Could not use "empty.wav" as a voice sample: the file is empty.']);
+    assert.equal(context.AppState.customVoiceBase64, goodVoice);
+    assert.deepEqual(addedVoices, ["good.wav"]);
+
+    // 2. An aborted FileReader read (with null reader.error or DOMException) rejects instead of resolving "".
+    for (const [mode, expectedReason] of [
+        ["abort-null", "the file read was aborted."],
+        ["abort-err", "The operation was aborted."],
+    ]) {
+        readerMode = mode;
+        await context.handleAudioFileInputChange({
+            target: {
+                value: "aborted.wav",
+                files: [{ name: "aborted.wav", size: 8, arrayBuffer: async () => new ArrayBuffer(8) }],
+            },
+        });
+        assert.deepEqual(dialogs.splice(0), [`Could not use "aborted.wav" as a voice sample: ${expectedReason}`]);
+        assert.equal(context.AppState.customVoiceBase64, goodVoice);
+        assert.deepEqual(addedVoices, ["good.wav"]);
+
+        await context.handleAvatarFileInputChange({
+            target: { value: "aborted.png", files: [{ name: "aborted.png", type: "image/png", size: 3, bytes: "xyz" }] },
+        });
+        assert.deepEqual(dialogs.splice(0), [`Could not use "aborted.png" as the avatar: ${expectedReason}`]);
+        assert.deepEqual(plainJson(context.AppState.customAvatar), { image: "YWJj", mimeType: "image/png" });
+
+        await context.useSampleAvatar();
+        assert.deepEqual(dialogs.splice(0), [`Could not load the sample avatar image: ${expectedReason}`]);
+        assert.deepEqual(plainJson(context.AppState.customAvatar), { image: "YWJj", mimeType: "image/png" });
+    }
+
+    // 3. Empty base64 or null FileReader.result from onload is rejected in toVoiceSample() on upload and recording paths.
+    for (const mode of ["empty-data", "null-result"]) {
+        readerMode = mode;
+        await context.handleAudioFileInputChange({
+            target: {
+                value: "blank.wav",
+                files: [{ name: "blank.wav", size: 8, arrayBuffer: async () => new ArrayBuffer(8) }],
+            },
+        });
+        assert.deepEqual(dialogs.splice(0), ['Could not use "blank.wav" as a voice sample: it contains no audio.']);
+        assert.equal(context.AppState.customVoiceBase64, goodVoice);
+        assert.deepEqual(addedVoices, ["good.wav"]);
+
+        context.openModal();
+        element("newVoiceName").value = "Silent Take";
+        const click = context.handleRecordClick();
+        devices.prompts.at(-1).grant();
+        await click;
+        context.AppState.recordingStartTime -= 11000;
+        await context.handleRecordClick();
+        await flush();
+        assert.deepEqual(dialogs.splice(0), ["Could not process the recording: it contains no audio."]);
+        assert.equal(element("newVoiceName").value, "Silent Take");
+        assert.equal(element("recordButton").disabled, false);
+        assert.equal(context.AppState.customVoiceBase64, goodVoice);
+        assert.deepEqual(addedVoices, ["good.wav"]);
+    }
+
+    // 4. An aborted FileReader during recording processing resets the record button and does not add an empty voice.
+    readerMode = "abort-null";
+    context.openModal();
+    element("newVoiceName").value = "Aborted Take";
+    const click = context.handleRecordClick();
+    devices.prompts.at(-1).grant();
+    await click;
+    context.AppState.recordingStartTime -= 11000;
+    await context.handleRecordClick();
+    await flush();
+    assert.deepEqual(dialogs.splice(0), ["Could not process the recording: the file read was aborted."]);
+    assert.equal(element("newVoiceName").value, "Aborted Take");
+    assert.equal(element("recordButton").disabled, false);
+    assert.equal(context.AppState.customVoiceBase64, goodVoice);
+    assert.deepEqual(addedVoices, ["good.wav"]);
 });
