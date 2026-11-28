@@ -148,13 +148,17 @@ const AUTO_RESUME_LIMIT = 3;
 // Server events that mean a conversation is going on, for the idle timeout.
 // Audio, avatar video and usage reports also arrive while nobody is there.
 const ACTIVITY_EVENTS = new Set([
-    "INPUT_TRANSCRIPTION",
-    "OUTPUT_TRANSCRIPTION",
     "TEXT",
     "GENERATION_STARTED",
     "END_OF_TURN",
     "INTERRUPT",
     "FUNCTION_CALL",
+]);
+// Transcription frames only count as activity when they carry text;
+// empty/finish-only frames (e.g. { text: "", finished: true }) do not.
+const TRANSCRIPTION_EVENTS = new Set([
+    "INPUT_TRANSCRIPTION",
+    "OUTPUT_TRANSCRIPTION",
 ]);
 // Voice activity values that mean the user is speaking, for the idle timeout
 // (even with input transcription off). Unknown values are ignored by the UI too.
@@ -220,6 +224,16 @@ function normalizeVadSensitivity(value) {
     if (typeof value !== "string") return "";
     const normalized = value.trim().toLowerCase();
     return normalized === "low" || normalized === "high" ? normalized : "";
+}
+
+/**
+ * Normalizes a Google Cloud location string, trimming surrounding whitespace
+ * and folding case; returns `""` for non-string values.
+ * @param {unknown} value
+ * @returns {string}
+ */
+function normalizeLocation(value) {
+    return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
 /**
@@ -416,7 +430,7 @@ class GeminiLiveAPI {
      * @param {string} location - Google Cloud location (e.g., 'us-central1').
      */
     setLocation(location) {
-        this.location = location;
+        this.location = normalizeLocation(location);
         this.setApiHost(this.environment);
     }
 
@@ -956,7 +970,7 @@ class GeminiLiveAPI {
             command: "connect",
             session_id: sessionId,
             endpoint: this.endPoint,
-            location: this.location,
+            location: normalizeLocation(this.location),
         };
         try {
             return await this.postWithRetry(this.controlUrl, postRequestBody, { isCurrent, signal });
@@ -1144,6 +1158,7 @@ class GeminiLiveAPI {
                 this.latestResumptionHandle = message.data;
             } else if (
                 ACTIVITY_EVENTS.has(message.type) ||
+                (TRANSCRIPTION_EVENTS.has(message.type) && Boolean(message.data)) ||
                 (message.type === "VOICE_ACTIVITY" && VOICE_ACTIVITY_EVENTS.has(message.data))
             ) {
                 this.noteActivity();
@@ -1423,9 +1438,10 @@ class GeminiLiveAPI {
                     : "gemini-3.1-flash-live-preview-04-2026";
         }
         this.resolvedModel = resolvedModel;
+        const location = normalizeLocation(this.location);
         const modelUri = isCommonBag
             ? `models/${resolvedModel}`
-            : `projects/${this.projectId}/locations/${this.location}/publishers/google/models/${resolvedModel}`;
+            : `projects/${this.projectId}/locations/${location}/publishers/google/models/${resolvedModel}`;
 
         const sessionSetupMessage = {
             setup: {

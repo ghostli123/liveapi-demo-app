@@ -1695,6 +1695,58 @@ test("setup message carries the configured fields", async () => {
     assert.equal(setup.generation_config.speech_config.voice_config.prebuilt_voice_config.voice_name, "puck");
 });
 
+test("setLocation and setup/control requests normalize whitespace, case, and non-string locations", async () => {
+    const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
+    api.webSocket = new FakeWebSocket();
+    api.transportMode = "websocket";
+    api.projectId = "p";
+    api.setApiHost("prod");
+    api.setModel("gemini-live-2.5-flash-native-audio");
+    api.responseModalities = ["AUDIO"];
+    const posted = [];
+    api.postWithRetry = async (_url, body) => {
+        posted.push(plain(body));
+        return { project_id: "p", idle_timeout_s: 0 };
+    };
+
+    api.setLocation("  US-CENTRAL1  ");
+    assert.equal(api.location, "us-central1");
+    await api.initBackendService("s1");
+    await api.sendInitialSetupMessages();
+    assert.equal(posted[0].location, "us-central1");
+    assert.equal(
+        api.webSocket.sent[0].setup.model,
+        "projects/p/locations/us-central1/publishers/google/models/gemini-live-2.5-flash-native-audio"
+    );
+
+    api.setLocation("\tEU\n");
+    assert.equal(api.location, "eu");
+
+    for (const bad of [null, undefined, 123, {}, ["us-central1"]]) {
+        api.setLocation(bad);
+        assert.equal(api.location, "");
+    }
+
+    // Direct property mutation is also normalized when building control and setup messages.
+    api.location = "  US-EAST1\t";
+    await api.initBackendService("s2");
+    await api.sendInitialSetupMessages();
+    assert.equal(posted[1].location, "us-east1");
+    assert.equal(
+        api.webSocket.sent[1].setup.model,
+        "projects/p/locations/us-east1/publishers/google/models/gemini-live-2.5-flash-native-audio"
+    );
+
+    api.location = null;
+    await api.initBackendService("s3");
+    await api.sendInitialSetupMessages();
+    assert.equal(posted[2].location, "");
+    assert.equal(
+        api.webSocket.sent[2].setup.model,
+        "projects/p/locations//publishers/google/models/gemini-live-2.5-flash-native-audio"
+    );
+});
+
 test("a pasted resumption handle is sent without surrounding whitespace", async () => {
     const sentResumption = async (handle) => {
         const api = new GeminiLiveAPI("ws://x/ws", "/api/control", "/api/post_endpoint");
@@ -1867,6 +1919,40 @@ test("unknown voiceActivity types don't postpone the idle timeout", async () => 
     assert.deepEqual(received, [
         ["VOICE_ACTIVITY", "ACTIVITY_TYPE_UNSPECIFIED"],
         ["VOICE_ACTIVITY", "FUTURE_SIGNAL"],
+    ]);
+    assert.equal(api.lastActivityAt, longAgo);
+    timers[api.idleTimer - 1].fn();
+    assert.equal(api.idleMessages.length, 1);
+});
+
+test("empty transcription frames don't postpone the idle timeout", async () => {
+    const api = await idleApi(60);
+    const received = [];
+    api.onReceiveResponse = (message) =>
+        received.push([message.type, message.data, Boolean(message.finished)]);
+    const longAgo = performance.now() - 60000;
+    api.lastActivityAt = longAgo;
+    for (const raw of [
+        { serverContent: { inputTranscription: { text: "" } } },
+        { serverContent: { inputTranscription: { text: "", finished: true } } },
+        { server_content: { input_transcription: { finished: true } } },
+        { serverContent: { inputTranscription: { text: null } } },
+        { serverContent: { outputTranscription: { text: "" } } },
+        { serverContent: { outputTranscription: { text: "", finished: true } } },
+        { server_content: { output_transcription: { finished: true } } },
+        { serverContent: { outputTranscription: {} } },
+    ]) {
+        api.onReceiveMessage({ data: JSON.stringify(raw) });
+    }
+    assert.deepEqual(received, [
+        ["INPUT_TRANSCRIPTION", "", false],
+        ["INPUT_TRANSCRIPTION", "", true],
+        ["INPUT_TRANSCRIPTION", "", true],
+        ["INPUT_TRANSCRIPTION", "", false],
+        ["OUTPUT_TRANSCRIPTION", "", false],
+        ["OUTPUT_TRANSCRIPTION", "", true],
+        ["OUTPUT_TRANSCRIPTION", "", true],
+        ["OUTPUT_TRANSCRIPTION", "", false],
     ]);
     assert.equal(api.lastActivityAt, longAgo);
     timers[api.idleTimer - 1].fn();
