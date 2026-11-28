@@ -710,6 +710,21 @@ function errorReason(error) {
     return "unknown error";
 }
 
+/**
+ * Safely reads `error.name` as a string, returning `""` on null, primitives, or throwing getters.
+ * @param {unknown} error
+ * @returns {string}
+ */
+function errorName(error) {
+    if (!error || typeof error !== "object") return "";
+    try {
+        const name = /** @type {{ name?: unknown }} */ (error).name;
+        return typeof name === "string" ? name : "";
+    } catch {
+        return "";
+    }
+}
+
 function blobToBase64(blob) {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -1559,7 +1574,7 @@ function showCameraState(on) {
  */
 function deviceErrorReason(err) {
     if (window.isSecureContext === false) return INSECURE_PAGE_REASON;
-    if (err && err.name === "OverconstrainedError") return "the selected device isn't available";
+    if (errorName(err) === "OverconstrainedError") return "the selected device isn't available";
     return errorReason(err);
 }
 
@@ -1794,7 +1809,7 @@ async function startScreenCapture() {
         if (!(await screen.startCapture({ sendFrames: !webRtcManagerIfActive() }))) return;
     } catch (err) {
         // NotAllowedError means the user closed the picker.
-        if (!err || err.name !== "NotAllowedError") {
+        if (errorName(err) !== "NotAllowedError") {
             AppUI.showModal(`Could not share the screen: ${deviceErrorReason(err)}`);
         }
         return;
@@ -2413,7 +2428,7 @@ async function handleRecordClick() {
             if (stream) stream.getTracks().forEach((track) => track.stop());
             if (attempt !== AppState.recordingAttempt) return;
             AppUI.showModal(
-                error && error.name === "NotAllowedError"
+                errorName(error) === "NotAllowedError"
                     ? "Could not access the microphone. Please check your browser permissions."
                     : `Could not start recording: ${deviceErrorReason(error)}`
             );

@@ -4921,3 +4921,81 @@ test("already-ended screen picks do not invalidate an in-flight camera start, bu
     assert.equal(dialogText(), undefined);
     assert.equal(screenFrameStarts, 0);
 });
+
+test("deviceErrorReason, startScreenCapture, and handleRecordClick handle throwing error.name getters", async () => {
+    const throwingNameWithMessage = {
+        get name() {
+            throw new Error("name getter threw");
+        },
+        message: "device busy",
+    };
+    const throwingAll = {
+        get name() {
+            throw new Error("name getter threw");
+        },
+        get message() {
+            throw new Error("message getter threw");
+        },
+        toString() {
+            throw new Error("toString threw");
+        },
+    };
+
+    const devices = fakeRecordingDevices();
+    let screenError = throwingNameWithMessage;
+    const { context, element } = loadApp({
+        ...devices.globals,
+        LiveScreenManager: class extends FakeFrameSource {
+            async startCapture() {
+                throw screenError;
+            }
+        },
+    });
+    const dialogs = recordDialogs(context);
+
+    // errorName() and deviceErrorReason() directly.
+    assert.equal(context.errorName(null), "");
+    assert.equal(context.errorName("NotAllowedError"), "");
+    assert.equal(context.errorName({ name: 123 }), "");
+    assert.equal(context.errorName({ name: "NotAllowedError" }), "NotAllowedError");
+    assert.equal(context.errorName(throwingNameWithMessage), "");
+    assert.equal(context.deviceErrorReason(throwingNameWithMessage), "device busy");
+    assert.equal(context.deviceErrorReason(throwingAll), "unknown error");
+    assert.equal(
+        context.deviceErrorReason({ name: "OverconstrainedError", message: "" }),
+        "the selected device isn't available"
+    );
+
+    // startScreenCapture(): throwing .name getter formats cleanly instead of escaping; NotAllowedError still silent.
+    await context.startScreenCapture();
+    assert.deepEqual(dialogs.splice(0), ["Could not share the screen: device busy"]);
+
+    screenError = throwingAll;
+    await context.startScreenCapture();
+    assert.deepEqual(dialogs.splice(0), ["Could not share the screen: unknown error"]);
+
+    screenError = Object.assign(new Error("cancelled"), { name: "NotAllowedError" });
+    await context.startScreenCapture();
+    assert.deepEqual(dialogs.splice(0), []);
+
+    // handleRecordClick(): throwing .name getter formats cleanly; NotAllowedError keeps permission guidance.
+    context.openModal();
+    element("newVoiceName").value = "My Voice";
+    let click = context.handleRecordClick();
+    devices.prompts.at(-1).deny(throwingNameWithMessage);
+    await click;
+    assert.deepEqual(dialogs.splice(0), ["Could not start recording: device busy"]);
+    assert.equal(context.AppState.isRecording, false);
+
+    click = context.handleRecordClick();
+    devices.prompts.at(-1).deny(throwingAll);
+    await click;
+    assert.deepEqual(dialogs.splice(0), ["Could not start recording: unknown error"]);
+
+    click = context.handleRecordClick();
+    devices.prompts.at(-1).deny(Object.assign(new Error("denied"), { name: "NotAllowedError" }));
+    await click;
+    assert.deepEqual(dialogs.splice(0), [
+        "Could not access the microphone. Please check your browser permissions.",
+    ]);
+});
