@@ -4801,3 +4801,123 @@ test("empty voice files, aborted FileReader reads, and empty voice base64 payloa
     assert.equal(context.AppState.customVoiceBase64, goodVoice);
     assert.deepEqual(addedVoices, ["good.wav"]);
 });
+
+test("already-ended screen picks do not invalidate an in-flight camera start, but do cancel an active screen share", async () => {
+    const tracks = {
+        oldCam: { kind: "video", readyState: "live" },
+        newCam: { kind: "video", readyState: "live" },
+        cam2: { kind: "video", readyState: "live" },
+        screen1: { kind: "video", readyState: "live" },
+        endedScreen: { kind: "video", readyState: "ended" },
+    };
+    let camDeferred = null;
+    let attachDeferred = null;
+    let screenMode = "ended";
+    let frameStarts = 0;
+    let screenFrameStarts = 0;
+    const attachedStreams = [];
+    const { context, element, webRtc, dialogText } = loadWithWebRtcManager({
+        navigator: {},
+        requestAnimationFrame: () => 0,
+        LiveVideoManager: class extends FakeFrameSource {
+            stopWebcam() {
+                if (this.stream) this.stream.getVideoTracks().forEach((t) => (t.readyState = "ended"));
+                this.stream = null;
+            }
+            async startWebcam() {
+                camDeferred = Promise.withResolvers();
+                const track = await camDeferred.promise;
+                this.stream = { getVideoTracks: () => [track] };
+            }
+            startSendingFrames() {
+                if (this.stream) frameStarts++;
+            }
+        },
+        LiveScreenManager: class extends FakeFrameSource {
+            stopCapture() {
+                if (this.stream) this.stream.getVideoTracks().forEach((t) => (t.readyState = "ended"));
+                this.stream = null;
+            }
+            async startCapture() {
+                if (screenMode === "live") {
+                    tracks.screen1.readyState = "live";
+                    this.stream = { getVideoTracks: () => [tracks.screen1] };
+                    return true;
+                }
+                if (screenMode === "replace-ended") {
+                    this.stopCapture();
+                }
+                this.onEnded(tracks.endedScreen);
+                return false;
+            }
+            startSendingFrames() {
+                if (this.stream) screenFrameStarts++;
+            }
+        },
+    });
+    context.AppState.geminiLiveApi.transportMode = "webrtc";
+    webRtc.attachVideoStream = async (stream) => {
+        attachedStreams.push(stream);
+        webRtc.videoTrack = stream.getVideoTracks()[0];
+        if (attachDeferred) {
+            await attachDeferred.promise;
+        }
+    };
+
+    // 1. Camera start awaiting getUserMedia() (even while replacing an older camera whose track
+    // was stopped) is NOT invalidated by a concurrent already-ended screen pick.
+    context.AppState.liveVideoManager.stream = { getVideoTracks: () => [tracks.oldCam] };
+    webRtc.videoTrack = tracks.oldCam;
+    element("cameraBtn").hidden = false;
+    element("cameraOffBtn").hidden = true;
+    const camStart1 = context.startCameraCapture();
+    const attemptAfterCam1 = context.AppState.videoAttempt;
+    screenMode = "ended";
+    await context.startScreenCapture();
+    camDeferred.resolve(tracks.newCam);
+    await camStart1;
+    assert.equal(attachedStreams.length, 1);
+    assert.equal(webRtc.videoTrack, tracks.newCam);
+    assert.equal(context.AppState.videoAttempt, attemptAfterCam1);
+    assert.equal(element("cameraBtn").hidden, false);
+    assert.equal(context.AppState.videoOwner, "camera");
+
+    // 2. Camera start awaiting attachVideoStream() with a WebSocket fallback after attach is
+    // NOT invalidated by a concurrent already-ended screen pick.
+    attachDeferred = Promise.withResolvers();
+    const camStart2 = context.startCameraCapture();
+    const attemptAfterCam2 = context.AppState.videoAttempt;
+    camDeferred.resolve(tracks.cam2);
+    await flush();
+    assert.equal(webRtc.videoTrack, tracks.cam2);
+    await context.startScreenCapture();
+    context.AppState.geminiLiveApi.transportMode = "websocket";
+    attachDeferred.resolve();
+    attachDeferred = null;
+    await camStart2;
+    assert.equal(frameStarts, 1);
+    assert.equal(context.AppState.videoAttempt, attemptAfterCam2);
+    assert.equal(webRtc.videoTrack, tracks.cam2);
+
+    // 3. Replacing an in-flight screen share's attachVideoStream() with an already-ended screen
+    // pick DOES bump videoAttempt, clear videoOwner, detach the old share, and suppress the old
+    // attach's rejection dialog and frame sending.
+    context.AppState.geminiLiveApi.transportMode = "webrtc";
+    attachDeferred = Promise.withResolvers();
+    screenMode = "live";
+    const screenStart1 = context.startScreenCapture();
+    await flush();
+    const attemptAfterScreen1 = context.AppState.videoAttempt;
+    assert.equal(webRtc.videoTrack, tracks.screen1);
+    screenMode = "replace-ended";
+    await context.startScreenCapture();
+    assert.equal(tracks.screen1.readyState, "ended");
+    assert.equal(webRtc.videoTrack, null);
+    assert.equal(context.AppState.videoAttempt, attemptAfterScreen1 + 1);
+    assert.equal(context.AppState.videoOwner, null);
+    attachDeferred.reject(new Error("sender closed"));
+    attachDeferred = null;
+    await screenStart1;
+    assert.equal(dialogText(), undefined);
+    assert.equal(screenFrameStarts, 0);
+});

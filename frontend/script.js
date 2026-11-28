@@ -148,6 +148,8 @@ const AppState = {
     deviceListAttempt: 0, // Device-list refresh (page load, device change, mic or camera grant)
     micAttempt: 0, // Microphone start, switch, stop, or session end
     videoAttempt: 0, // Camera/screen capture start, switch, stop, track end, or session end
+    /** @type {"camera" | "screen" | null} */
+    videoOwner: null, // Which source claimed the current videoAttempt
 };
 
 // --- Manager Callbacks ---
@@ -235,12 +237,14 @@ function initApplicationManagers() {
         AppState.geminiLiveApi.webRtcManager.onMicrophoneEnded = () => microphoneEnded();
     }
     AppState.liveVideoManager.onEnded = (track) => {
-        stopSendingVideoTrack(track);
+        stopSendingVideoTrack(track, "camera");
         showCameraState(false);
         AppUI.showModal(CAMERA_ENDED_MESSAGE);
     };
     // The user ended the share with the browser's "Stop sharing" button.
-    AppState.liveScreenManager.onEnded = stopSendingVideoTrack;
+    AppState.liveScreenManager.onEnded = (track) => {
+        stopSendingVideoTrack(track, "screen");
+    };
 }
 
 initApplicationManagers();
@@ -1746,6 +1750,7 @@ function showIntervalUsed(field, limits) {
 
 async function startCameraCapture() {
     const attempt = ++AppState.videoAttempt;
+    AppState.videoOwner = "camera";
     AppState.liveScreenManager.stopCapture();
     const camera = AppState.liveVideoManager;
     camera.stopWebcam();
@@ -1766,6 +1771,7 @@ async function startCameraCapture() {
         refreshDeviceLists();
     } catch (err) {
         if (attempt !== AppState.videoAttempt) return;
+        AppState.videoOwner = null;
         console.error("Failed to start camera:", err);
         AppUI.showModal(`Could not start the camera: ${deviceErrorReason(err)}`);
         camera.stopWebcam();
@@ -1796,6 +1802,7 @@ async function startScreenCapture() {
     // Claim video ownership only after the user picks a screen, so cancelling
     // the picker doesn't invalidate a camera start already in flight.
     const attempt = ++AppState.videoAttempt;
+    AppState.videoOwner = "screen";
     // The camera and the screen share the preview, so only one runs at a time.
     AppState.liveVideoManager.stopWebcam();
     showCameraState(false);
@@ -1807,6 +1814,7 @@ async function startScreenCapture() {
             await webRtcManager.attachVideoStream(screen.stream);
         } catch (err) {
             if (attempt !== AppState.videoAttempt) return;
+            AppState.videoOwner = null;
             console.error("Failed to attach screen share:", err);
             AppUI.showModal(`Could not share the screen: ${deviceErrorReason(err)}`);
             screen.stopCapture();
@@ -1831,8 +1839,18 @@ function sendFramesIfWebSocket(source) {
 
 // A camera or screen track ended; stop the WebRTC sender if it was sending it,
 // so the session (and a renegotiated one after resumption) doesn't keep it.
-function stopSendingVideoTrack(track) {
-    AppState.videoAttempt++;
+/**
+ * @param {MediaStreamTrack} track
+ * @param {"camera" | "screen"} [source]
+ */
+function stopSendingVideoTrack(track, source) {
+    // Only invalidate the current videoAttempt if this source actually claimed
+    // ownership: an already-ended screen pick before startScreenCapture()
+    // claims videoAttempt must not cancel a camera start in flight.
+    if (!source || AppState.videoOwner === source) {
+        AppState.videoAttempt++;
+        AppState.videoOwner = null;
+    }
     const webRtcManager = AppState.geminiLiveApi.webRtcManager;
     if (
         webRtcManager &&
@@ -1845,6 +1863,7 @@ function stopSendingVideoTrack(track) {
 
 function cameraBtnClick() {
     AppState.videoAttempt++;
+    AppState.videoOwner = null;
     const webRtcManager = webRtcManagerIfActive();
     if (webRtcManager) {
         webRtcManager.detachVideoStream();
@@ -2061,6 +2080,7 @@ function endSession() {
     abortPendingFunctionCalls("disconnected");
     stopAudioInput();
     AppState.videoAttempt++;
+    AppState.videoOwner = null;
     AppState.liveVideoManager.stopWebcam();
     AppState.liveScreenManager.stopCapture();
     showMicState(false);
