@@ -1713,8 +1713,9 @@ class GeminiLiveAPI {
                 turn_complete: true,
             },
         };
+        if (!this.sendMessage(textMessage)) return false;
         this.noteActivity();
-        return this.sendMessage(textMessage);
+        return true;
     }
 
     /**
@@ -1730,8 +1731,9 @@ class GeminiLiveAPI {
         const activityMessage = {
             realtime_input: start ? { activity_start: {} } : { activity_end: {} },
         };
+        if (!this.sendMessage(activityMessage)) return false;
         this.noteActivity();
-        return this.sendMessage(activityMessage);
+        return true;
     }
 
     /**
@@ -1788,15 +1790,17 @@ class GeminiLiveAPI {
      * @param {string} url - Target HTTP URL.
      * @param {Object} data - JSON payload to post.
      * @param {{signal?: AbortSignal, timeoutMs?: number}} [options] - `signal`
-     *     aborts the request; `timeoutMs` (if > 0) fails it with an Error whose
-     *     `timeout` is true when the reply hasn't fully arrived by then.
+     *     aborts the request; `timeoutMs` (if a finite number > 0, capped at
+     *     MAX_TIMEOUT_MS) fails it with an Error whose `timeout` is true when
+     *     the reply hasn't fully arrived by then.
      * @returns {Promise<Object>} Parsed JSON response; rejects on an HTTP error
      *     or a reply that isn't a JSON object.
      */
     async sendPostRequest(url, data, { signal, timeoutMs = 0 } = {}) {
-        if (!(timeoutMs > 0)) {
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
             return this.fetchJson(url, data, signal);
         }
+        const effectiveTimeoutMs = Math.min(timeoutMs, MAX_TIMEOUT_MS);
         // AbortSignal.any() and AbortSignal.timeout() would do this, but
         // any() needs Safari 17.4 and Firefox 124.
         const controller = new AbortController();
@@ -1810,14 +1814,17 @@ class GeminiLiveAPI {
         const timer = setTimeout(() => {
             timedOut = true;
             controller.abort();
-        }, timeoutMs);
+        }, effectiveTimeoutMs);
         try {
             return await this.fetchJson(url, data, controller.signal);
         } catch (error) {
             if (timedOut) {
-                throw Object.assign(new Error(`the server didn't answer within ${timeoutMs / 1000} s`), {
-                    timeout: true,
-                });
+                throw Object.assign(
+                    new Error(`the server didn't answer within ${effectiveTimeoutMs / 1000} s`),
+                    {
+                        timeout: true,
+                    }
+                );
             }
             throw error;
         } finally {

@@ -3190,3 +3190,93 @@ test("sendInitialSetupMessages() and _buildAvatarConfig() handle non-array respo
         assert.equal("avatar_config" in sent.setup, false);
     }
 });
+
+test("sendTextMessage() and sendVoiceActivityMessage() only note activity when sendMessage() succeeds", async () => {
+    const api = await idleApi(60);
+    api.isSetupComplete = true;
+    const longAgo = performance.now() - 60000;
+
+    // Socket missing or not OPEN: sends fail and must not postpone lastActivityAt.
+    for (const socket of [
+        null,
+        Object.assign(new FakeWebSocket(), { readyState: FakeWebSocket.CONNECTING }),
+        Object.assign(new FakeWebSocket(), { readyState: 2 }), // CLOSING
+        Object.assign(new FakeWebSocket(), { readyState: FakeWebSocket.CLOSED }),
+    ]) {
+        api.webSocket = socket;
+        api.lastActivityAt = longAgo;
+        assert.equal(api.sendTextMessage("hi"), false);
+        assert.equal(api.lastActivityAt, longAgo);
+        assert.equal(api.sendVoiceActivityMessage(true), false);
+        assert.equal(api.lastActivityAt, longAgo);
+        assert.equal(api.sendVoiceActivityMessage(false), false);
+        assert.equal(api.lastActivityAt, longAgo);
+    }
+
+    // Throwing webSocket.send() must not postpone lastActivityAt either.
+    const throwingWs = new FakeWebSocket();
+    throwingWs.send = () => {
+        throw new Error("send failed");
+    };
+    api.webSocket = throwingWs;
+    api.lastActivityAt = longAgo;
+    assert.throws(() => api.sendTextMessage("hi"), { message: "send failed" });
+    assert.equal(api.lastActivityAt, longAgo);
+    assert.throws(() => api.sendVoiceActivityMessage(true), { message: "send failed" });
+    assert.equal(api.lastActivityAt, longAgo);
+
+    // The idle timer still expires on schedule.
+    timers[api.idleTimer - 1].fn();
+    assert.equal(api.idleMessages.length, 1);
+
+    // An open socket sends both frames and updates lastActivityAt.
+    const openApi = await idleApi(60);
+    openApi.isSetupComplete = true;
+    openApi.lastActivityAt = 0;
+    assert.equal(openApi.sendTextMessage("hello"), true);
+    assert.ok(performance.now() - openApi.lastActivityAt < 1000);
+    openApi.lastActivityAt = 0;
+    assert.equal(openApi.sendVoiceActivityMessage(true), true);
+    assert.ok(performance.now() - openApi.lastActivityAt < 1000);
+    assert.equal(openApi.webSocket.sent.length, 2);
+});
+
+test("sendPostRequest() ignores non-finite/non-numeric timeoutMs and caps values above MAX_TIMEOUT_MS", async () => {
+    const limit = 2 ** 31 - 1;
+    const { api: okApi, timers: okTimers } = apiWithFetch(() => ({
+        type: "application/json",
+        text: '{"ok": true}',
+    }));
+    for (const timeoutMs of [0, -100, NaN, -Infinity, Infinity, "1000", true, null, { valueOf: () => 500 }]) {
+        const res = await okApi.sendPostRequest("/api/control", {}, { timeoutMs });
+        assert.deepEqual(plain(res), { ok: true });
+    }
+    assert.equal(okTimers.length, 0);
+
+    // Infinity arms no timer and still respects the caller's AbortSignal.
+    const { api: hangApi, timers: hangTimers } = apiWithFetch(() => "hang");
+    const controller = new AbortController();
+    const infiniteReq = hangApi.sendPostRequest("/api/control", {}, { signal: controller.signal, timeoutMs: Infinity });
+    assert.equal(hangTimers.length, 0);
+    controller.abort("cancelled");
+    await assert.rejects(infiniteReq, (reason) => reason === "cancelled");
+
+    // Finite values above MAX_TIMEOUT_MS are capped at MAX_TIMEOUT_MS so setTimeout never overflows.
+    for (const timeoutMs of [2 ** 31, 1e12]) {
+        const req = hangApi.sendPostRequest("/api/control", {}, { timeoutMs });
+        const firedMs = await fireNextTimer(hangTimers);
+        assert.equal(firedMs, limit);
+        await assert.rejects(req, {
+            timeout: true,
+            message: `the server didn't answer within ${limit / 1000} s`,
+        });
+    }
+
+    // Normal finite timeouts keep their exact duration.
+    const normalReq = hangApi.sendPostRequest("/api/control", {}, { timeoutMs: 5000 });
+    assert.equal(await fireNextTimer(hangTimers), 5000);
+    await assert.rejects(normalReq, {
+        timeout: true,
+        message: "the server didn't answer within 5 s",
+    });
+});
