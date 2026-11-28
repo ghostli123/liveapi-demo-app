@@ -160,6 +160,7 @@ class SmokeTestHelpersTest(unittest.TestCase):
                 "wss://example.com:8443/app/ws?session_id=s1",
             ),
             ("  HTTPS://http.example.com  ", "wss://http.example.com/ws?session_id=s1"),
+            ("\thttp://localhost:8080/\r\n", "ws://localhost:8080/ws?session_id=s1"),
             ("http://[::1]:8080/", "ws://[::1]:8080/ws?session_id=s1"),
             ("http://[::1]", "ws://[::1]/ws?session_id=s1"),
             ("http://[2001:db8::]", "ws://[2001:db8::]/ws?session_id=s1"),
@@ -169,6 +170,19 @@ class SmokeTestHelpersTest(unittest.TestCase):
 
         for bad in [
             "",
+            "   ",
+            None,
+            123,
+            "\x0bhttp://localhost:8080",
+            "\x0chttp://localhost:8080",
+            "http://localhost:8080\x0b",
+            "http://localhost:8080/\x0b",
+            "\u00a0http://localhost:8080",
+            "http://localhost:8080\u00a0",
+            "http://localhost:8080/\u00a0",
+            "http://localhost:8080/a\nb",
+            "http://localhost:8080/a b",
+            "http://localhost\x0b:8080",
             "localhost:8080",
             "ftp://localhost:8080",
             "ws://localhost:8080",
@@ -216,6 +230,46 @@ class SmokeTestHelpersTest(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     smoke_test._validate_timeout(bad)
+
+    def test_validate_environment_normalizes_and_rejects_invalid(self):
+        for good, expected in [
+            ("prod", "prod"),
+            ("  PROD  ", "prod"),
+            ("\tProd-Us-Rep\r\n", "prod-us-rep"),
+            ("  AUTOPUSH-COMMON  ", "autopush-common"),
+            ("Staging-Common", "staging-common"),
+            ("AUTOPUSH-VERTEX-BIDI", "autopush-vertex-bidi"),
+            ("aiplatform.us.rep.googleapis.com", "aiplatform.us.rep.googleapis.com"),
+            ("  AIPLATFORM.GOOGLEAPIS.COM\t\n", "aiplatform.googleapis.com"),
+            (
+                "custom-host.sandbox.googleapis.com",
+                "custom-host.sandbox.googleapis.com",
+            ),
+        ]:
+            with self.subTest(good=good):
+                self.assertEqual(smoke_test._validate_environment(good), expected)
+
+        for bad in [
+            "",
+            "   ",
+            "\x0bprod",
+            "\x0cprod",
+            "\u00a0prod",
+            "prod\u00a0",
+            "unknown",
+            "prod-bad",
+            "http://aiplatform.googleapis.com",
+            "aiplatform.googleapis.com:443",
+            "aiplatform.googleapis.com/path",
+            "-bad.googleapis.com",
+            "a..b.googleapis.com",
+            "\u212a.googleapis.com",  # Kelvin sign lowercases to ASCII 'k'
+            None,
+            123,
+        ]:
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    smoke_test._validate_environment(bad)
 
     def test_validate_location_normalizes_and_rejects_invalid(self):
         for good, expected in [
@@ -1048,6 +1102,122 @@ class SmokeTestRunTest(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(rc, 0, out)
                 self.assertEqual(seen_control[0]["location"], "us-central1")
+                self.assertEqual(seen_models, [expected_model])
+                self.assertIn("PASS", out)
+
+    async def test_invalid_environment_or_control_char_server_returns_1_without_request(
+        self,
+    ):
+        with mock.patch.object(smoke_test.aiohttp, "ClientSession") as session_cls:
+            for bad_env in (
+                "",
+                "   ",
+                "unknown",
+                "\x0bprod",
+                "\u00a0prod",
+                "https://aiplatform.googleapis.com",
+                None,
+            ):
+                with self.subTest(environment=bad_env):
+                    rc, out = await self._run_captured(
+                        _make_args("http://127.0.0.1:8080", environment=bad_env)
+                    )
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn(
+                        "FAIL: --environment must be a known environment or hostname",
+                        out,
+                    )
+            for bad_server in (
+                "\x0bhttp://127.0.0.1:8080",
+                "\x0chttp://127.0.0.1:8080",
+                "\u00a0http://127.0.0.1:8080",
+                "http://127.0.0.1:8080\u00a0",
+                "http://127.0.0.1:8080/a\nb",
+            ):
+                with self.subTest(server=bad_server):
+                    rc, out = await self._run_captured(_make_args(bad_server))
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn(
+                        "FAIL: --server must be an http:// or https:// URL", out
+                    )
+            session_cls.assert_not_called()
+
+    async def test_environment_is_normalized_in_control_and_setup(self):
+        for raw_env, expected_endpoint, control_body, expected_model in [
+            (
+                "  PROD  ",
+                "aiplatform.googleapis.com",
+                {"status": "ok", "project_id": "test-proj"},
+                "projects/test-proj/locations/us-central1/publishers/google/models/gemini-3.8-live",
+            ),
+            (
+                "PROD-US-REP",
+                "aiplatform.us.rep.googleapis.com",
+                {"status": "ok", "project_id": "test-proj"},
+                "projects/test-proj/locations/us-central1/publishers/google/models/gemini-3.8-live",
+            ),
+            (
+                "  AUTOPUSH-COMMON  ",
+                "autopush-common",
+                {"status": "ok"},
+                "models/gemini-3.8-live",
+            ),
+            (
+                "  AIPLATFORM.US.REP.GOOGLEAPIS.COM\t",
+                "aiplatform.us.rep.googleapis.com",
+                {"status": "ok", "project_id": "test-proj"},
+                "projects/test-proj/locations/us-central1/publishers/google/models/gemini-3.8-live",
+            ),
+        ]:
+            with self.subTest(environment=raw_env):
+                seen_control: list[dict] = []
+                seen_models: list[str] = []
+                app = web.Application()
+
+                async def control(
+                    request: web.Request,
+                    controls: list[dict] = seen_control,
+                    body: dict = control_body,
+                ) -> web.Response:
+                    controls.append(await request.json())
+                    return web.json_response(body)
+
+                async def ws_handler(
+                    request: web.Request, models: list[str] = seen_models
+                ) -> web.WebSocketResponse:
+                    ws = web.WebSocketResponse()
+                    await ws.prepare(request)
+                    setup = json.loads(await ws.receive_str())
+                    models.append(setup["setup"]["model"])
+                    await ws.send_str(json.dumps({"setupComplete": {}}))
+                    await ws.receive_str()
+                    await ws.send_str(
+                        json.dumps(
+                            {
+                                "serverContent": {
+                                    "modelTurn": {"parts": [{"text": "ok"}]},
+                                    "turnComplete": True,
+                                }
+                            }
+                        )
+                    )
+                    async for _ in ws:
+                        pass
+                    return ws
+
+                app.router.add_post("/api/control", control)
+                app.router.add_get("/ws", ws_handler)
+                server = await self._start_app(app)
+
+                rc, out = await self._run_captured(
+                    _make_args(
+                        str(server.make_url("")),
+                        environment=raw_env,
+                        timeout=1.5,
+                    )
+                )
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(seen_control[0]["endpoint"], expected_endpoint)
                 self.assertEqual(seen_models, [expected_model])
                 self.assertIn("PASS", out)
 

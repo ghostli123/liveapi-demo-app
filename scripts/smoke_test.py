@@ -22,6 +22,9 @@ from urllib.parse import urlsplit, urlunsplit
 import aiohttp
 
 _ASCII_WHITESPACE = " \t\r\n"
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
 _LOCATION_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$")
 
@@ -42,9 +45,21 @@ COMMON_BAG_ENVIRONMENTS = (
 )
 
 
-def _ws_url(server: str, session_id: str) -> str:
+def _has_control_or_space(value: str) -> bool:
+    return any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+
+
+def _ws_url(server: object, session_id: str) -> str:
     """Builds the /ws URL from an http(s) server URL."""
-    stripped = server.strip()
+    if not isinstance(server, str):
+        raise ValueError(
+            f"--server must be an http:// or https:// URL (got {server!r})"
+        )
+    stripped = server.strip(_ASCII_WHITESPACE)
+    if _has_control_or_space(stripped):
+        raise ValueError(
+            f"--server must be an http:// or https:// URL (got {server!r})"
+        )
     parts = urlsplit(stripped)
     scheme = parts.scheme.lower()
     if scheme not in ("http", "https") or not parts.hostname:
@@ -80,6 +95,29 @@ def _validate_timeout(timeout: object) -> float:
             f"--timeout must be a finite positive number (got {timeout!r})"
         )
     return value
+
+
+def _validate_environment(environment: object) -> str:
+    """Normalizes and validates --environment as a known name or ASCII hostname."""
+    if not isinstance(environment, str):
+        raise ValueError(
+            f"--environment must be a known environment or hostname (got {environment!r})"
+        )
+    stripped = environment.strip(_ASCII_WHITESPACE)
+    if not stripped or not stripped.isascii():
+        raise ValueError(
+            f"--environment must be a known environment or hostname (got {environment!r})"
+        )
+    normalized = stripped.lower()
+    if (
+        normalized in ENVIRONMENT_ENDPOINTS
+        or normalized in COMMON_BAG_ENVIRONMENTS
+        or _HOSTNAME_RE.fullmatch(normalized)
+    ):
+        return normalized
+    raise ValueError(
+        f"--environment must be a known environment or hostname (got {environment!r})"
+    )
 
 
 def _validate_location(location: object) -> str:
@@ -182,18 +220,18 @@ async def _release_pending_session(
 
 async def run(args: argparse.Namespace) -> int:
     session_id = str(uuid.uuid4())
-    environment = args.environment
-    endpoint = ENVIRONMENT_ENDPOINTS.get(environment, environment)
-    is_common_bag = environment in COMMON_BAG_ENVIRONMENTS
     try:
         ws_url = _ws_url(args.server, session_id)
         timeout = _validate_timeout(args.timeout)
+        environment = _validate_environment(args.environment)
         location = _validate_location(args.location)
         model_name = _validate_model(args.model)
     except ValueError as err:
         print(f"FAIL: {err}")
         return 1
-    server = args.server.strip().rstrip("/")
+    endpoint = ENVIRONMENT_ENDPOINTS.get(environment, environment)
+    is_common_bag = environment in COMMON_BAG_ENVIRONMENTS
+    server = args.server.strip(_ASCII_WHITESPACE).rstrip("/")
 
     stats = {
         "text": [],
