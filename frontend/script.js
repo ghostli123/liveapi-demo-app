@@ -1628,6 +1628,7 @@ function startMicLevelMeter(stream) {
         AppState.micLevelMeter.start(stream);
     } catch (err) {
         console.error("Could not start the microphone level meter:", err);
+        AppUI.setHidden("micLevel", true);
         return;
     }
     AppUI.setHidden("micLevel", false);

@@ -1836,6 +1836,79 @@ test("a mic level meter that fails to start leaves the microphone on without it"
 });
 
 for (const transport of ["websocket", "webrtc"]) {
+    test(`a ${transport} mic switch hides the level meter when MicLevelMeter.start throws`, async () => {
+        const errors = [];
+        let micStops = 0;
+        let startCount = 0;
+        let currentStream = null;
+        const startMic = async () => {
+            currentStream = { id: `mic-${++startCount}` };
+        };
+        const { context, element } = loadApp({
+            navigator: {},
+            requestAnimationFrame: () => 0,
+            console: { error: (...args) => errors.push(args.map(String).join(" ")), log() {}, warn() {} },
+            LiveAudioInputManager: class {
+                get stream() {
+                    return currentStream;
+                }
+                updateAudioInterval = startMic;
+                recordChunk() {}
+                disconnectMicrophone() {
+                    micStops++;
+                }
+            },
+            MicLevelMeter: class {
+                start(started) {
+                    if (started.id === "mic-2") {
+                        throw new Error("meter failed on switch");
+                    }
+                }
+                stop() {}
+            },
+        });
+        const api = context.AppState.geminiLiveApi;
+        api.transportMode = transport;
+        if (transport === "webrtc") {
+            api.webRtcManager = {
+                get micStream() {
+                    return currentStream;
+                },
+                startMicrophone: startMic,
+                stopMicrophone() {
+                    micStops++;
+                },
+            };
+        }
+        const settle = () => new Promise((resolve) => setImmediate(resolve));
+        element("micLevel").hidden = true;
+
+        // First mic succeeds and shows the level meter.
+        context.micOffBtnClick();
+        await settle();
+        assert.equal(element("micBtn").hidden, false);
+        assert.equal(element("micLevel").hidden, false);
+
+        // Switching to a second mic whose meter throws hides the stale meter while keeping the mic on.
+        element("audioSource").value = "mic-2";
+        context.newMicSelected();
+        await settle();
+        assert.equal(element("micBtn").hidden, false);
+        assert.equal(element("micOffBtn").hidden, true);
+        assert.equal(element("micLevel").hidden, true);
+        assert.equal(micStops, 0);
+        assert.equal(element("dialogMessage").textContent, undefined);
+        assert.deepEqual(errors, ["Could not start the microphone level meter: Error: meter failed on switch"]);
+
+        // Switching to a third mic whose meter succeeds shows the meter again.
+        element("audioSource").value = "mic-3";
+        context.newMicSelected();
+        await settle();
+        assert.equal(element("micLevel").hidden, false);
+    });
+}
+
+for (const transport of ["websocket", "webrtc"]) {
     test(`a ${transport} mic start superseded during its prompt leaves the level meter hidden`, async () => {
         // Each start waits on its own prompt; a superseded one ends without a
         // stream, as the real managers do after their generation check.
